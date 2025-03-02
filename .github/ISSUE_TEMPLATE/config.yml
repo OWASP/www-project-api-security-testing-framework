@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: OWASP API Security Testing Framework Community Discussions
+    url: https://github.com/OWASP/api-security-testing-framework/discussions
+    about: Please ask and answer questions here.
+  - name: OWASP API Security Project
+    url: https://owasp.org/www-project-api-security/
+    about: Learn more about the OWASP API Security Project.
+  - name: OWASP Slack Channel
+    url: https://owasp.org/slack/invite
+    about: Join the OWASP Slack workspace and the #api-security channel for real-time discussions.
