@@ -76,7 +76,7 @@ This project is licensed under the [Apache 2.0 License](https://www.apache.org/l
 ## Related Projects
 
 - [OWASP API Security Project](https://owasp.org/www-project-api-security/)
-- [OWASP ZAP](https://owasp.org/www-project-zap/)
+- [ZAP](https://wee.zaproxy.org)
 - [OWASP ASVS](https://owasp.org/www-project-application-security-verification-standard/)
 
 ## Getting Started
