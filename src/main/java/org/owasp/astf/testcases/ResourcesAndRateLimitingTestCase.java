@@ -369,5 +369,113 @@ public class ResourcesAndRateLimitingTestCase implements TestCase {
         
         return findings;
     }
+    
+    /**
+     * Tests for susceptibility to resource-intensive operations.
+     * This checks if the API implements throttling or limitations
+     * on complex queries and operations.
+     *
+     * @param endpoint The endpoint to test
+     * @param httpClient The HTTP client to use for requests
+     * @return A list of findings related to resource-intensive operations
+     */
+    private List<Finding> testResourceIntensiveOperations(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        try {
+            String fullUrl = "https://example.com" + endpoint.getPath();
+            Map<String, String> headers = Map.of("Authorization", "Bearer test-token");
+            
+            // Test for GraphQL endpoints that might be vulnerable to complex queries
+            if (endpoint.getPath().contains("graphql") || endpoint.getPath().contains("gql")) {
+                // Create a potentially expensive GraphQL query with deep nesting
+                String graphqlQuery = """
+                    {"query": "{
+                      users {
+                        profile {
+                          friends {
+                            profile {
+                              friends {
+                                profile {
+                                  friends {
+                                    profile
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }"}
+                    """.replaceAll("\\s+", " ").trim();
+
+                String response = httpClient.post(fullUrl, headers, "application/json", graphqlQuery);
+                
+                // If the complex query is accepted without a specific error about query complexity
+                if (response != null && 
+                    !response.toLowerCase().contains("query complexity") &&
+                    !response.toLowerCase().contains("query too complex") &&
+                    !response.toLowerCase().contains("depth limit exceeded")) {
+                    Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "GraphQL Query Complexity Not Limited",
+                        "The GraphQL endpoint appears to accept complex queries without limitations, which could lead to resource exhaustion.",
+                        Severity.HIGH,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Implement query complexity analysis and limitations for GraphQL queries. Set maximum query depth, complexity scores, and field count limits."
+                    );
+                    
+                    findings.add(finding);
+                }
+            }
+            
+            // Test for search/filter endpoints that might allow expensive operations
+            if (endpoint.getPath().contains("search") || 
+                endpoint.getPath().matches(".*/(filter|query|find).*")) {
+                
+                // Test with wildcards and potentially expensive search patterns
+                List<String> expensivePatterns = List.of(
+                    "*",                   // Wildcard search
+                    "%_%_%_%",             // Multiple wildcards
+                    "a%",                  // Leading wildcard
+                    ".*",                  // Regex pattern
+                    "OR 1=1"               // SQL injection pattern that might cause full table scan
+                );
+                
+                for (String pattern : expensivePatterns) {
+                    String queryString = "q=" + pattern;
+                    String urlWithParams = fullUrl + (fullUrl.contains("?") ? "&" : "?") + queryString;
+                    
+                    // Measure response time
+                    long startTime = System.currentTimeMillis();
+                    httpClient.get(urlWithParams, headers);
+                    long endTime = System.currentTimeMillis();
+                    long responseTime = endTime - startTime;
+                    
+                    // If the response time is very high, it might indicate an expensive operation
+                    if (responseTime > 5000) {
+                        Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "Expensive Search Operations Not Limited",
+                            "The search endpoint accepts patterns that lead to resource-intensive operations, with response times exceeding 5 seconds.",
+                            Severity.MEDIUM,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath() + " with pattern: " + pattern,
+                            "Implement time limits for search operations, restrict wildcard usage, and optimize query execution plans. Consider implementing search result limits and pagination."
+                        );
+                        
+                        findings.add(finding);
+                        break;  // One finding for this vulnerability is enough
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            logger.debug("Error testing resource-intensive operations on endpoint {}: {}", endpoint, e.getMessage());
+        }
+        
+        return findings;
+    }
 
 }
