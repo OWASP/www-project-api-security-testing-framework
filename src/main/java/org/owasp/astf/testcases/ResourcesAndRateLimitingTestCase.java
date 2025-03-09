@@ -281,5 +281,93 @@ public class ResourcesAndRateLimitingTestCase implements TestCase {
         return findings;
     }
 
-    
+    /**
+     * Tests how the API handles large request payloads.
+     * This checks if the API properly limits the size of payloads
+     * to prevent resource exhaustion.
+     *
+     * @param endpoint The endpoint to test
+     * @param httpClient The HTTP client to use for requests
+     * @return A list of findings related to large payload handling
+     */
+    private List<Finding> testLargePayloads(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        // Only test methods that accept request bodies
+        if (!endpoint.getMethod().equalsIgnoreCase("POST") && 
+            !endpoint.getMethod().equalsIgnoreCase("PUT") && 
+            !endpoint.getMethod().equalsIgnoreCase("PATCH")) {
+            return findings;
+        }
+
+        try {
+            String fullUrl = "https://example.com" + endpoint.getPath();
+            Map<String, String> headers = Map.of(
+                "Authorization", "Bearer test-token",
+                "Content-Type", "application/json"
+            );
+            
+            // Generate a large JSON payload
+            StringBuilder largePayload = new StringBuilder("{\"data\": \"");
+            // Create a payload of approximately LARGE_PAYLOAD_SIZE_KB KB
+            for (int i = 0; i < LARGE_PAYLOAD_SIZE_KB * 1024 / 2; i++) {
+                largePayload.append("AB");
+            }
+            largePayload.append("\"}");
+            
+            // Send the large payload
+            String response = null;
+            boolean payloadAccepted = false;
+            
+            try {
+                switch (endpoint.getMethod().toUpperCase()) {
+                    case "POST" -> response = httpClient.post(fullUrl, headers, "application/json", largePayload.toString());
+                    case "PUT" -> response = httpClient.put(fullUrl, headers, "application/json", largePayload.toString());
+                    case "PATCH" -> response = httpClient.put(fullUrl, headers, "application/json", largePayload.toString()); // Using PUT for PATCH
+                }
+                
+                // Since we can't check status codes directly, assume it was accepted if we got a response
+                // and it doesn't contain error messages about size
+                if (response != null && 
+                    !response.toLowerCase().contains("payload too large") &&
+                    !response.toLowerCase().contains("request entity too large") &&
+                    !response.toLowerCase().contains("content length exceeded")) {
+                    payloadAccepted = true;
+                }
+            } catch (Exception e) {
+                // If we get a specific error about payload size, it might actually be good
+                if (e.getMessage() != null && (
+                    e.getMessage().contains("413") || 
+                    e.getMessage().toLowerCase().contains("payload too large") ||
+                    e.getMessage().toLowerCase().contains("request entity too large") ||
+                    e.getMessage().toLowerCase().contains("content length exceeded"))) {
+                    // This is expected behavior - API is correctly limiting payload size
+                    payloadAccepted = false;
+                } else {
+                    // Other errors might indicate issues with the test rather than proper size limiting
+                    logger.debug("Non-size-related error in payload test: {}", e.getMessage());
+                }
+            }
+            
+            if (payloadAccepted) {
+                Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "Unbounded Request Payload Acceptance",
+                    "The API endpoint accepts very large request payloads, which could lead to resource exhaustion.",
+                    Severity.MEDIUM,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Implement size limits for request payloads and return 413 Payload Too Large when exceeded. Configure web server and API gateway limits appropriately."
+                );
+                
+                findings.add(finding);
+            }
+            
+        } catch (Exception e) {
+            logger.debug("Error testing large payloads on endpoint {}: {}", endpoint, e.getMessage());
+        }
+        
+        return findings;
+    }
+
 }
