@@ -142,8 +142,9 @@ public class ResourcesAndRateLimitingTestCase implements TestCase {
             int maxThreads = getConfigInt(MAX_THREADS_KEY, DEFAULT_MAX_THREADS);
             int requestIntervalMs = getConfigInt(REQUEST_INTERVAL_MS_KEY, DEFAULT_REQUEST_INTERVAL_MS);
 
-            // Use the base URL from the endpoint instead of hardcoding
-            String fullUrl = endpoint.getBaseUrl() + endpoint.getPath();
+            // Get the base URL from configuration instead of hardcoding
+            String baseUrl = configManager.getProperty("owasp.astf.api.baseUrl", "https://example.com");
+            String fullUrl = baseUrl + endpoint.getPath();
             ExecutorService executor = Executors.newFixedThreadPool(maxThreads);
             List<Future<?>> futures = new ArrayList<>();
             AtomicBoolean rateLimitDetected = new AtomicBoolean(false);
@@ -248,8 +249,9 @@ public class ResourcesAndRateLimitingTestCase implements TestCase {
             // Get configured value for pagination limit
             int paginationLimitTest = getConfigInt(PAGINATION_LIMIT_TEST_KEY, DEFAULT_PAGINATION_LIMIT_TEST);
 
-            // Use the base URL from the endpoint instead of hardcoding
-            String fullUrl = endpoint.getBaseUrl() + endpoint.getPath();
+            // Get the base URL from configuration instead of hardcoding
+            String baseUrl = configManager.getProperty("owasp.astf.api.baseUrl", "https://example.com");
+            String fullUrl = baseUrl + endpoint.getPath();
             Map<String, String> headers = Map.of("Authorization", "Bearer test-token");
 
             // Test with no pagination parameters
@@ -338,8 +340,9 @@ public class ResourcesAndRateLimitingTestCase implements TestCase {
             // Get configured value for large payload size
             int largePayloadSizeKb = getConfigInt(LARGE_PAYLOAD_SIZE_KB_KEY, DEFAULT_LARGE_PAYLOAD_SIZE_KB);
 
-            // Use the base URL from the endpoint instead of hardcoding
-            String fullUrl = endpoint.getBaseUrl() + endpoint.getPath();
+            // Get the base URL from configuration instead of hardcoding
+            String baseUrl = configManager.getProperty("owasp.astf.api.baseUrl", "https://example.com");
+            String fullUrl = baseUrl + endpoint.getPath();
             Map<String, String> headers = Map.of(
                     "Authorization", "Bearer test-token",
                     "Content-Type", "application/json");
