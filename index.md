@@ -41,7 +41,7 @@ The API Security Testing Framework welcomes contributions from the community. He
 - **Testing**: Try the framework on your APIs and provide feedback
 - **Use Cases**: Share your API security testing scenarios
 
-Join us on [GitHub](https://github.com/OWASP/api-security-testing-framework) to contribute.
+Join us on [GitHub](https://github.com/OWASP/API-Security) to contribute.
 
 ## Roadmap
 
