@@ -2,3 +2,6 @@
 /Gemfile.lock
 /favicon.ico
 _site/
+.idea/
+dependency-reduced-pom.xml
+target/
