@@ -1,0 +1,29 @@
+audience:
+  - breaker
+  - builder
+community:
+  - name: project-api-security-testing-framework
+    platform: slack
+    url: https://owasp.slack.com/archives/C08GUSMR4DQ
+    description: Official channel for OWASP API Security Testing Framework. Discuss development, share feedback, and collaborate on building automated tools
+      to detect API vulnerabilities based on OWASP API Security Top 10.
+leaders:
+  - name: Govindarajan Lakshmikanthan
+    email: govindarajan.lakshmikanthan@owasp.org
+    github: GovindarajanL
+level: 2
+license:
+  - Apache-2.0
+name: OWASP API Security Testing Framework
+pitch: A comprehensive automated testing framework for detecting API security vulnerabilities based on the OWASP API Security Top 10
+repositories:
+  - name: www-project-api-security-testing-framework
+    url: https://github.com/OWASP/www-project-api-security-testing-framework
+    description: OWASP Foundation web repository
+tags:
+  - api-security
+  - testing
+  - automation
+  - breaker
+type: tool
+website: https://owasp.org/www-project-api-security-testing-framework
