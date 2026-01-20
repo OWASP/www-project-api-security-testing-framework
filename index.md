@@ -41,7 +41,7 @@ The API Security Testing Framework welcomes contributions from the community. He
 - **Testing**: Try the framework on your APIs and provide feedback
 - **Use Cases**: Share your API security testing scenarios
 
-Join us on [GitHub](https://github.com/OWASP/api-security-testing-framework) to contribute.
+Join us on [GitHub](https://github.com/OWASP/www-project-api-security-testing-framework) to contribute.
 
 ## Roadmap
 
@@ -83,7 +83,7 @@ This project is licensed under the [Apache 2.0 License](https://www.apache.org/l
 
 ```bash
 # Clone the repository
-git clone https://github.com/OWASP/api-security-testing-framework.git
+git clone https://github.com/OWASP/www-project-api-security-testing-framework.git
 
 # Build the project
 mvn clean install
@@ -92,4 +92,4 @@ mvn clean install
 java -jar astf.jar --target http://example-api.com --auth-token TOKEN
 ```
 
-For more detailed instructions, please refer to our [GitHub repository](https://github.com/OWASP/api-security-testing-framework).
+For more detailed instructions, please refer to our [GitHub repository](https://github.com/OWASP/www-project-api-security-testing-framework).
