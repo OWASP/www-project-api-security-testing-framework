@@ -23,11 +23,21 @@ public class TestCaseRegistry {
     }
 
     /**
-     * Registers all default test cases.
+     * Registers all default test cases covering OWASP API Security Top 10 2023.
      */
     private void registerDefaultTestCases() {
-        // OWASP API Security Top 10
-       // Register all the test cases here
+        register(new BrokenObjectLevelAuthorizationTestCase());   // API1
+        register(new BrokenAuthenticationTestCase());              // API2
+        register(new BrokenObjectPropertyLevelAuthorizationTestCase()); // API3
+        register(new UnrestrictedResourceConsumptionTestCase());   // API4
+        register(new BrokenFunctionLevelAuthorizationTestCase());  // API5
+        register(new UnrestrictedAccessToSensitiveFlowsTestCase()); // API6
+        register(new ServerSideRequestForgeryTestCase());          // API7
+        register(new SecurityMisconfigurationTestCase());          // API8
+        register(new ImproperInventoryManagementTestCase());       // API9
+        register(new UnsafeConsumptionOfApisTestCase());           // API10
+        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023)",
+                availableTestCases.size());
     }
 
     /**
