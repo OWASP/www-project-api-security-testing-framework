@@ -92,6 +92,14 @@ public class Scanner {
                 return createEmptyScanResult();
             }
 
+            // Attach base URL to all endpoints for test cases to use
+            String targetUrl = config.getTargetUrl();
+            for (EndpointInfo ep : endpoints) {
+                if (ep.getBaseUrl() == null) {
+                    ep.setBaseUrl(targetUrl);
+                }
+            }
+
             // Get applicable test cases
             List<TestCase> testCases = testCaseRegistry.getEnabledTestCases(config);
             logger.info("Running {} test cases against {} endpoints", testCases.size(), endpoints.size());
