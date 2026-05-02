@@ -22,14 +22,14 @@ class TestCaseRegistryTest {
     }
 
     @Test
-    @DisplayName("Should register all 10 OWASP API Security Top 10 test cases by default")
+    @DisplayName("Should register all 12 default test cases (OWASP API Top 10 + GraphQL + gRPC)")
     void testDefaultRegistration() {
         List<TestCase> testCases = registry.getAllTestCases();
-        assertEquals(10, testCases.size(), "Should have 10 default test cases");
+        assertEquals(12, testCases.size(), "Should have 12 default test cases");
     }
 
     @Test
-    @DisplayName("Should register all expected OWASP test case IDs")
+    @DisplayName("Should register all expected OWASP test case IDs plus GraphQL and gRPC")
     void testExpectedTestCaseIds() {
         List<TestCase> testCases = registry.getAllTestCases();
         List<String> ids = testCases.stream().map(TestCase::getId).toList();
@@ -44,6 +44,8 @@ class TestCaseRegistryTest {
         assertTrue(ids.contains("ASTF-API8-2023"), "Should contain API8");
         assertTrue(ids.contains("ASTF-API9-2023"), "Should contain API9");
         assertTrue(ids.contains("ASTF-API10-2023"), "Should contain API10");
+        assertTrue(ids.contains("ASTF-GRAPHQL-2023"), "Should contain GraphQL test case");
+        assertTrue(ids.contains("ASTF-GRPC-2023"), "Should contain gRPC test case");
     }
 
     @Test
@@ -58,7 +60,7 @@ class TestCaseRegistryTest {
     @DisplayName("Should return all test cases when no enabled/disabled filters set")
     void testGetEnabledNoFilter() {
         List<TestCase> enabled = registry.getEnabledTestCases(config);
-        assertEquals(10, enabled.size());
+        assertEquals(12, enabled.size());
     }
 
     @Test
@@ -76,7 +78,7 @@ class TestCaseRegistryTest {
     void testGetEnabledWithDisabled() {
         config.setDisabledTestCaseIds(List.of("ASTF-API1-2023", "ASTF-API2-2023"));
         List<TestCase> enabled = registry.getEnabledTestCases(config);
-        assertEquals(8, enabled.size());
+        assertEquals(10, enabled.size());
         assertTrue(enabled.stream().noneMatch(tc ->
                 tc.getId().equals("ASTF-API1-2023") || tc.getId().equals("ASTF-API2-2023")));
     }

@@ -36,7 +36,9 @@ public class TestCaseRegistry {
         register(new SecurityMisconfigurationTestCase());          // API8
         register(new ImproperInventoryManagementTestCase());       // API9
         register(new UnsafeConsumptionOfApisTestCase());           // API10
-        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023)",
+        register(new GraphQLSecurityTestCase());                   // GraphQL-specific
+        register(new GrpcEndpointDetectionTestCase());             // gRPC detection
+        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023 + GraphQL/gRPC)",
                 availableTestCases.size());
     }
 
