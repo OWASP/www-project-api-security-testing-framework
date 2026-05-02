@@ -174,10 +174,10 @@ public class GitHubActionsResultProcessor implements ResultProcessor {
     public boolean createReport(ScanResult results, ScanConfig.OutputFormat format, File outputFile) {
         try {
             // Use the existing ReportGeneratorFactory to create the appropriate generator
-            ReportGenerator generator = ReportGeneratorFactory.createGenerator(format);
+            ReportGenerator generator = ReportGeneratorFactory.create(format);
 
             // Generate the report
-            generator.generateReport(results, outputFile.getAbsolutePath());
+            generator.generateToFile(results, outputFile.getAbsolutePath());
 
             logger.info("Created {} report at {}", format, outputFile.getAbsolutePath());
             return true;
