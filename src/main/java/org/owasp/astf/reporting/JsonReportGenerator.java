@@ -1,7 +1,9 @@
 package org.owasp.astf.reporting;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
 
@@ -12,94 +14,68 @@ import org.owasp.astf.core.result.ScanResult;
 import org.owasp.astf.core.result.Severity;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * Generates JSON reports from scan results.
- * <p>
- * This report generator creates JSON files containing all scan details and findings.
- * The JSON format is useful for automated processing, integration with other tools,
- * and creating custom visualizations.
- * </p>
+ * Generates security scan reports in JSON format.
  */
 public class JsonReportGenerator implements ReportGenerator {
     private static final Logger logger = LogManager.getLogger(JsonReportGenerator.class);
+    private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ISO_LOCAL_DATE_TIME;
 
-    private final ObjectMapper objectMapper;
+    private final ObjectMapper mapper;
 
-    /**
-     * Creates a new JSON report generator with default settings.
-     */
     public JsonReportGenerator() {
-        this.objectMapper = new ObjectMapper();
-        this.objectMapper.enable(SerializationFeature.INDENT_OUTPUT);
+        this.mapper = new ObjectMapper();
     }
 
     @Override
-    public void generateReport(ScanResult result, String outputPath) throws IOException {
-        logger.info("Generating JSON report at {}", outputPath);
+    public String generate(ScanResult result) throws IOException {
+        ObjectNode root = mapper.createObjectNode();
 
-        ObjectNode rootNode = objectMapper.createObjectNode();
+        root.put("tool", "OWASP API Security Testing Framework");
+        root.put("version", "1.0.0");
+        root.put("targetUrl", result.getTargetUrl());
+        root.put("scanStartTime", result.getScanStartTime() != null
+                ? result.getScanStartTime().format(FORMATTER) : "");
+        root.put("scanEndTime", result.getScanEndTime() != null
+                ? result.getScanEndTime().format(FORMATTER) : "");
+        root.put("totalFindings", result.getTotalFindingsCount());
 
-        // Add report metadata
-        rootNode.put("targetUrl", result.getTargetUrl());
-        rootNode.put("scanStartTime", result.getScanStartTime().format(DateTimeFormatter.ISO_DATE_TIME));
-        rootNode.put("scanEndTime", result.getScanEndTime().format(DateTimeFormatter.ISO_DATE_TIME));
-
-        // Add summary information
-        ObjectNode summaryNode = rootNode.putObject("summary");
-        summaryNode.put("totalFindings", result.getTotalFindingsCount());
-
-        // Add severity breakdown
-        ObjectNode severityNode = summaryNode.putObject("bySeverity");
+        // Severity summary
+        ObjectNode summary = mapper.createObjectNode();
         Map<Severity, Long> severitySummary = result.getSeveritySummary();
-        severityNode.put("critical", severitySummary.getOrDefault(Severity.CRITICAL, 0L));
-        severityNode.put("high", severitySummary.getOrDefault(Severity.HIGH, 0L));
-        severityNode.put("medium", severitySummary.getOrDefault(Severity.MEDIUM, 0L));
-        severityNode.put("low", severitySummary.getOrDefault(Severity.LOW, 0L));
-        severityNode.put("info", severitySummary.getOrDefault(Severity.INFO, 0L));
-
-        // Add all findings
-        ArrayNode findingsNode = rootNode.putArray("findings");
-        for (Finding finding : result.getFindings()) {
-            ObjectNode findingNode = findingsNode.addObject();
-            findingNode.put("id", finding.getId());
-            findingNode.put("title", finding.getTitle());
-            findingNode.put("description", finding.getDescription());
-            findingNode.put("severity", finding.getSeverity().name());
-            findingNode.put("testCaseId", finding.getTestCaseId());
-            findingNode.put("endpoint", finding.getEndpoint());
-
-            // Add optional fields if present
-            if (finding.getRequestDetails() != null) {
-                findingNode.put("requestDetails", finding.getRequestDetails());
-            }
-
-            if (finding.getResponseDetails() != null) {
-                findingNode.put("responseDetails", finding.getResponseDetails());
-            }
-
-            findingNode.put("remediation", finding.getRemediation());
-
-            if (finding.getEvidence() != null) {
-                findingNode.put("evidence", finding.getEvidence());
-            }
+        for (Severity sev : Severity.values()) {
+            summary.put(sev.name(), severitySummary.getOrDefault(sev, 0L));
         }
+        root.set("severitySummary", summary);
 
-        // Write to the output file
-        objectMapper.writeValue(new File(outputPath), rootNode);
-        logger.info("JSON report generated successfully with {} findings", result.getTotalFindingsCount());
+        // Findings
+        ArrayNode findingsArray = mapper.createArrayNode();
+        for (Finding f : result.getFindings()) {
+            ObjectNode node = mapper.createObjectNode();
+            node.put("id", f.getId());
+            node.put("title", f.getTitle());
+            node.put("description", f.getDescription());
+            node.put("severity", f.getSeverity().name());
+            node.put("testCaseId", f.getTestCaseId());
+            node.put("endpoint", f.getEndpoint());
+            node.put("remediation", f.getRemediation());
+            if (f.getEvidence() != null)        node.put("evidence", f.getEvidence());
+            if (f.getRequestDetails() != null)  node.put("requestDetails", f.getRequestDetails());
+            if (f.getResponseDetails() != null) node.put("responseDetails", f.getResponseDetails());
+            findingsArray.add(node);
+        }
+        root.set("findings", findingsArray);
+
+        return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
     }
 
     @Override
-    public String getName() {
-        return "JSON Report Generator";
-    }
-
-    @Override
-    public String getFileExtension() {
-        return "json";
+    public void generateToFile(ScanResult result, String outputPath) throws IOException {
+        String content = generate(result);
+        Files.write(Paths.get(outputPath), content.getBytes(StandardCharsets.UTF_8));
+        logger.info("JSON report written to {}", outputPath);
     }
 }
