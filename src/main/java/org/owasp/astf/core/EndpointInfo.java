@@ -9,6 +9,7 @@ public class EndpointInfo {
     private final String contentType;
     private String requestBody;
     private final boolean requiresAuthentication;
+    private String baseUrl;
 
     public EndpointInfo(String path, String method) {
         this.path = path;
@@ -43,6 +44,27 @@ public class EndpointInfo {
 
     public boolean isRequiresAuthentication() {
         return requiresAuthentication;
+    }
+
+    public String getBaseUrl() {
+        return baseUrl;
+    }
+
+    public void setBaseUrl(String baseUrl) {
+        this.baseUrl = baseUrl;
+    }
+
+    /**
+     * Returns the full URL by combining baseUrl and path.
+     * Falls back to path alone if baseUrl is not set.
+     */
+    public String getFullUrl() {
+        if (baseUrl != null && !baseUrl.isEmpty()) {
+            String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+            String p = path.startsWith("/") ? path : "/" + path;
+            return base + p;
+        }
+        return path;
     }
 
     @Override

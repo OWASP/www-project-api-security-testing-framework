@@ -10,7 +10,7 @@
 * [Meetup](#)
 
 ### Code Repository
-* [repo](#)
+* [repo](https://github.com/OWASP/www-project-api-security-testing-framework)
 
 ### Change Log
 * [changes](#)

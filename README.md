@@ -30,7 +30,7 @@ The OWASP API Security Testing Framework (ASTF) helps security professionals and
 
 ```bash
 # Clone the repository
-git clone https://github.com/OWASP/api-security-testing-framework.git
+git clone https://github.com/OWASP/www-project-api-security-testing-framework.git
 
 # Build the project
 cd api-security-testing-framework
@@ -66,6 +66,14 @@ api-security-testing-framework/
 ## Documentation
 
 For more detailed information, please refer to our [Documentation](docs/README.md).
+
+## Framework Overview
+
+For detailed understand on the framework, please refer to our [Framework Overview](docs/FRAMEWORK_OVERVIEW.md).
+
+## Architecture
+
+Please refer to our [Architecture](docs/ARCHITECTURE.md).
 
 ## Contributing
 
