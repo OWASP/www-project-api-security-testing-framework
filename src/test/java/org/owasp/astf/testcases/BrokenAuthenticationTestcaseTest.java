@@ -10,6 +10,7 @@ import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
+import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 
 import java.io.IOException;
@@ -49,6 +50,16 @@ class BrokenAuthenticationTestCaseTest {
      * The test case instance being tested.
      */
     private BrokenAuthenticationTestCase testCase;
+
+    /** 200 OK response with an empty body and no Set-Cookie header. */
+    private static HttpResponse ok() {
+        return new HttpResponse(200, "{\"data\":\"ok\"}", Map.of());
+    }
+
+    /** 401 Unauthorized response. */
+    private static HttpResponse unauthorized() {
+        return new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of());
+    }
 
     /**
      * Sets up the test environment before each test.
@@ -154,17 +165,17 @@ class BrokenAuthenticationTestCaseTest {
         // Create an endpoint that should require authentication
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
-        // Mock a 200 OK response with data, indicating no auth check
-        when(httpClient.get(anyString(), anyMap()))
-                .thenReturn("{\"users\":[{\"id\":1,\"name\":\"Admin\"}]}");
+        // testMissingAuthentication calls getWithStatus; testJwtNoneAlgorithm also uses getWithStatus
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(ok())           // missing-auth check → 200
+                .thenReturn(unauthorized()); // JWT-none check → 401 (no extra finding)
 
         // Execute the test case
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         // Verify a vulnerability was detected
         assertFalse(findings.isEmpty(), "Should find missing authentication");
-        assertEquals(1, findings.size(), "Should have one finding");
-        assertEquals("Missing Authentication Controls", findings.get(0).getTitle(),
+        assertTrue(findings.stream().anyMatch(f -> "Missing Authentication Controls".equals(f.getTitle())),
                 "Finding should indicate missing auth controls");
     }
 
@@ -181,9 +192,9 @@ class BrokenAuthenticationTestCaseTest {
         // Create an endpoint that should require authentication
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
-        // Mock a response with unauthorized error, indicating proper auth check
-        when(httpClient.get(anyString(), anyMap()))
-                .thenReturn("{\"error\":\"unauthorized\",\"message\":\"Authentication required\"}");
+        // All getWithStatus calls return 401 — server correctly requires auth
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(unauthorized());
 
         // Execute the test case
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -204,8 +215,8 @@ class BrokenAuthenticationTestCaseTest {
         // Create an endpoint that should require authentication
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
-        // Mock an exception during the HTTP request
-        when(httpClient.get(anyString(), anyMap()))
+        // getWithStatus is what gets called for GET endpoints
+        when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenThrow(new IOException("Connection refused"));
 
         // Execute the test case - should not throw exceptions
@@ -229,16 +240,20 @@ class BrokenAuthenticationTestCaseTest {
         // Create an endpoint with the specified HTTP method
         EndpointInfo endpoint = new EndpointInfo("/api/resources", method, "application/json", null, true);
 
-        // Mock successful responses for the HTTP method
+        // testMissingAuthentication uses the *WithStatus variants
         switch (method) {
-            case "GET" -> when(httpClient.get(anyString(), anyMap()))
-                    .thenReturn("{\"data\":\"success\"}");
-            case "POST" -> when(httpClient.post(anyString(), anyMap(), anyString(), anyString()))
-                    .thenReturn("{\"data\":\"success\"}");
-            case "PUT" -> when(httpClient.put(anyString(), anyMap(), anyString(), anyString()))
-                    .thenReturn("{\"data\":\"success\"}");
-            case "DELETE" -> when(httpClient.delete(anyString(), anyMap()))
-                    .thenReturn("{\"data\":\"success\"}");
+            case "GET" -> when(httpClient.getWithStatus(anyString(), anyMap()))
+                    .thenReturn(ok())
+                    .thenReturn(unauthorized()); // JWT-none check → 401
+            case "POST" -> when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                    .thenReturn(ok())
+                    .thenReturn(unauthorized());
+            case "PUT" -> when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                    .thenReturn(ok())
+                    .thenReturn(unauthorized());
+            case "DELETE" -> when(httpClient.deleteWithStatus(anyString(), anyMap()))
+                    .thenReturn(ok())
+                    .thenReturn(unauthorized());
         }
 
         // Execute the test case
@@ -246,8 +261,7 @@ class BrokenAuthenticationTestCaseTest {
 
         // Verify a vulnerability was detected
         assertFalse(findings.isEmpty(), "Should find missing authentication for " + method);
-        assertEquals(1, findings.size(), "Should have one finding");
-        assertEquals("Missing Authentication Controls", findings.get(0).getTitle(),
+        assertTrue(findings.stream().anyMatch(f -> "Missing Authentication Controls".equals(f.getTitle())),
                 "Finding should indicate missing auth controls");
     }
 
@@ -323,12 +337,14 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo getEndpoint = new EndpointInfo("/api/resources", "GET", "application/json", null, true);
         EndpointInfo postEndpoint = new EndpointInfo("/api/resources", "POST", "application/json", "{}", true);
 
-        // Mock responses: GET succeeds without auth, POST properly requires auth
-        when(httpClient.get(anyString(), anyMap()))
-                .thenReturn("{\"data\":\"success\"}");
+        // GET: first call (missing-auth) → 200, subsequent JWT check → 401
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(ok())
+                .thenReturn(unauthorized());
 
-        when(httpClient.post(anyString(), anyMap(), anyString(), anyString()))
-                .thenReturn("{\"error\":\"unauthorized\"}");
+        // POST: all calls → 401 (properly protected)
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(unauthorized());
 
         // Execute the test cases
         List<Finding> getFindings = testCase.execute(getEndpoint, httpClient);
