@@ -1,0 +1,12 @@
+# Minimal config — scan a JWT-protected API
+target:
+  url: "https://api.example.com"
+  discoveryEnabled: true
+
+auth:
+  bearerToken: "YOUR_TOKEN_HERE"
+
+output:
+  format: "HTML"
+  file: "report.html"
+  verbose: true

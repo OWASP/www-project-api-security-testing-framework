@@ -1,0 +1,53 @@
+{
+  "_comment": "OWASP API Security Testing Framework — Example JSON Configuration",
+  "_usage": "astf scan --config scan-config.json",
+
+  "target": {
+    "url": "https://api.example.com",
+    "discoveryEnabled": true,
+    "excludePatterns": ["/health", "/metrics", "/actuator/.*"],
+    "endpoints": []
+  },
+
+  "auth": {
+    "_comment": "Uncomment exactly one of the blocks below",
+    "bearerToken": null,
+    "apiKey": null,
+    "apiKeyHeader": "X-API-Key",
+    "basicAuthUsername": null,
+    "basicAuthPassword": null
+  },
+
+  "headers": {
+    "Accept": "application/json"
+  },
+
+  "proxy": {
+    "host": null,
+    "port": 0,
+    "username": null,
+    "password": null
+  },
+
+  "tests": {
+    "enabled": [],
+    "disabled": [],
+    "excludeSeverities": [],
+    "maxFindings": 0
+  },
+
+  "execution": {
+    "threads": 10,
+    "timeoutMinutes": 30,
+    "requestDelayMs": 0,
+    "maxRequestsPerSecond": 0,
+    "followRedirects": true,
+    "validateCertificates": true
+  },
+
+  "output": {
+    "format": "JSON",
+    "file": null,
+    "verbose": false
+  }
+}
