@@ -155,6 +155,87 @@ public class HttpClient {
     }
 
     /**
+     * Gets the target URL from configuration.
+     *
+     * @return The configured target URL
+     */
+    public String getTargetUrl() {
+        return config.getTargetUrl();
+    }
+
+    /**
+     * Makes a GET request and returns the full response including status code.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    public HttpResponse getWithStatus(String url, Map<String, String> headers) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "GET", headers, null, null));
+    }
+
+    /**
+     * Makes a POST request and returns the full response including status code.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @param contentType The content type of the request
+     * @param body The request body
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    public HttpResponse postWithStatus(String url, Map<String, String> headers, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "POST", headers, mediaType, requestBody));
+    }
+
+    /**
+     * Makes a PUT request and returns the full response including status code.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @param contentType The content type of the request
+     * @param body The request body
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    public HttpResponse putWithStatus(String url, Map<String, String> headers, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "PUT", headers, mediaType, requestBody));
+    }
+
+    /**
+     * Makes a DELETE request and returns the full response including status code.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    public HttpResponse deleteWithStatus(String url, Map<String, String> headers) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "DELETE", headers, null, null));
+    }
+
+    /**
+     * Makes a PATCH request and returns the full response including status code.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @param contentType The content type of the request
+     * @param body The request body
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    public HttpResponse patchWithStatus(String url, Map<String, String> headers, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "PATCH", headers, mediaType, requestBody));
+    }
+
+    /**
      * Makes a HEAD request to the specified URL.
      *
      * @param url The target URL
@@ -275,6 +356,21 @@ public class HttpClient {
                 return response.body().string();
             }
             return "";
+        }
+    }
+
+    /**
+     * Executes a request and returns the full HTTP response including status code.
+     *
+     * @param request The HTTP request to execute
+     * @return The full HTTP response
+     * @throws IOException If the request fails
+     */
+    private HttpResponse executeRequestWithStatus(Request request) throws IOException {
+        try (Response response = client.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "";
+            Map<String, List<String>> headers = extractHeaders(response);
+            return new HttpResponse(response.code(), body, headers);
         }
     }
 
