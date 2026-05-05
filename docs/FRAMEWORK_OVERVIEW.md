@@ -22,22 +22,22 @@ Discovery can be disabled with `--no-discovery` when endpoints are known.
 
 ### 2. Security Testing — 12 Test Cases
 
-Every discovered endpoint is tested by all 12 active test cases:
+Every discovered endpoint is tested by all 12 active test cases. This represents **100% coverage of the OWASP API Security Top 10 2023**, plus dedicated GraphQL and gRPC checks.
 
-| ID | Name | What It Detects |
-|---|---|---|
-| `ASTF-API1-2023` | **Broken Object Level Authorization** | BOLA/IDOR — accessing other users' resources by manipulating IDs |
-| `ASTF-API2-2023` | **Broken Authentication** | Missing auth controls, JWT `none` algorithm, expired token acceptance, tokens in URLs, 2FA bypass |
-| `ASTF-API3-2023` | **Broken Object Property Level Authorization** | Excessive data exposure (password/secret fields), mass assignment via POST |
-| `ASTF-API4-2023` | **Unrestricted Resource Consumption** | Missing rate limiting headers, no request throttling |
-| `ASTF-API5-2023` | **Broken Function Level Authorization** | Admin endpoints accessible without elevated privileges |
-| `ASTF-API6-2023` | **Unrestricted Access to Sensitive Flows** | Rate-limit and bot-protection missing on login, payment, OTP flows |
-| `ASTF-API7-2023` | **Server-Side Request Forgery** | SSRF via URL parameters and POST body fields (`url`, `webhook`, `redirect`, etc.) |
-| `ASTF-API8-2023` | **Security Misconfiguration** | Missing security headers, verbose error messages, CORS misconfiguration |
-| `ASTF-API9-2023` | **Improper Inventory Management** | Deprecated API versions (`/v1`, `/v2`), shadow/undocumented endpoints, exposed API docs |
-| `ASTF-API10-2023` | **Unsafe Consumption of APIs** | Injection via webhook/integration endpoints, open redirect |
-| `ASTF-GRAPHQL-2023` | **GraphQL Security** | Introspection enabled, field suggestion leakage, query depth attacks, batch query abuse |
-| `ASTF-GRPC-2023` | **gRPC Endpoint Detection** | gRPC service detection, server reflection enabled (schema enumeration risk) |
+| ID | Name | Class | Detection Logic |
+|---|---|---|---|
+| `ASTF-API1-2023` | **Broken Object Level Authorization** | `BrokenObjectLevelAuthorizationTestCase` | Manipulates numeric IDs and UUIDs in URL path segments to request resources belonging to other users; flags 2xx responses |
+| `ASTF-API2-2023` | **Broken Authentication** | `BrokenAuthenticationTestCase` | Tests for: missing auth (unauthenticated 200 response), JWT `none` algorithm acceptance, expired JWT acceptance (`exp=1000000000`), tokens in URL query params, 2FA bypass with guessable OTPs (000000, 123456…), session cookies missing HttpOnly/Secure/SameSite flags |
+| `ASTF-API3-2023` | **Broken Object Property Level Authorization** | `BrokenObjectPropertyLevelAuthorizationTestCase` | Scans GET responses for sensitive field names (`password`, `secret`, `ssn`, `credit_card`); sends POST with extra fields to detect mass assignment |
+| `ASTF-API4-2023` | **Unrestricted Resource Consumption** | `UnrestrictedResourceConsumptionTestCase` | Checks responses for absence of `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `Retry-After` headers on endpoints that consume significant resources |
+| `ASTF-API5-2023` | **Broken Function Level Authorization** | `BrokenFunctionLevelAuthorizationTestCase` | Probes administrative paths (`/admin`, `/internal`, `/manage`, `/superuser`) without elevated tokens; flags 2xx or 403→200 transitions |
+| `ASTF-API6-2023` | **Unrestricted Access to Sensitive Flows** | `UnrestrictedAccessToSensitiveFlowsTestCase` | Identifies sensitive flow paths (`/login`, `/otp`, `/payment`, `/reset-password`) and checks for rate-limiting headers and CAPTCHA indicators |
+| `ASTF-API7-2023` | **Server-Side Request Forgery** | `ServerSideRequestForgeryTestCase` | Injects the AWS EC2 metadata URL (`http://169.254.169.254/latest/meta-data/ami-id`) into `url`, `webhook`, `redirect`, and `callback` parameters in both query strings and POST bodies; flags responses containing `ami-id` |
+| `ASTF-API8-2023` | **Security Misconfiguration** | `SecurityMisconfigurationTestCase` | Checks for absence of `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`, `Content-Security-Policy`; checks for stack traces and verbose error messages in 4xx/5xx responses |
+| `ASTF-API9-2023` | **Improper Inventory Management** | `ImproperInventoryManagementTestCase` | Probes legacy versioned paths (`/v1/`, `/v2/`), shadow paths (`/beta/`, `/internal/`, `/dev/`), and exposed API documentation endpoints (`/swagger-ui`, `/graphiql`, `/api-docs`) |
+| `ASTF-API10-2023` | **Unsafe Consumption of APIs** | `UnsafeConsumptionOfApisTestCase` | Sends injection payloads (`<script>`, `../`, SQL fragments) to webhook/integration endpoints; checks for open redirect by injecting an external domain into redirect parameters |
+| `ASTF-GRAPHQL-2023` | **GraphQL Security** | `GraphQLSecurityTestCase` | (1) Sends introspection query — flags `__schema` in response; (2) Sends misspelled field — flags "Did you mean" hint; (3) Sends 10-level nested query — flags 2xx response; (4) Sends batched operation array — flags array response |
+| `ASTF-GRPC-2023` | **gRPC Endpoint Detection** | `GrpcEndpointDetectionTestCase` | POSTs to `/grpc.health.v1.Health/Check` and sibling paths with `Content-Type: application/grpc`; flags responses with matching content-type. Separately checks `/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo` for active reflection service |
 
 ### 3. Vulnerability Reporting
 
