@@ -1,0 +1,77 @@
+name: Release
+
+# Triggers when you push a tag like v1.0.0-beta or v1.2.3
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required to create GitHub Releases and upload assets
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v3
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Run full test suite
+        run: mvn --batch-mode --no-transfer-progress test
+
+      - name: Build fat JAR
+        run: mvn --batch-mode --no-transfer-progress package -DskipTests
+
+      # Rename the JAR to include the tag version, e.g. astf-v1.0.0-beta.jar
+      - name: Rename JAR with version tag
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mv target/api-security-testing-framework-1.0-SNAPSHOT.jar \
+             target/astf-${VERSION}.jar
+          echo "JAR_NAME=astf-${VERSION}.jar" >> $GITHUB_ENV
+
+      # Detect whether this is a pre-release (tag contains alpha/beta/rc)
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          if echo "${{ github.ref_name }}" | grep -qE '(alpha|beta|rc)'; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release and upload JAR
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "ASTF ${{ github.ref_name }}"
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
+          generate_release_notes: true
+          files: target/${{ env.JAR_NAME }}
+          body: |
+            ## OWASP API Security Testing Framework ${{ github.ref_name }}
+
+            ### Quick Start
+            ```bash
+            # Download the JAR from Assets below, then:
+            java -jar ${{ env.JAR_NAME }} -u https://api.example.com -f HTML -o results.html -v
+            ```
+
+            ### Requirements
+            - Java 21+
+
+            ### What's included
+            - 12 security test cases — full OWASP API Security Top 10 2023 + GraphQL + gRPC
+            - Output formats: JSON, HTML, SARIF, XML
+            - Auto endpoint discovery
+            - 224 passing unit tests
+
+            See the [README](https://github.com/OWASP/www-project-api-security-testing-framework#readme)
+            and [docs/](https://github.com/OWASP/www-project-api-security-testing-framework/tree/main/docs)
+            for full documentation.
