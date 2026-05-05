@@ -138,46 +138,92 @@ The scanner uses a thread pool to execute test cases concurrently:
 3. Uses Java 21 virtual threads for efficiency
 4. Results are synchronized to prevent race conditions
 
+## Registered Test Cases
+
+The `TestCaseRegistry` registers 12 test cases at startup:
+
+| ID | Class | Category |
+|---|---|---|
+| `ASTF-API1-2023` | `BrokenObjectLevelAuthorizationTestCase` | API1:2023 |
+| `ASTF-API2-2023` | `BrokenAuthenticationTestCase` | API2:2023 |
+| `ASTF-API3-2023` | `BrokenObjectPropertyLevelAuthorizationTestCase` | API3:2023 |
+| `ASTF-API4-2023` | `UnrestrictedResourceConsumptionTestCase` | API4:2023 |
+| `ASTF-API5-2023` | `BrokenFunctionLevelAuthorizationTestCase` | API5:2023 |
+| `ASTF-API6-2023` | `UnrestrictedAccessToSensitiveFlowsTestCase` | API6:2023 |
+| `ASTF-API7-2023` | `ServerSideRequestForgeryTestCase` | API7:2023 |
+| `ASTF-API8-2023` | `SecurityMisconfigurationTestCase` | API8:2023 |
+| `ASTF-API9-2023` | `ImproperInventoryManagementTestCase` | API9:2023 |
+| `ASTF-API10-2023` | `UnsafeConsumptionOfApisTestCase` | API10:2023 |
+| `ASTF-GRAPHQL-2023` | `GraphQLSecurityTestCase` | API3/4/8:2023 |
+| `ASTF-GRPC-2023` | `GrpcEndpointDetectionTestCase` | API8/9:2023 |
+
 ## Adding New Test Cases
 
 To add a new test case:
 
-1. Create a class implementing the `TestCase` interface
-2. Implement the required methods
+1. Create a class implementing the `TestCase` interface in `src/main/java/org/owasp/astf/testcases/`
+2. Implement the four required methods
 3. Register the test case in `TestCaseRegistry.registerDefaultTestCases()`
-4. Add unit tests for the new test case
+4. Add unit tests (see any existing `*TestCaseTest.java` for the Mockito pattern)
 
-Example:
+Example skeleton:
 
 ```java
 public class NewVulnerabilityTestCase implements TestCase {
-    @Override
-    public String getId() {
-        return "ASTF-API11-2023";
-    }
+    private static final Logger logger = LogManager.getLogger(NewVulnerabilityTestCase.class);
 
     @Override
-    public String getName() {
-        return "New Vulnerability";
-    }
+    public String getId() { return "ASTF-API11-2023"; }
 
     @Override
-    public String getDescription() {
-        return "Tests for a new type of vulnerability";
-    }
+    public String getName() { return "New Vulnerability"; }
+
+    @Override
+    public String getDescription() { return "Tests for a new type of API vulnerability."; }
 
     @Override
     public List<Finding> execute(EndpointInfo endpoint, HttpClient httpClient) throws IOException {
-        // Implement vulnerability detection logic
-        // Return list of findings (or empty list if none found)
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse response = httpClient.getWithStatus(endpoint.getFullUrl(), Map.of());
+            if (response != null && /* detection condition */) {
+                findings.add(new Finding(
+                    UUID.randomUUID().toString(),
+                    "Finding Title",
+                    "Description of what is wrong and why it matters.",
+                    Severity.HIGH,
+                    getId(),
+                    "GET " + endpoint.getPath(),
+                    "How to fix this vulnerability."
+                ));
+            }
+        } catch (Exception e) {
+            logger.debug("Error in {}: {}", getId(), e.getMessage());
+        }
+        return findings;
     }
 }
 ```
 
+## Test Coverage
+
+The framework has **224 passing unit tests** across 25 test suites, covering:
+
+- All 12 test case implementations (positive and negative cases)
+- Core scanner, HTTP client, configuration loader
+- All 4 report generators (JSON, HTML, SARIF, XML)
+- GitHub Actions result processor
+- Endpoint discovery service
+
+Run the full suite:
+```bash
+mvn test
+```
+
 ## Future Architecture Enhancements
 
-1. Plugin system for custom test cases
-2. Distributed scanning capabilities
-3. Real-time reporting and notification
-4. Machine learning-based detection improvements
-5. Integration with vulnerability management platforms
+1. Plugin system for custom test cases loaded from JARs
+2. Distributed scanning capabilities for large API surfaces
+3. Real-time reporting and notification webhooks
+4. OpenAPI/Swagger spec import for precise endpoint targeting
+5. Integration with vulnerability management platforms (Defect Dojo, Jira)
