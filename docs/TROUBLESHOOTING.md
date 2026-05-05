@@ -49,7 +49,7 @@ Could not find artifact org.apache.maven.plugins:maven-resources-plugin:jar:3.4.
 ```
 
 **Cause:** The version of Maven on the runner uses `3.4.0` as its default, which has not been published to Maven Central.  
-**Fix:** The `pom.xml` already pins `maven-resources-plugin` to `3.3.1`. If you see this error, ensure you are building from the latest `main` branch.
+**Fix:** The `pom.xml` already pins `maven-resources-plugin` to `3.3.1`. Ensure you are building from the latest `main` branch.
 
 ---
 
@@ -74,7 +74,7 @@ Error: Process completed with exit code 2.
 INFO  EndpointDiscoveryService - Discovered 0 unique endpoints
 ```
 
-**Cause:** The target may require authentication before it returns any valid responses, or uses non-standard paths.  
+**Cause:** The target may require authentication before returning valid responses, or uses non-standard paths.  
 **Fix options:**
 - Provide a Bearer token: `--token "YOUR_JWT"`
 - Disable discovery and specify endpoints manually in a config file
@@ -84,8 +84,8 @@ INFO  EndpointDiscoveryService - Discovered 0 unique endpoints
 
 ### `UserDetailsService returned null` on crAPI login
 
-**Cause:** crAPI requires email verification before the first login. The verification link is sent to the mailbox configured in its mail service (port 8025 on local installs).  
-**Fix (local Docker install):** Open `http://localhost:8025` in a browser, find the verification email, and click the link before logging in.  
+**Cause:** crAPI requires email verification before the first login.  
+**Fix (local Docker install):** Open `http://localhost:8025` in a browser, find the verification email, and click the link.  
 **Fix (public demo):** Use a Mailinator or similar inbox for the registered email address.
 
 ---
@@ -115,7 +115,7 @@ javax.net.ssl.SSLHandshakeException: PKIX path building failed
 ```
 
 **Cause:** The target uses a self-signed or corporate CA certificate.  
-**Fix:** Import the certificate into the Java trust store, or for testing only, disable TLS validation via the config file:
+**Fix:** Import the certificate into the Java trust store, or disable TLS validation in the config file (testing only):
 
 ```yaml
 execution:
@@ -124,30 +124,82 @@ execution:
 
 ---
 
+## Release Troubleshooting
+
+### Release workflow did not trigger after pushing a tag
+
+**Cause:** The tag may not match the `v*` pattern, or the workflow file wasn't on `main` when the tag was pushed.  
+**Check:**
+```bash
+git tag -l          # list all tags
+git ls-remote --tags origin   # confirm tag reached remote
+```
+The `release.yml` workflow only fires on tags pushed to the remote — a local tag alone won't trigger it.
+
+---
+
+### Release workflow failed at the test step
+
+The release workflow runs the full test suite before building the JAR. If any of the 224 tests fail, the release is aborted — no JAR is published and no GitHub Release is created.  
+**Fix:** Check the failed Actions run for the test failure, fix it on `main`, delete the tag, and re-tag:
+
+```bash
+# Delete tag locally and remotely, then re-push after the fix
+git tag -d v1.0.0-beta
+git push origin :refs/tags/v1.0.0-beta
+
+# After fixing and merging to main:
+git tag v1.0.0-beta
+git push origin v1.0.0-beta
+```
+
+---
+
+### JAR not attached to the GitHub Release
+
+**Cause:** The `softprops/action-gh-release` action requires `contents: write` permission. This is set in `release.yml`, but if the workflow was modified, the permission may have been removed.  
+**Check:** Open the failed Actions run → look for a `403 Resource not accessible by integration` error in the "Create GitHub Release" step.  
+**Fix:** Ensure `release.yml` contains:
+```yaml
+permissions:
+  contents: write
+```
+
+---
+
+### Downloaded JAR won't run — `UnsupportedClassVersionError`
+
+```
+java.lang.UnsupportedClassVersionError: ... (class file version 65.0)
+```
+
+**Cause:** The JAR was compiled with Java 21 but you are running it with Java 17 or older. Class file version 65.0 = Java 21.  
+**Fix:** Install Java 21+:
+```bash
+java -version   # must show 21 or higher
+```
+
+---
+
 ## Reporting Issues
 
-This is a **beta** release — we actively want your feedback.
+This is a **beta release** — we actively want your feedback.
 
 ### Bug Reports
-
-Use the [Bug Report template](.github/ISSUE_TEMPLATE/bug_report.md). Include:
-- ASTF version (`-V` flag output)
+Use the [Bug Report template](../.github/ISSUE_TEMPLATE/bug_report.md). Include:
+- ASTF version (`java -jar astf-v1.0.0-beta.jar -V`)
 - Java version (`java -version`)
-- The command you ran (redact any tokens)
-- The full error from `astf-scan.log`
+- The exact command you ran (redact any tokens)
+- Relevant output from `astf-scan.log`
 
-Open a bug report: [github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=bug_report.md](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=bug_report.md)
+[→ Open a bug report](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=bug_report.md)
 
 ### Feature Requests
-
-Use the [Feature Request template](.github/ISSUE_TEMPLATE/feature_request.md) to propose new test cases, output formats, or integrations.
-
-Open a feature request: [github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=feature_request.md](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=feature_request.md)
+[→ Open a feature request](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=feature_request.md)
 
 ### Test Case Enhancements
-
-If a specific vulnerability detection is missing or producing false positives, use the [Test Case Enhancement template](.github/ISSUE_TEMPLATE/test_case_enhancement.md).
+If a detection is missing or producing false positives:  
+[→ Open a test case enhancement](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=test_case_enhancement.md)
 
 ### Documentation Improvements
-
-Use the [Documentation Improvement template](.github/ISSUE_TEMPLATE/documentation_improvement.md) for anything unclear or missing in these docs.
+[→ Open a documentation issue](https://github.com/OWASP/www-project-api-security-testing-framework/issues/new?template=documentation_improvement.md)
