@@ -125,10 +125,11 @@ See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for the f
 ```
 Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
             [--api-key-header=<apiKeyHeader>] [-c=<configFile>]
-            [--exclude-tests=<ids>] [-f=<format>] [-o=<outputFile>]
-            [--password=<password>] [--proxy=<proxyUrl>] [-t=<threads>]
-            [--test-cases=<ids>] [--timeout=<minutes>] [--token=<bearerToken>]
-            [-u=<targetUrl>] [--username=<username>] [--header=<Key:Value>]...
+            [--endpoints-file=<file>] [--exclude-tests=<ids>] [-f=<format>]
+            [-o=<outputFile>] [--password=<password>] [--proxy=<proxyUrl>]
+            [-t=<threads>] [--test-cases=<ids>] [--timeout=<minutes>]
+            [--token=<bearerToken>] [-u=<targetUrl>] [--username=<username>]
+            [--header=<Key:Value>]...
 ```
 
 | Flag | Short | Description | Default |
@@ -144,6 +145,7 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--password` | | Basic auth password | — |
 | `--header` | | Extra header `Key:Value` (repeatable) | — |
 | `--proxy` | | Proxy URL e.g. `http://proxy:8080` | — |
+| `--endpoints-file` | | File of endpoints to test (`METHOD /path` per line). Skips discovery. | — |
 | `--threads` | `-t` | Concurrent threads | `10` |
 | `--timeout` | | Scan timeout in minutes | `30` |
 | `--test-cases` | | Comma-separated test case IDs to run | all |
@@ -152,6 +154,30 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--verbose` | `-v` | Verbose output | false |
 | `--version` | `-V` | Print version | — |
 | `--help` | `-h` | Show help | — |
+
+### Endpoint Input Precedence
+
+When multiple endpoint sources are configured, ASTF uses this order (highest wins):
+
+| Priority | Source | How |
+|---|---|---|
+| 1 | `--endpoints-file` CLI flag | Overrides everything |
+| 2 | `endpoints:` inline YAML block | In config file |
+| 3 | `endpointsFile:` YAML key | In config file |
+| 4 | Automatic discovery | OpenAPI probing + common paths |
+| 5 | Fallback hardcoded paths | When discovery finds nothing |
+
+```bash
+# Scan only specific endpoints from a file
+java -jar astf-v1.0.0-beta.jar -u https://api.example.com \
+  --endpoints-file my-endpoints.txt --token "TOKEN"
+
+# my-endpoints.txt format:
+# GET  /api/v1/users
+# GET  /api/v1/users/{id}
+# POST /api/v1/users
+# DELETE /api/v1/users/{id}
+```
 
 ### Exit Codes
 

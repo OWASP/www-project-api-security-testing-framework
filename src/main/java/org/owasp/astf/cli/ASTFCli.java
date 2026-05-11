@@ -28,25 +28,33 @@ import picocli.CommandLine.Option;
  * Usage: astf [OPTIONS]
  *
  * Options:
- *   -u, --url           Target API base URL (required)
- *   -c, --config        Path to configuration file (YAML/JSON/properties)
- *   -o, --output        Output file path
- *   -f, --format        Output format: JSON (default), XML, HTML, SARIF
- *   -t, --threads       Number of concurrent threads (default: 10)
- *   --token             Bearer token for authentication
- *   --api-key           API key for authentication
- *   --api-key-header    Header name for API key (default: X-API-Key)
- *   --username          Basic auth username
- *   --password          Basic auth password
- *   --header            Additional headers in Key:Value format (repeatable)
- *   --proxy             Proxy URL (e.g., http://proxy:8080)
- *   --no-discovery      Disable automatic endpoint discovery
- *   --test-cases        Comma-separated list of test case IDs to run
- *   --exclude-tests     Comma-separated list of test case IDs to skip
- *   --timeout           Scan timeout in minutes (default: 30)
- *   --verbose, -v       Enable verbose output
- *   --version, -V       Print version and exit
- *   --help, -h          Show help
+ *   -u, --url              Target API base URL (required)
+ *   -c, --config           Path to configuration file (YAML/JSON/properties)
+ *   -o, --output           Output file path
+ *   -f, --format           Output format: JSON (default), XML, HTML, SARIF
+ *   -t, --threads          Number of concurrent threads (default: 10)
+ *   --token                Bearer token for authentication
+ *   --api-key              API key for authentication
+ *   --api-key-header       Header name for API key (default: X-API-Key)
+ *   --username             Basic auth username
+ *   --password             Basic auth password
+ *   --header               Additional headers in Key:Value format (repeatable)
+ *   --proxy                Proxy URL (e.g., http://proxy:8080)
+ *   --endpoints-file       Path to a file containing endpoints to test (one per line: METHOD /path)
+ *   --no-discovery         Disable automatic endpoint discovery
+ *   --test-cases           Comma-separated list of test case IDs to run
+ *   --exclude-tests        Comma-separated list of test case IDs to skip
+ *   --timeout              Scan timeout in minutes (default: 30)
+ *   --verbose, -v          Enable verbose output
+ *   --version, -V          Print version and exit
+ *   --help, -h             Show help
+ *
+ * Endpoint input precedence (highest to lowest):
+ *   1. --endpoints-file (CLI flag)
+ *   2. endpoints (inline YAML block in config file)
+ *   3. endpointsFile (YAML config key)
+ *   4. Automatic discovery
+ *   5. Fallback hardcoded endpoints
  * </pre>
  */
 @Command(
@@ -95,6 +103,11 @@ public class ASTFCli implements Callable<Integer> {
 
     @Option(names = {"--proxy"}, description = "Proxy URL (e.g., http://proxy:8080)")
     private String proxyUrl;
+
+    @Option(names = {"--endpoints-file"},
+            description = "Path to a file of endpoints to test, one per line (format: METHOD /path). " +
+                          "Skips automatic discovery. Lines starting with # are ignored.")
+    private String endpointsFile;
 
     @Option(names = {"--no-discovery"}, description = "Disable automatic endpoint discovery")
     private boolean noDiscovery;
@@ -206,6 +219,19 @@ public class ASTFCli implements Callable<Integer> {
         }
         if (disabledTestCases != null) {
             config.setDisabledTestCaseIds(List.of(disabledTestCases.split(",\\s*")));
+        }
+
+        // Endpoint input — CLI --endpoints-file takes highest precedence (REQ-001, REQ-006)
+        // Lower-precedence sources (inline endpoints, endpointsFile YAML key) are resolved
+        // during config file parsing in ConfigLoader.parseJsonConfig().
+        if (endpointsFile != null) {
+            ConfigLoader loader = new ConfigLoader();
+            List<EndpointInfo> manualEndpoints = loader.loadEndpointsFromFile(endpointsFile);
+            config.setEndpoints(manualEndpoints);
+            logger.info("Using {} user-provided endpoints from {} — skipping automatic discovery",
+                    manualEndpoints.size(), endpointsFile);
+            System.out.printf("Endpoints: %d loaded from %s (discovery skipped)%n",
+                    manualEndpoints.size(), endpointsFile);
         }
 
         // Add API key header if API key is configured but no header set yet
