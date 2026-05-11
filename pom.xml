@@ -19,7 +19,7 @@
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jackson.version>2.15.3</jackson.version>
-        <log4j.version>2.22.1</log4j.version>
+        <log4j.version>2.25.4</log4j.version>
         <picocli.version>4.7.5</picocli.version>
         <junit.version>5.10.1</junit.version>
         <mockito.version>5.8.0</mockito.version>
