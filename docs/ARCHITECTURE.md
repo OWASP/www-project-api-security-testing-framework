@@ -207,7 +207,7 @@ public class NewVulnerabilityTestCase implements TestCase {
 
 ## Test Coverage
 
-The framework has **224 passing unit tests** across 25 test suites, covering:
+The framework has **229 passing unit tests** across 25 test suites, covering:
 
 - All 12 test case implementations (positive and negative cases)
 - Core scanner, HTTP client, configuration loader

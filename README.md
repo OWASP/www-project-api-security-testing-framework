@@ -3,7 +3,7 @@
 [![OWASP Incubator](https://img.shields.io/badge/owasp-incubator-blue.svg)](https://owasp.org/www-project-api-security-testing-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-224%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-229%20passing-brightgreen.svg)](#)
 [![Release](https://img.shields.io/github/v/release/OWASP/www-project-api-security-testing-framework?include_prereleases&label=latest)](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)
 
 A comprehensive automated testing framework for detecting API security vulnerabilities based on the **OWASP API Security Top 10 2023**.
@@ -25,7 +25,7 @@ Download the latest pre-built JAR directly from the [GitHub Releases page](https
 
 ```bash
 # Download the latest beta release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.0.0-beta.jar
+curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.1.0-beta.jar
 ```
 
 Or build from source:
@@ -41,7 +41,7 @@ mvn clean package -DskipTests
 
 **Option A — Inline flags** (quickest):
 ```bash
-java -jar astf-v1.0.0-beta.jar \
+java -jar astf-v1.1.0-beta.jar \
   -u https://api.example.com \
   --token "YOUR_BEARER_TOKEN" \
   -f HTML -o results.html -v
@@ -49,12 +49,12 @@ java -jar astf-v1.0.0-beta.jar \
 
 **Option B — Config file** (recommended for repeatable scans):
 ```bash
-java -jar astf-v1.0.0-beta.jar -c docs/examples/scan-config.yaml
+java -jar astf-v1.1.0-beta.jar -c docs/examples/scan-config.yaml
 ```
 
 **Option C — Against OWASP crAPI** (zero-config proof of concept):
 ```bash
-java -jar astf-v1.0.0-beta.jar \
+java -jar astf-v1.1.0-beta.jar \
   -u http://crapi.apisec.ai \
   -f HTML -o crapi-report.html --timeout 3
 # Auto-discovers 832 endpoints, detects 11 vulnerability types
@@ -73,17 +73,17 @@ start crapi-report.html
 
 ## Releases
 
-Releases are published automatically when a version tag is pushed. The workflow runs all 224 tests, builds the fat JAR, and attaches it to the GitHub Release.
+Releases are published automatically when a version tag is pushed. The workflow runs all 229 tests, builds the fat JAR, and attaches it to the GitHub Release.
 
 | Tag format | Release type | Example |
 |---|---|---|
-| `v*-beta` | Pre-release | `v1.0.0-beta` ← current |
+| `v*-beta` | Pre-release | `v1.1.0-beta` ← current |
 | `v*-rc*` | Release candidate | `v1.0.0-rc1` |
 | `v*` (no suffix) | Stable release | `v1.0.0` |
 
 **[→ View all releases](https://github.com/OWASP/www-project-api-security-testing-framework/releases)**
 
-The JAR asset on each release is named `astf-<tag>.jar`, e.g. `astf-v1.0.0-beta.jar`. Use this name in your CI pipelines to pin a specific version.
+The JAR asset on each release is named `astf-<tag>.jar`, e.g. `astf-v1.1.0-beta.jar`. Use this name in your CI pipelines to pin a specific version.
 
 ---
 
@@ -169,7 +169,7 @@ When multiple endpoint sources are configured, ASTF uses this order (highest win
 
 ```bash
 # Scan only specific endpoints from a file
-java -jar astf-v1.0.0-beta.jar -u https://api.example.com \
+java -jar astf-v1.1.0-beta.jar -u https://api.example.com \
   --endpoints-file my-endpoints.txt --token "TOKEN"
 
 # my-endpoints.txt format:
@@ -210,10 +210,10 @@ java -jar astf-v1.0.0-beta.jar -u https://api.example.com \
 
 Run only specific test cases:
 ```bash
-java -jar astf-v1.0.0-beta.jar -u https://api.example.com \
+java -jar astf-v1.1.0-beta.jar -u https://api.example.com \
   --test-cases ASTF-API1-2023,ASTF-API2-2023
 
-java -jar astf-v1.0.0-beta.jar -u https://api.example.com \
+java -jar astf-v1.1.0-beta.jar -u https://api.example.com \
   --exclude-tests ASTF-GRAPHQL-2023,ASTF-GRPC-2023
 ```
 
@@ -280,11 +280,11 @@ jobs:
 
       - name: Download ASTF
         run: |
-          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.0.0-beta.jar
+          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.1.0-beta.jar
 
       - name: Run ASTF scan
         run: |
-          java -jar astf-v1.0.0-beta.jar \
+          java -jar astf-v1.1.0-beta.jar \
             -u ${{ secrets.API_URL }} \
             --token ${{ secrets.API_TOKEN }} \
             -f SARIF -o results.sarif \
@@ -307,7 +307,7 @@ jobs:
 ### Gate on HIGH/CRITICAL only (not every finding)
 
 ```bash
-java -jar astf-v1.0.0-beta.jar \
+java -jar astf-v1.1.0-beta.jar \
   -u $API_URL --token $TOKEN -f JSON -o results.json
 
 HIGH_CRIT=$(jq '[.findings[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' results.json)
@@ -333,7 +333,7 @@ www-project-api-security-testing-framework/
 │   │   │   └── integrations/  # GitHub Actions result processor
 │   │   └── resources/
 │   │       └── log4j2.xml     # Logging configuration
-│   └── test/                  # 224 unit tests across 25 test suites
+│   └── test/                  # 229 unit tests across 25 test suites
 ├── docs/
 │   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 12 test cases, crAPI results
 │   ├── ARCHITECTURE.md        # Component design, data flow, extension guide
@@ -380,11 +380,11 @@ To add a new test case, see [Adding New Test Cases](docs/ARCHITECTURE.md#adding-
 ```bash
 # 1. Ensure main is green (all CI checks pass)
 # 2. Tag and push — the release workflow does everything else
-git tag v1.0.0-beta
-git push origin v1.0.0-beta
+git tag v1.1.0-beta
+git push origin v1.1.0-beta
 ```
 
-The `release.yml` workflow will run all 224 tests, build `astf-v1.0.0-beta.jar`,
+The `release.yml` workflow will run all 229 tests, build `astf-v1.1.0-beta.jar`,
 create a GitHub Release marked as pre-release, and attach the JAR as a downloadable asset.
 
 ---
