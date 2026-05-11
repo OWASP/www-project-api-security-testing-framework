@@ -9,20 +9,32 @@ target:
   # Base URL of the API under test (trailing slash is added automatically).
   url: "https://api.example.com"
 
-  # Explicitly list endpoints to test instead of relying on auto-discovery.
-  # Each entry requires at minimum a path and HTTP method.
-  # endpoints:
-  #   - path: "/api/v1/users"
-  #     method: "GET"
-  #     requiresAuthentication: true
-  #     contentType: "application/json"
-  #   - path: "/api/v1/users/{id}"
-  #     method: "PUT"
-  #     requiresAuthentication: true
-
   # Enable automatic endpoint discovery (OpenAPI spec, common paths, etc.).
-  # Set to false if you provide an explicit endpoints list above.
+  # Set to false if you provide an explicit endpoints list below.
   discoveryEnabled: true
+
+
+# ── Manual endpoint input (all three methods are optional — use at most one) ──
+#
+# OPTION A — Inline endpoint list (highest config-file precedence)
+# Discovery is skipped automatically when endpoints are provided here.
+# endpoints:
+#   - path: "/api/v1/users"
+#     method: "GET"
+#   - path: "/api/v1/users/{id}"
+#     method: "GET"
+#   - path: "/api/v1/users"
+#     method: "POST"
+#   - path: "/api/v1/users/{id}"
+#     method: "DELETE"
+#
+# OPTION B — Load endpoints from an external text file (lower precedence than inline)
+# File format: one endpoint per line — METHOD /path
+# Lines starting with # are comments; blank lines are ignored.
+# endpointsFile: "/path/to/endpoints.txt"
+#
+# OPTION C — CLI flag (highest overall precedence, overrides both options above)
+# Pass --endpoints-file /path/to/endpoints.txt when running astf
 
   # URL path patterns to skip during scanning (regex supported).
   excludePatterns:

@@ -240,6 +240,41 @@ public class ConfigLoader {
             }
         }
 
+        // Endpoint input — REQ-002: endpointsFile YAML key
+        // REQ-006 precedence: endpointsFile < inline endpoints (inline wins if both present)
+        if (root.has("endpointsFile")) {
+            String filePath = root.get("endpointsFile").asText();
+            try {
+                List<EndpointInfo> fileEndpoints = loadEndpointsFromFile(filePath);
+                config.setEndpoints(fileEndpoints);
+                logger.info("Loaded {} endpoints from endpointsFile: {}", fileEndpoints.size(), filePath);
+            } catch (IOException e) {
+                logger.warn("Could not load endpointsFile '{}': {}", filePath, e.getMessage());
+            }
+        }
+
+        // REQ-003: inline endpoints array — takes precedence over endpointsFile (REQ-006)
+        if (root.has("endpoints") && root.get("endpoints").isArray()) {
+            List<EndpointInfo> inlineEndpoints = new ArrayList<>();
+            root.get("endpoints").forEach(node -> {
+                String path = node.has("path") ? node.get("path").asText() : null;
+                if (path == null || path.isBlank()) {
+                    logger.warn("Skipping inline endpoint with missing or blank path: {}", node);
+                    return;
+                }
+                String method = node.has("method") ? node.get("method").asText().toUpperCase() : "GET";
+                inlineEndpoints.add(new EndpointInfo(path, method));
+            });
+            if (!inlineEndpoints.isEmpty()) {
+                if (!config.getEndpoints().isEmpty()) {
+                    logger.warn("Both 'endpoints' (inline) and 'endpointsFile' are specified — " +
+                                "inline endpoints take precedence (endpointsFile ignored)");
+                }
+                config.setEndpoints(inlineEndpoints);
+                logger.info("Loaded {} inline endpoints from config", inlineEndpoints.size());
+            }
+        }
+
         // Test case configuration
         if (root.has("enableTestCases") && root.get("enableTestCases").isArray()) {
             JsonNode enableTests = root.get("enableTestCases");

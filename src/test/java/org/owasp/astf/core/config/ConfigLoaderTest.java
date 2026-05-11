@@ -229,6 +229,124 @@ class ConfigLoaderTest {
     }
 
     // -------------------------------------------------------------------------
+    // REQ-002: endpointsFile YAML key
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("REQ-002: Should load endpoints via endpointsFile YAML key")
+    void testLoadEndpointsViaYamlKey(@TempDir Path tempDir) throws IOException {
+        String endpointsContent = """
+                GET /api/v1/users
+                POST /api/v1/users
+                DELETE /api/v1/users/{id}
+                """;
+        Path endpointsFile = tempDir.resolve("endpoints.txt");
+        Files.writeString(endpointsFile, endpointsContent);
+
+        String yaml = "targetUrl: https://api.example.com\n" +
+                      "endpointsFile: " + endpointsFile.toString().replace("\\", "/") + "\n";
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(3, config.getEndpoints().size());
+        assertEquals("GET",  config.getEndpoints().get(0).getMethod());
+        assertEquals("/api/v1/users", config.getEndpoints().get(0).getPath());
+        assertEquals("POST", config.getEndpoints().get(1).getMethod());
+        assertEquals("DELETE", config.getEndpoints().get(2).getMethod());
+    }
+
+    @Test
+    @DisplayName("REQ-002: Should warn and continue when endpointsFile path does not exist")
+    void testMissingEndpointsFileYamlKey(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpointsFile: /nonexistent/endpoints.txt
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        // Should not throw — logs a warning and continues with empty endpoint list
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+        assertNotNull(config);
+        assertTrue(config.getEndpoints().isEmpty());
+    }
+
+    // -------------------------------------------------------------------------
+    // REQ-003: inline endpoints YAML block
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("REQ-003: Should load inline endpoints array from YAML config")
+    void testLoadInlineEndpoints(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /api/v1/users
+                    method: GET
+                  - path: /api/v1/users/{id}
+                    method: DELETE
+                  - path: /api/v1/orders
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(3, config.getEndpoints().size());
+        assertEquals("GET",    config.getEndpoints().get(0).getMethod());
+        assertEquals("/api/v1/users", config.getEndpoints().get(0).getPath());
+        assertEquals("DELETE", config.getEndpoints().get(1).getMethod());
+        // method defaults to GET when omitted
+        assertEquals("GET",    config.getEndpoints().get(2).getMethod());
+        assertEquals("/api/v1/orders", config.getEndpoints().get(2).getPath());
+    }
+
+    @Test
+    @DisplayName("REQ-003: Inline endpoints entry without path should be skipped")
+    void testInlineEndpointMissingPath(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /api/v1/users
+                    method: GET
+                  - method: POST
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        // Entry without path is skipped; only the valid one is loaded
+        assertEquals(1, config.getEndpoints().size());
+        assertEquals("/api/v1/users", config.getEndpoints().get(0).getPath());
+    }
+
+    @Test
+    @DisplayName("REQ-006: Inline endpoints take precedence over endpointsFile when both are set")
+    void testInlineEndpointsTakePrecedenceOverEndpointsFile(@TempDir Path tempDir) throws IOException {
+        String fileContent = "GET /from-file\n";
+        Path endpointsFile = tempDir.resolve("endpoints.txt");
+        Files.writeString(endpointsFile, fileContent);
+
+        String yaml = "targetUrl: https://api.example.com\n" +
+                      "endpointsFile: " + endpointsFile.toString().replace("\\", "/") + "\n" +
+                      "endpoints:\n" +
+                      "  - path: /from-inline\n" +
+                      "    method: POST\n";
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        // Inline wins
+        assertEquals(1, config.getEndpoints().size());
+        assertEquals("/from-inline", config.getEndpoints().get(0).getPath());
+        assertEquals("POST", config.getEndpoints().get(0).getMethod());
+    }
+
+    // -------------------------------------------------------------------------
     // System properties
     // -------------------------------------------------------------------------
 
