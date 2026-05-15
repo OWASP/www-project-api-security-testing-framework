@@ -64,6 +64,14 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
             return findings;
         }
 
+        // Rate limiting on intentionally public endpoints (e.g. /api/info, /api/v1/settings.public)
+        // is a DoS concern, not an authentication/data-security concern. Skip to avoid noise —
+        // the user explicitly marked these as auth: false in their config.
+        if (!endpoint.isRequiresAuthentication()) {
+            logger.debug("Skipping rate-limit test for public endpoint {} {}", endpoint.getMethod(), endpoint.getPath());
+            return findings;
+        }
+
         int successCount = 0;
         int rateLimitedCount = 0;
         String fullUrl = endpoint.getFullUrl();
