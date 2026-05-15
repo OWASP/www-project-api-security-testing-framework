@@ -233,8 +233,29 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
         try {
             String fullUrl = endpoint.getFullUrl();
+
+            // Step 1 — baseline probe: send the request with NO auth header.
+            // If the server returns 2xx without any credentials the endpoint is public;
+            // a subsequent 2xx with a JWT-none token tells us nothing (it would have
+            // returned 2xx anyway).  Only proceed when the baseline is 4xx/5xx.
+            HttpResponse baseline = switch (endpoint.getMethod().toUpperCase()) {
+                case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
+                default       -> httpClient.getWithStatus(fullUrl, Map.of());
+            };
+
+            if (baseline == null || baseline.isSuccess()) {
+                // Endpoint is publicly accessible — JWT-none test would be a false positive.
+                logger.debug("Skipping JWT-none test for {} {} — endpoint is publicly accessible (baseline HTTP {})",
+                        endpoint.getMethod(), endpoint.getPath(),
+                        baseline == null ? "null" : baseline.getStatusCode());
+                return findings;
+            }
+
+            // Step 2 — send the JWT-none token.  A 2xx response NOW means the unsigned
+            // token bypassed authentication on an endpoint that normally requires it.
             Map<String, String> noneAlgHeaders = Map.of("Authorization", "Bearer " + NONE_ALG_JWT);
-            // Use the endpoint's own method so mocks remain consistent in tests
             HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
                 case "POST"   -> httpClient.postWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
                 case "PUT"    -> httpClient.putWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
@@ -255,7 +276,8 @@ public class BrokenAuthenticationTestCase implements TestCase {
                         "Use a whitelist of accepted signing algorithms."
                 );
                 finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
-                        " when presented with a JWT using 'none' algorithm");
+                        " when presented with a JWT using 'none' algorithm (baseline without auth: HTTP " +
+                        baseline.getStatusCode() + ")");
                 findings.add(finding);
             }
         } catch (Exception e) {
@@ -324,6 +346,24 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
         try {
             String fullUrl = endpoint.getFullUrl();
+
+            // Step 1 — baseline probe with no auth.  If the endpoint is public (returns 2xx
+            // without credentials) an expired-JWT "bypass" is meaningless — skip it.
+            HttpResponse baseline = switch (endpoint.getMethod().toUpperCase()) {
+                case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
+                default       -> httpClient.getWithStatus(fullUrl, Map.of());
+            };
+
+            if (baseline == null || baseline.isSuccess()) {
+                logger.debug("Skipping expired-JWT test for {} {} — endpoint is publicly accessible (baseline HTTP {})",
+                        endpoint.getMethod(), endpoint.getPath(),
+                        baseline == null ? "null" : baseline.getStatusCode());
+                return findings;
+            }
+
+            // Step 2 — send expired JWT only when the baseline required auth.
             Map<String, String> expiredJwtHeaders = Map.of("Authorization", "Bearer " + EXPIRED_JWT);
 
             HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
@@ -346,7 +386,8 @@ public class BrokenAuthenticationTestCase implements TestCase {
                         "and use short-lived tokens (e.g. 15-60 minutes) with refresh-token rotation."
                 );
                 finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
-                        " when presented with a JWT whose exp=1000000000 (September 2001)");
+                        " when presented with a JWT whose exp=1000000000 (September 2001)" +
+                        " (baseline without auth: HTTP " + baseline.getStatusCode() + ")");
                 findings.add(finding);
             }
         } catch (Exception e) {

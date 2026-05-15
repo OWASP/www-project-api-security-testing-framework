@@ -347,6 +347,77 @@ class ConfigLoaderTest {
     }
 
     // -------------------------------------------------------------------------
+    // auth flag on inline endpoints
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("auth: false marks endpoint as not requiring authentication")
+    void testInlineEndpointAuthFalse(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - { path: /api/info,           method: GET, auth: false }
+                  - { path: /api/v1/users,        method: GET }
+                  - { path: /api/v1/settings.public, method: GET, auth: false }
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(3, config.getEndpoints().size());
+        assertFalse(config.getEndpoints().get(0).isRequiresAuthentication(),
+                "/api/info marked auth:false should have requiresAuthentication=false");
+        assertTrue(config.getEndpoints().get(1).isRequiresAuthentication(),
+                "/api/v1/users with no auth flag should default to requiresAuthentication=true");
+        assertFalse(config.getEndpoints().get(2).isRequiresAuthentication(),
+                "/api/v1/settings.public marked auth:false should have requiresAuthentication=false");
+    }
+
+    @Test
+    @DisplayName("requiresAuthentication: false is accepted as long-form alias for auth: false")
+    void testInlineEndpointRequiresAuthenticationFalse(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /api/public
+                    method: GET
+                    requiresAuthentication: false
+                  - path: /api/protected
+                    method: GET
+                    requiresAuthentication: true
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(2, config.getEndpoints().size());
+        assertFalse(config.getEndpoints().get(0).isRequiresAuthentication(),
+                "requiresAuthentication: false should map to requiresAuthentication=false");
+        assertTrue(config.getEndpoints().get(1).isRequiresAuthentication(),
+                "requiresAuthentication: true should map to requiresAuthentication=true");
+    }
+
+    @Test
+    @DisplayName("auth flag defaults to true when omitted from inline endpoint")
+    void testInlineEndpointAuthDefaultsToTrue(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - { path: /api/v1/users, method: GET }
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertTrue(config.getEndpoints().get(0).isRequiresAuthentication(),
+                "Endpoint without auth flag must default to requiresAuthentication=true");
+    }
+
+    // -------------------------------------------------------------------------
     // System properties
     // -------------------------------------------------------------------------
 

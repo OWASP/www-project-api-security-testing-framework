@@ -62,14 +62,22 @@ class BrokenAuthenticationExtendedTest {
     /**
      * An endpoint that requires authentication should flag an expired JWT when the server
      * returns 200 for it (meaning the server does not validate the exp claim).
+     *
+     * The mock is realistic: the baseline probe (no Authorization header) returns 401,
+     * confirming the endpoint requires auth — then the expired-JWT probe returns 200,
+     * triggering the finding.
      */
     @Test
     @DisplayName("testJwtAnalysis: flags expired JWT accepted by server")
     void testExpiredJwtAccepted() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
-        // Server returns 200 when an expired JWT is sent
-        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok());
+        // Realistic mock: 401 without auth (baseline), 200 with any Authorization header
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    return hdrs.containsKey("Authorization") ? ok() : unauthorized();
+                });
 
         List<Finding> findings = testCase.testJwtAnalysis(endpoint, httpClient);
 
@@ -89,11 +97,30 @@ class BrokenAuthenticationExtendedTest {
     void testExpiredJwtRejected() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
+        // Server rejects everything — both baseline probe and expired-JWT probe return 401
         when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(unauthorized());
 
         List<Finding> findings = testCase.testJwtAnalysis(endpoint, httpClient);
 
         assertTrue(findings.isEmpty(), "No finding expected when server rejects expired JWT");
+    }
+
+    /**
+     * Public endpoint (baseline returns 200 without auth): expired-JWT test must be skipped
+     * entirely to avoid false positives.
+     */
+    @Test
+    @DisplayName("testJwtAnalysis: no false positive on public endpoint")
+    void testExpiredJwtNoFalsePositiveOnPublicEndpoint() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/info", "GET", "application/json", null, true);
+
+        // Public endpoint — always returns 200 regardless of auth header
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok());
+
+        List<Finding> findings = testCase.testJwtAnalysis(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(),
+                "Should NOT flag expired JWT on a public endpoint — baseline 200 means auth is irrelevant");
     }
 
     /**

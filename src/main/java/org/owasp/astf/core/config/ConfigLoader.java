@@ -263,7 +263,17 @@ public class ConfigLoader {
                     return;
                 }
                 String method = node.has("method") ? node.get("method").asText().toUpperCase() : "GET";
-                inlineEndpoints.add(new EndpointInfo(path, method));
+
+                // Support explicit auth flag: auth: false OR requiresAuthentication: false
+                // Defaults to true so that unmarked endpoints are tested for auth controls.
+                boolean requiresAuth = true;
+                if (node.has("auth")) {
+                    requiresAuth = node.get("auth").asBoolean(true);
+                } else if (node.has("requiresAuthentication")) {
+                    requiresAuth = node.get("requiresAuthentication").asBoolean(true);
+                }
+
+                inlineEndpoints.add(new EndpointInfo(path, method, "application/json", null, requiresAuth));
             });
             if (!inlineEndpoints.isEmpty()) {
                 if (!config.getEndpoints().isEmpty()) {
