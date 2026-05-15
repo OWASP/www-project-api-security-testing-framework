@@ -207,6 +207,53 @@ class BrokenAuthenticationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT flag JWT none-algorithm on public endpoints (false positive prevention)")
+    void testJwtNoneAlgorithmNoFalsePositiveOnPublicEndpoint() throws IOException {
+        // This is the root cause of the Rocket.Chat false positive:
+        // /api/info returns 200 to everyone — the test must not flag it as a JWT-none bypass.
+        EndpointInfo endpoint = new EndpointInfo("/api/info", "GET", "application/json", null, true);
+
+        // Public endpoint — always returns 200 regardless of auth header (or lack thereof)
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"version\":\"8.5\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        // "Missing Authentication Controls" finding is expected (endpoint is public when requiresAuth=true)
+        // but there must be NO JWT 'none' or expired-JWT finding — those would be false positives
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("JWT")),
+                "Should NOT report JWT 'none' or expired-JWT finding on a public endpoint " +
+                "(baseline without auth already returns 200 — the JWT token is irrelevant)"
+        );
+    }
+
+    @Test
+    @DisplayName("Should include baseline HTTP status in JWT none finding evidence")
+    void testJwtNoneEvidenceIncludesBaselineStatus() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/secret", "GET", "application/json", null, true);
+
+        // Auth-required endpoint: rejects no-auth (401), accepts JWT-none (200)
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    String auth = hdrs.getOrDefault("Authorization", "");
+                    if (auth.startsWith("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0")) {
+                        return new HttpResponse(200, "{\"data\":\"secret\"}", Map.of());
+                    }
+                    return new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream()
+                .filter(f -> f.getTitle().contains("JWT") && f.getTitle().contains("none"))
+                .anyMatch(f -> f.getEvidence() != null && f.getEvidence().contains("baseline")),
+                "JWT 'none' finding evidence should mention the baseline HTTP status"
+        );
+    }
+
+    @Test
     @DisplayName("Should detect sensitive tokens exposed in URL query parameters")
     void testTokenInUrl() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data?token=abc123secret", "GET", "application/json", null, false);
