@@ -76,9 +76,8 @@ public class ASTFCli implements Callable<Integer> {
     private String outputFile;
 
     @Option(names = {"-f", "--format"},
-            description = "Output format: JSON (default), XML, HTML, SARIF",
-            defaultValue = "JSON")
-    private String format;
+            description = "Output format: JSON (default), XML, HTML, SARIF")
+    private String format;  // null when not explicitly supplied — YAML outputFormat takes precedence
 
     @Option(names = {"-t", "--threads"}, description = "Number of concurrent threads (default: 10)")
     private Integer threads;
@@ -178,7 +177,7 @@ public class ASTFCli implements Callable<Integer> {
         if (verbose) config.setVerbose(true);
         if (noDiscovery) config.setDiscoveryEnabled(false);
 
-        // Output format
+        // Output format — precedence: CLI -f > YAML outputFormat > default JSON
         if (format != null) {
             try {
                 config.setOutputFormat(ScanConfig.OutputFormat.valueOf(format.toUpperCase()));
@@ -186,7 +185,11 @@ public class ASTFCli implements Callable<Integer> {
                 throw new IllegalArgumentException("Invalid output format: " + format +
                         ". Supported: JSON, XML, HTML, SARIF");
             }
+        } else if (config.getOutputFormat() == null) {
+            // Neither CLI nor YAML specified a format — fall back to JSON
+            config.setOutputFormat(ScanConfig.OutputFormat.JSON);
         }
+        // else: YAML outputFormat is already set — leave it untouched
 
         // Authentication
         if (bearerToken != null) config.setBearerToken(bearerToken);

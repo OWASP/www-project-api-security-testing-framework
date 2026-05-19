@@ -1,0 +1,44 @@
+targetUrl: "https://open.rocket.chat"
+
+headers:
+  Content-Type: "application/json"
+  Accept: "application/json"
+
+endpoints:
+  # auth: false = intentionally public endpoints (skip auth-control & rate-limit tests)
+  - { path: "/api/v1/info",                       method: "GET",  auth: false }
+  - { path: "/api/info",                          method: "GET",  auth: false }
+  - { path: "/api/v1/users.list",                 method: "GET"  }
+  - { path: "/api/v1/users.info",                 method: "GET"  }
+  - { path: "/api/v1/channels.list",              method: "GET"  }
+  - { path: "/api/v1/channels.info",              method: "GET"  }
+  - { path: "/api/v1/channels.messages",          method: "GET"  }
+  - { path: "/api/v1/groups.list",                method: "GET"  }
+  - { path: "/api/v1/groups.listAll",             method: "GET"  }
+  - { path: "/api/v1/rooms.get",                  method: "GET"  }
+  - { path: "/api/v1/login",                      method: "POST" }
+  - { path: "/api/v1/permissions.listAll",        method: "GET"  }
+  - { path: "/api/v1/roles.list",                 method: "GET"  }
+  - { path: "/api/v1/settings",                   method: "GET"  }
+  - { path: "/api/v1/settings.public",            method: "GET",  auth: false }
+  - { path: "/api/v1/statistics",                 method: "GET"  }
+  - { path: "/api/v1/statistics.list",            method: "GET"  }
+  - { path: "/api/v1/admin/rooms",                method: "GET"  }
+  - { path: "/api/v1/loginServiceConfiguration",  method: "GET"  }
+  - { path: "/api/v1/directory",                  method: "GET"  }
+  - { path: "/graphql",                           method: "POST" }
+  - { path: "/api/v1/me",                         method: "GET"  }
+  - { path: "/api/v1/integrations.list",          method: "GET"  }
+  - { path: "/api/v1/email-inbox.list",           method: "GET"  }
+  - { path: "/api/v1/users.register",             method: "POST" }
+  - { path: "/api/v1/users.forgotPassword",       method: "POST" }
+
+outputFormat: "HTML"
+outputFile: "reports/rocketchat-noauth-report.html"
+threads: 3
+timeoutMinutes: 15
+verbose: true
+
+disableTestCases:
+  - "ASTF-API7-2023"
+  - "ASTF-GRPC-2023"
