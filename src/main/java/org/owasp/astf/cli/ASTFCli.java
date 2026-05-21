@@ -60,7 +60,7 @@ import picocli.CommandLine.Option;
 @Command(
         name = "astf",
         mixinStandardHelpOptions = true,
-        version = "OWASP API Security Testing Framework 1.0.0",
+        version = "OWASP API Security Testing Framework v1.0.0",
         description = "Scans API endpoints for OWASP API Security Top 10 vulnerabilities."
 )
 public class ASTFCli implements Callable<Integer> {

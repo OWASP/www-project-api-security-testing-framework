@@ -14,7 +14,7 @@ pitch: A comprehensive automated testing framework for detecting API security vu
 
 The OWASP API Security Testing Framework (ASTF) is a specialized security testing tool designed to automatically detect vulnerabilities in APIs based on the **OWASP API Security Top 10 2023**. It discovers endpoints automatically, runs 12 security test cases covering the full Top 10 plus GraphQL and gRPC, and produces findings in JSON, HTML, SARIF, and XML formats.
 
-**Current release: [v1.1.0-beta](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)**
+**Current release: [v1.0.0](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)**
 
 ASTF has been validated against [OWASP crAPI](https://github.com/OWASP/crAPI) — the intentionally vulnerable API — where it auto-discovered 832 endpoints and detected 11 distinct vulnerability types including JWT algorithm weaknesses, missing authentication controls, and improper inventory management.
 
@@ -52,13 +52,13 @@ ASTF has been validated against [OWASP crAPI](https://github.com/OWASP/crAPI) �
 
 ```bash
 # Download the latest release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.1.0-beta.jar
+curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.0.0.jar
 
 # Run against your API
-java -jar astf-v1.1.0-beta.jar -u https://api.example.com --token "YOUR_TOKEN" -f HTML -o report.html
+java -jar astf-v1.0.0.jar -u https://api.example.com --token "YOUR_TOKEN" -f HTML -o report.html
 
 # Try against OWASP crAPI (zero config needed)
-java -jar astf-v1.1.0-beta.jar -u http://crapi.apisec.ai -f HTML -o crapi-report.html
+java -jar astf-v1.0.0.jar -u http://crapi.apisec.ai -f HTML -o crapi-report.html
 ```
 
 Or build from source:
@@ -77,10 +77,10 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
 
 ```yaml
 - name: Download ASTF
-  run: curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.1.0-beta.jar
+  run: curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v1.0.0.jar
 
 - name: Run security scan
-  run: java -jar astf-v1.1.0-beta.jar -u ${{ secrets.API_URL }} --token ${{ secrets.API_TOKEN }} -f SARIF -o results.sarif
+  run: java -jar astf-v1.0.0.jar -u ${{ secrets.API_URL }} --token ${{ secrets.API_TOKEN }} -f SARIF -o results.sarif
 
 - name: Upload to Code Scanning
   uses: github/codeql-action/upload-sarif@v3
@@ -106,7 +106,7 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
 
 ### ✅ Phase 3 — Beta Release (Completed Q2 2026)
 - Automated release workflow — JAR published to GitHub Releases on version tags
-- `v1.1.0-beta` released with pre-built downloadable JAR
+- `v1.0.0` released with pre-built downloadable JAR
 - Full OWASP project page update
 
 ### 🔜 Phase 4 — Stable Release (Planned)
