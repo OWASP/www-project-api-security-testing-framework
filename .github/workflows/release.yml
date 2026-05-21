@@ -29,11 +29,13 @@ jobs:
       - name: Build fat JAR
         run: mvn --batch-mode --no-transfer-progress package -DskipTests
 
-      # Rename the JAR to include the tag version, e.g. astf-v1.0.0-beta.jar
+      # Rename the JAR to include the tag version, e.g. astf-v1.0.0.jar
       - name: Rename JAR with version tag
         run: |
           VERSION=${GITHUB_REF_NAME}
-          mv target/api-security-testing-framework-1.0-SNAPSHOT.jar \
+          # Derive the POM version from Maven so the rename works regardless of pom.xml version string
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          mv target/api-security-testing-framework-${POM_VERSION}.jar \
              target/astf-${VERSION}.jar
           echo "JAR_NAME=astf-${VERSION}.jar" >> $GITHUB_ENV
 
@@ -70,7 +72,7 @@ jobs:
             - 12 security test cases — full OWASP API Security Top 10 2023 + GraphQL + gRPC
             - Output formats: JSON, HTML, SARIF, XML
             - Auto endpoint discovery
-            - 224 passing unit tests
+            - 235 passing unit tests
 
             See the [README](https://github.com/OWASP/www-project-api-security-testing-framework#readme)
             and [docs/](https://github.com/OWASP/www-project-api-security-testing-framework/tree/main/docs)
