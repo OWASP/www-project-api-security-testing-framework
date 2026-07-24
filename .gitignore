@@ -3,3 +3,10 @@
 /favicon.ico
 _site/
 bounty-scans/
+target/
+dependency-reduced-pom.xml
+*.sarif
+crapi-results.*
+crapi-scan.yaml
+astf-scan.log
+.idea/
