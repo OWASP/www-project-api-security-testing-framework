@@ -3,6 +3,7 @@ package org.owasp.astf.testcases;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
@@ -17,6 +18,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -92,6 +94,22 @@ class GraphQLSecurityTestCaseTest {
         assertTrue(findings.isEmpty(), "No finding when introspection is disabled");
     }
 
+    @Test
+    @DisplayName("No false positive when a schema-validation error message happens to mention '__schema'")
+    void testIntrospectionDisabledNoFalsePositiveOnErrorMessageMentioningSchema() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        // Real-world error text from servers with introspection disabled — the literal
+        // substring "__schema" appears here even though introspection is OFF, which a naive
+        // body.contains("__schema") check would misread as introspection being enabled.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"errors\":[{\"message\":\"Cannot query field \\\"__schema\\\" on type \\\"Query\\\".\"}]}"));
+
+        List<Finding> findings = testCase.testIntrospectionEnabled(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "Should not flag introspection when the response is an error, even if it mentions __schema");
+    }
+
     // ── field suggestion leakage ──────────────────────────────────────────────
 
     @Test
@@ -153,6 +171,28 @@ class GraphQLSecurityTestCaseTest {
         List<Finding> findings = testCase.testQueryDepthAttack(endpoint, httpClient);
 
         assertTrue(findings.isEmpty(), "No finding when depth limit is enforced");
+    }
+
+    @Test
+    @DisplayName("Depth probe is built from real, always-valid schema fields, not guessed placeholder names")
+    void testDeepQueryUsesRealSchemaFields() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"data\":{\"__schema\":{\"types\":[]}}}"));
+
+        testCase.testQueryDepthAttack(endpoint, httpClient);
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(httpClient).postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
+
+        String sentQuery = bodyCaptor.getValue();
+        // __Type.ofType is part of every spec-mandated introspection schema, so nesting it
+        // reaches real depth resolution instead of failing schema validation the way guessed
+        // placeholder field names ("a", "b", "c", ...) would on any real GraphQL server.
+        assertTrue(sentQuery.contains("ofType"), "Deep query should chain the always-valid __Type.ofType field");
+        assertFalse(sentQuery.matches(".*\\{\\s*a\\s*\\{\\s*b\\s*\\{.*"),
+                "Deep query should not use guessed placeholder field names like a/b/c");
     }
 
     // ── batch query ───────────────────────────────────────────────────────────

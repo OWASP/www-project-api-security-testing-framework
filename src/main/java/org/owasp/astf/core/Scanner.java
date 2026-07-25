@@ -8,6 +8,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -107,13 +108,41 @@ public class Scanner {
             // Calculate total tasks for progress tracking
             totalTasks.set(endpoints.size() * testCases.size());
 
-            // Run test cases against endpoints using virtual threads (Java 21)
-            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            // Run test cases against endpoints using virtual threads (Java 21).
+            //
+            // Deliberately NOT a try-with-resources here: ExecutorService.close() (the
+            // try-with-resources exit path) calls shutdown() — which lets already-running
+            // tasks finish on their own — and then awaits termination in up to 24-hour
+            // increments, repeating until every task terminates. If a single task is stuck
+            // (a bug in a test case, a blocking call that doesn't honor its timeout, ...) that
+            // wait can silently outlast the orTimeout() below by hours, defeating the whole
+            // point of a configured scan timeout: no report would ever get written. The
+            // explicit try/finally below instead force-interrupts remaining tasks and bounds
+            // the wait to a few seconds, guaranteeing scan() always returns with whatever
+            // findings were collected.
+            ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+            // Bounds how many test-case executions (i.e. concurrent outbound HTTP requests)
+            // are in flight at once. Without this, every endpoint x test-case combination
+            // fires as a fully unbounded concurrent virtual thread — e.g. 44 endpoints x 12
+            // test cases = 528 simultaneous requests — which can overwhelm a target (especially
+            // a locally-run, resource-constrained one) badly enough that requests stall well
+            // past any per-request HTTP timeout. --threads/-t (config.getThreads()) is
+            // documented as controlling concurrency but was previously never actually applied.
+            int maxConcurrency = Math.max(1, config.getThreads());
+            Semaphore concurrencyLimiter = new Semaphore(maxConcurrency);
+            try {
                 List<CompletableFuture<Void>> futures = new ArrayList<>();
 
                 for (EndpointInfo endpoint : endpoints) {
                     for (TestCase testCase : testCases) {
                         CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
+                            try {
+                                concurrencyLimiter.acquire();
+                            } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                completedTasks.incrementAndGet();
+                                return;
+                            }
                             try {
                                 logger.debug("Executing {} on {}", testCase.getId(), endpoint);
                                 List<Finding> testFindings = testCase.execute(endpoint, httpClient);
@@ -136,6 +165,7 @@ public class Scanner {
                                         testCase.getId(), endpoint.getPath(), e.getMessage());
                                 logger.debug("Exception details:", e);
                             } finally {
+                                concurrencyLimiter.release();
                                 // Update progress
                                 int completed = completedTasks.incrementAndGet();
                                 if (completed % 10 == 0 || completed == totalTasks.get()) {
@@ -156,6 +186,19 @@ public class Scanner {
                             return null;
                         })
                         .join();
+            } finally {
+                // Interrupt anything still running and bound the shutdown wait — see comment
+                // above. A scan must always finish and produce a report, never hang forever.
+                executor.shutdownNow();
+                try {
+                    if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                        logger.warn("{} of {} tasks did not terminate within 10s of shutdown; " +
+                                        "proceeding with the {} finding(s) collected so far.",
+                                totalTasks.get() - completedTasks.get(), totalTasks.get(), findings.size());
+                    }
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
             }
 
             logger.info("Scan completed. Found {} issues: {} critical, {} high, {} medium, {} low, {} info",

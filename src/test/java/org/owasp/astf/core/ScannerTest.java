@@ -14,6 +14,7 @@ import org.owasp.astf.core.result.ScanResult;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -139,6 +140,44 @@ class ScannerTest {
         ScanResult result = new Scanner(config).scan();
 
         assertNotNull(result.getSeveritySummary());
+    }
+
+    @Test
+    @DisplayName("Should not exceed --threads worth of concurrent requests (regression)")
+    void testConcurrencyIsBoundedByThreadsSetting() throws InterruptedException {
+        int maxThreads = 2;
+        AtomicInteger inFlight = new AtomicInteger(0);
+        AtomicInteger maxObservedConcurrency = new AtomicInteger(0);
+
+        // Every request pauses briefly so overlapping requests actually overlap in time,
+        // and records the peak number of requests in flight at once.
+        server.setDispatcher(new Dispatcher() {
+            @NotNull
+            @Override
+            public MockResponse dispatch(@NotNull RecordedRequest request) throws InterruptedException {
+                int current = inFlight.incrementAndGet();
+                maxObservedConcurrency.updateAndGet(prev -> Math.max(prev, current));
+                Thread.sleep(150);
+                inFlight.decrementAndGet();
+                return new MockResponse().setResponseCode(401).setBody("{\"error\":\"unauthorized\"}");
+            }
+        });
+
+        ScanConfig config = buildConfig();
+        config.setThreads(maxThreads);
+        // Many endpoints so plenty of tasks are eligible to run concurrently if unbounded.
+        for (int i = 0; i < 10; i++) {
+            config.addEndpoint(new EndpointInfo("/api/resource" + i, "GET"));
+        }
+        config.setEnabledTestCaseIds(List.of("ASTF-API2-2023"));
+
+        new Scanner(config).scan();
+
+        assertTrue(maxObservedConcurrency.get() <= maxThreads,
+                "Peak concurrent requests (" + maxObservedConcurrency.get() +
+                        ") should never exceed the configured thread limit (" + maxThreads + ")");
+        assertTrue(maxObservedConcurrency.get() > 1,
+                "Test should actually exercise concurrency (not just happen to run serially)");
     }
 
     // -------------------------------------------------------------------------

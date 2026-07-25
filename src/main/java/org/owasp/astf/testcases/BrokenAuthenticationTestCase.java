@@ -50,6 +50,19 @@ public class BrokenAuthenticationTestCase implements TestCase {
             "000000", "123456", "111111", "999999", "654321", "112233"
     );
 
+    // Some APIs return HTTP 200 on both success AND failure, carrying the real result only in
+    // the response body (e.g. VAmPI: {"status":"fail","message":"..."} with a 200 status).
+    // A 2xx status code alone is therefore not sufficient evidence of a successful auth bypass —
+    // it must also be checked against these common failure markers in the body.
+    private static final List<String> AUTH_FAILURE_BODY_MARKERS = List.of(
+            "\"status\":\"fail\"", "\"status\": \"fail\"",
+            "\"success\":false", "\"success\": false",
+            "\"authenticated\":false", "\"authenticated\": false",
+            "incorrect", "invalid credentials", "invalid username", "invalid password",
+            "authentication failed", "login failed", "unauthorized", "access denied",
+            "wrong password", "not correct", "does not match"
+    );
+
     @Override
     public String getId() {
         return "ASTF-API2-2023";
@@ -109,6 +122,24 @@ public class BrokenAuthenticationTestCase implements TestCase {
         return TWO_FA_PATH_PATTERNS.stream().anyMatch(path::contains);
     }
 
+    /**
+     * A 2xx status code alone does not prove an authentication attempt succeeded — some APIs
+     * (e.g. VAmPI) return HTTP 200 for both successful and failed logins, with the real outcome
+     * only in the response body. This checks the status code AND scans the body for common
+     * failure markers before treating the response as a genuine success.
+     */
+    private boolean looksLikeAuthSuccess(HttpResponse response) {
+        if (response == null || !response.isSuccess()) {
+            return false;
+        }
+        String body = response.getBody();
+        if (body == null || body.isBlank()) {
+            return true; // no body to contradict the status code
+        }
+        String lower = body.toLowerCase();
+        return AUTH_FAILURE_BODY_MARKERS.stream().noneMatch(lower::contains);
+    }
+
     private List<Finding> testWeakAuthentication(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
@@ -132,7 +163,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                         creds.get("username"), creds.get("password"));
                 HttpResponse response = httpClient.postWithStatus(fullUrl, Map.of(), "application/json", body);
 
-                if (response.isSuccess()) {
+                if (looksLikeAuthSuccess(response)) {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "Weak Default Credentials Accepted",
@@ -201,7 +232,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 }
             }
 
-            if (response != null && response.isSuccess()) {
+            if (looksLikeAuthSuccess(response)) {
                 // A 2xx response without auth headers indicates missing authentication controls
                 findings.add(buildMissingAuthFinding(endpoint));
             }
@@ -263,7 +294,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 default       -> httpClient.getWithStatus(fullUrl, noneAlgHeaders);
             };
 
-            if (response != null && response.isSuccess()) {
+            if (looksLikeAuthSuccess(response)) {
                 Finding finding = new Finding(
                         UUID.randomUUID().toString(),
                         "JWT 'none' Algorithm Accepted",
@@ -373,7 +404,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 default       -> httpClient.getWithStatus(fullUrl, expiredJwtHeaders);
             };
 
-            if (response != null && response.isSuccess()) {
+            if (looksLikeAuthSuccess(response)) {
                 Finding finding = new Finding(
                         UUID.randomUUID().toString(),
                         "Expired JWT Token Accepted",
@@ -490,7 +521,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 String body = String.format("{\"code\":\"%s\"}", code);
                 HttpResponse response = httpClient.postWithStatus(fullUrl, Map.of(), "application/json", body);
 
-                if (response != null && response.isSuccess()) {
+                if (looksLikeAuthSuccess(response)) {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "2FA/MFA Bypass — Weak OTP Code Accepted",
