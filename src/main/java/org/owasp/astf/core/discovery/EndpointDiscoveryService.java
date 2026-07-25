@@ -15,6 +15,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.http.HttpClient;
+import org.owasp.astf.core.http.HttpResponse;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -137,7 +138,11 @@ public class EndpointDiscoveryService {
             discoveredEndpoints.addAll(resourceEndpoints);
 
             if (discoveredEndpoints.isEmpty()) {
-                logger.warn("No endpoints discovered through automatic methods");
+                logger.warn("No endpoints discovered through automatic methods. This target does not " +
+                        "expose a recognizable OpenAPI/Swagger spec and none of the generic path guesses " +
+                        "resolved to a real endpoint — coverage from the fallback list below will likely " +
+                        "be minimal. For accurate results, supply the target's real routes with " +
+                        "--endpoints-file (one 'METHOD /path' per line) or --config.");
                 // Fallback strategy: Use common endpoints for testing
                 logger.info("Using fallback common endpoints for testing");
                 discoveredEndpoints.addAll(getFallbackEndpoints());
@@ -168,9 +173,13 @@ public class EndpointDiscoveryService {
                 String url = config.getTargetUrl() + specPath;
                 logger.debug("Checking for API specification at: {}", url);
 
-                String response = httpClient.get(url, Map.of());
+                // Must check the status code, not just body non-emptiness: a 404 error page
+                // (which most servers return with a non-empty body) would otherwise be
+                // mistaken for "found something here".
+                HttpResponse httpResponse = httpClient.getWithStatus(url, Map.of());
+                String response = httpResponse != null ? httpResponse.getBody() : null;
 
-                if (response != null && !response.isEmpty()) {
+                if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()) {
                     logger.info("Found potential API specification at: {}", url);
 
                     // Check if it's a valid JSON response that might be an OpenAPI spec
@@ -332,9 +341,12 @@ public class EndpointDiscoveryService {
                 String url = config.getTargetUrl() + rootPath;
                 logger.debug("Testing API root path: {}", url);
 
-                String response = httpClient.get(url, Map.of());
+                // Gate on the status code, not just a non-empty body: a 404/error page has a
+                // body too, and would otherwise make every generic guess look like a hit.
+                HttpResponse httpResponse = httpClient.getWithStatus(url, Map.of());
+                String response = httpResponse != null ? httpResponse.getBody() : null;
 
-                if (response != null && !response.isEmpty()) {
+                if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()) {
                     logger.info("Found potential API root at: {}", url);
 
                     // If we get a valid response, add the root path
@@ -385,10 +397,15 @@ public class EndpointDiscoveryService {
                     String url = config.getTargetUrl() + resourcePath;
                     logger.debug("Testing resource path: {}", url);
 
-                    String response = httpClient.get(url, Map.of());
+                    // Gate on the status code rather than sniffing the body for the words
+                    // "error"/"not found"/"404" — those substring checks both miss real 404
+                    // pages that don't happen to say those exact words, and can reject a
+                    // legitimate 200 response whose JSON payload happens to contain them
+                    // (e.g. a field literally named "error").
+                    HttpResponse httpResponse = httpClient.getWithStatus(url, Map.of());
+                    String response = httpResponse != null ? httpResponse.getBody() : null;
 
-                    if (response != null && !response.isEmpty() && !response.contains("error") &&
-                            !response.contains("not found") && !response.contains("404")) {
+                    if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()) {
                         logger.info("Found potential resource endpoint: {}", url);
 
                         // Add the base resource endpoint
