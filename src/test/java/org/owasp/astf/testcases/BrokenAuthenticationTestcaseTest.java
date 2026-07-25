@@ -254,6 +254,37 @@ class BrokenAuthenticationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT flag weak credentials when HTTP 200 body indicates the login actually failed (VAmPI-style false positive)")
+    void testWeakCredentialsNoFalsePositiveOn200WithFailureBody() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json", "{}", true);
+
+        // Mirrors VAmPI: login always returns HTTP 200, real result is in the body.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"status\": \"fail\", \"message\": \"Username or Password Incorrect!\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> "Weak Default Credentials Accepted".equals(f.getTitle())),
+                "Should not report weak credentials accepted when the response body says the login failed");
+        assertTrue(findings.stream().noneMatch(f -> "2FA/MFA Bypass — Weak OTP Code Accepted".equals(f.getTitle())),
+                "Should not report OTP bypass when the response body says the attempt failed");
+    }
+
+    @Test
+    @DisplayName("Should still flag weak credentials when HTTP 200 body has no failure indicator")
+    void testWeakCredentialsStillDetectedOnGenuineSuccess() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json", "{}", true);
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"auth_token\": \"abc123\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> "Weak Default Credentials Accepted".equals(f.getTitle())),
+                "Should still report weak credentials accepted on a genuine 200 success with no failure markers");
+    }
+
+    @Test
     @DisplayName("Should detect sensitive tokens exposed in URL query parameters")
     void testTokenInUrl() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data?token=abc123secret", "GET", "application/json", null, false);
