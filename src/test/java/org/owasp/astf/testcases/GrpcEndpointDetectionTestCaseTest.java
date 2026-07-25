@@ -11,7 +11,10 @@ import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -208,6 +211,141 @@ class GrpcEndpointDetectionTestCaseTest {
 
         assertDoesNotThrow(() -> testCase.detectServerReflection(endpoint, httpClient),
                 "IOException should be caught and not propagated");
+    }
+
+    // ── gRPC reflection service enumeration (hand-rolled protobuf) ───────────
+    //
+    // Test-side protobuf/gRPC-frame encoders below are written independently from the
+    // production code's encoders (rather than reusing them) so a bug shared between
+    // production and test code can't hide a real defect from these tests.
+
+    private static byte[] encodeVarint(long value) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        while (true) {
+            if ((value & ~0x7FL) == 0) {
+                out.write((int) value);
+                break;
+            } else {
+                out.write((int) ((value & 0x7F) | 0x80));
+                value >>>= 7;
+            }
+        }
+        return out.toByteArray();
+    }
+
+    private static byte[] encodeLengthDelimitedField(int fieldNumber, byte[] value) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(encodeVarint(((long) fieldNumber << 3) | 2));
+        out.write(encodeVarint(value.length));
+        out.write(value);
+        return out.toByteArray();
+    }
+
+    private static byte[] concatAll(byte[]... arrays) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        for (byte[] array : arrays) out.write(array);
+        return out.toByteArray();
+    }
+
+    private static byte[] wrapGrpcFrame(byte[] message) {
+        ByteBuffer buffer = ByteBuffer.allocate(5 + message.length);
+        buffer.put((byte) 0);
+        buffer.putInt(message.length);
+        buffer.put(message);
+        return buffer.array();
+    }
+
+    /** Builds a gRPC-framed ServerReflectionResponse{list_services_response{service:[...names]}}. */
+    private static byte[] buildListServicesResponse(String... serviceNames) throws IOException {
+        ByteArrayOutputStream listServiceResponse = new ByteArrayOutputStream();
+        for (String name : serviceNames) {
+            byte[] serviceResponse = encodeLengthDelimitedField(1, name.getBytes(StandardCharsets.UTF_8));
+            listServiceResponse.write(encodeLengthDelimitedField(1, serviceResponse));
+        }
+        byte[] serverReflectionResponse = encodeLengthDelimitedField(6, listServiceResponse.toByteArray());
+        return wrapGrpcFrame(serverReflectionResponse);
+    }
+
+    @Test
+    @DisplayName("encodeListServicesRequest produces a valid gRPC-framed list_services request")
+    void testEncodeListServicesRequest() {
+        byte[] encoded = testCase.encodeListServicesRequest();
+
+        // 5-byte gRPC frame header (0 compression flag + 4-byte big-endian length=2) + 2-byte message
+        assertEquals(7, encoded.length);
+        assertEquals(0, encoded[0], "Compression flag should be 0 (uncompressed)");
+        ByteBuffer buffer = ByteBuffer.wrap(encoded, 1, 4);
+        assertEquals(2, buffer.getInt(), "Message length should be 2 bytes");
+        assertEquals(0x3A, encoded[5] & 0xFF, "Tag byte for field 7 (list_services), wire type 2");
+        assertEquals(0x00, encoded[6] & 0xFF, "Zero-length string for list_services value");
+    }
+
+    @Test
+    @DisplayName("enumerateServicesViaReflection decodes real service names from a gRPC-framed response")
+    void testEnumerateServicesViaReflectionDecodesNames() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("http://example.com");
+
+        byte[] response = buildListServicesResponse(
+                "grpc.reflection.v1alpha.ServerReflection", "vulnerable.QueryService");
+
+        when(httpClient.postBytesH2c(anyString(), anyMap(), any())).thenReturn(response);
+
+        List<String> services = testCase.enumerateServicesViaReflection(endpoint, httpClient);
+
+        assertEquals(2, services.size());
+        assertTrue(services.contains("grpc.reflection.v1alpha.ServerReflection"));
+        assertTrue(services.contains("vulnerable.QueryService"));
+    }
+
+    @Test
+    @DisplayName("enumerateServicesViaReflection returns empty list for a malformed/truncated response")
+    void testEnumerateServicesViaReflectionHandlesMalformedResponse() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("http://example.com");
+
+        when(httpClient.postBytesH2c(anyString(), anyMap(), any())).thenReturn(new byte[]{0x01, 0x02});
+
+        List<String> services = testCase.enumerateServicesViaReflection(endpoint, httpClient);
+
+        assertTrue(services.isEmpty(), "Should return an empty list rather than throw for malformed data");
+    }
+
+    @Test
+    @DisplayName("detectServerReflection includes enumerated service names in the finding evidence")
+    void testDetectServerReflectionIncludesServiceNames() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", "POST");
+
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString())).thenReturn(grpcResponse());
+        when(httpClient.postBytesH2c(anyString(), anyMap(), any()))
+                .thenReturn(buildListServicesResponse("vulnerable.QueryService"));
+
+        List<Finding> findings = testCase.detectServerReflection(endpoint, httpClient);
+
+        Finding reflectionFinding = findings.stream()
+                .filter(f -> f.getTitle().equals("gRPC Server Reflection Enabled"))
+                .findFirst().orElseThrow();
+        assertTrue(reflectionFinding.getEvidence().contains("vulnerable.QueryService"),
+                "Reflection finding evidence should list the enumerated service name");
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("Suggests Data/Command Functionality")),
+                "A service named 'QueryService' should be flagged for manual injection review");
+    }
+
+    @Test
+    @DisplayName("detectServerReflection does not flag ordinary service names as interesting")
+    void testDetectServerReflectionNoInterestingFindingForOrdinaryService() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", "POST");
+
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString())).thenReturn(grpcResponse());
+        when(httpClient.postBytesH2c(anyString(), anyMap(), any()))
+                .thenReturn(buildListServicesResponse("app.UserProfileService"));
+
+        List<Finding> findings = testCase.detectServerReflection(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Suggests Data/Command Functionality")),
+                "An ordinary-sounding service name should not be flagged");
     }
 
     // ── execute (integration) ─────────────────────────────────────────────────

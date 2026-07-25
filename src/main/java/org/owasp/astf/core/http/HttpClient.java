@@ -1,14 +1,24 @@
 package org.owasp.astf.core.http;
 
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.security.KeyStore;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.X509TrustManager;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -54,6 +64,9 @@ public class HttpClient {
 
     // Lazily-built client for HTTP/2 cleartext (h2c) prior-knowledge requests — see postH2c().
     private volatile OkHttpClient h2cClient;
+
+    // Lazily-built, per-keystore-path clients for mTLS testing — see getWithClientCert().
+    private final Map<String, OkHttpClient> clientCertClients = new ConcurrentHashMap<>();
 
     /**
      * Creates a new HTTP client with the specified configuration.
@@ -159,6 +172,114 @@ public class HttpClient {
     }
 
     /**
+     * Returns headers carrying the scan's secondary identity (a second, distinct authenticated
+     * user), if one was configured via {@code --secondary-token}. Test cases that need to prove
+     * a cross-user authorization bypass (e.g. BOLA) pass this map as the per-request header
+     * override on the {@code *WithStatus} methods — OkHttp's {@code Request.Builder.header()}
+     * replaces rather than appends, so this correctly overrides the primary identity's
+     * Authorization header for that one request only, without altering the client's default
+     * identity used everywhere else.
+     *
+     * @return A map with an Authorization header for the secondary identity, or an empty map if
+     *         no secondary identity was configured (in which case cross-user checks should skip)
+     */
+    public Map<String, String> getSecondaryAuthHeaders() {
+        String secondaryToken = config.getSecondaryBearerToken();
+        if (secondaryToken == null || secondaryToken.isEmpty()) {
+            return Map.of();
+        }
+        return Map.of("Authorization", "Bearer " + secondaryToken);
+    }
+
+    /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
+    public boolean hasClientCert() {
+        return config.getClientCertPath() != null && !config.getClientCertPath().isEmpty();
+    }
+
+    public String getClientCertPath() {
+        return config.getClientCertPath();
+    }
+
+    public String getClientCertPassword() {
+        return config.getClientCertPassword();
+    }
+
+    /** @return true if a deliberately invalid/untrusted client certificate was configured via {@code --invalid-client-cert} */
+    public boolean hasInvalidClientCert() {
+        return config.getInvalidClientCertPath() != null && !config.getInvalidClientCertPath().isEmpty();
+    }
+
+    public String getInvalidClientCertPath() {
+        return config.getInvalidClientCertPath();
+    }
+
+    public String getInvalidClientCertPassword() {
+        return config.getInvalidClientCertPassword();
+    }
+
+    /**
+     * Sends a GET request presenting the client certificate from the given PKCS12 keystore,
+     * for mTLS testing (e.g. confirming whether a server actually validates client certificates
+     * rather than accepting any presented certificate, or validates the certificate's subject).
+     * <p>
+     * The server's own certificate is deliberately NOT validated by this client (a permissive
+     * trust manager is used) — this method exists to probe how the SERVER behaves toward
+     * different client identities, not to verify the server's identity to the caller.
+     *
+     * @param url The target URL (must be https://)
+     * @param headers Additional headers to include
+     * @param certPath Path to a PKCS12 keystore (.p12/.pfx) containing the client certificate and key
+     * @param certPassword The keystore password
+     * @return The full HTTP response
+     * @throws IOException If the request fails, the keystore can't be read, or the certificate
+     *                      is rejected at the TLS handshake level (itself a meaningful signal —
+     *                      callers should treat such an exception as "certificate not accepted")
+     */
+    public HttpResponse getWithClientCert(String url, Map<String, String> headers,
+                                           String certPath, String certPassword) throws IOException {
+        OkHttpClient certClient = clientCertClients.computeIfAbsent(certPath,
+                path -> buildClientCertClient(path, certPassword));
+        Request request = createRequest(url, "GET", headers, null, null);
+        try (Response response = certClient.newCall(request).execute()) {
+            String body = response.body() != null ? response.body().string() : "";
+            Map<String, List<String>> responseHeaders = extractHeaders(response);
+            return new HttpResponse(response.code(), body, responseHeaders);
+        }
+    }
+
+    private OkHttpClient buildClientCertClient(String certPath, String certPassword) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            try (FileInputStream in = new FileInputStream(certPath)) {
+                keyStore.load(in, certPassword != null ? certPassword.toCharArray() : new char[0]);
+            }
+
+            KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(
+                    KeyManagerFactory.getDefaultAlgorithm());
+            keyManagerFactory.init(keyStore, certPassword != null ? certPassword.toCharArray() : new char[0]);
+
+            // This client's purpose is to test how the SERVER validates the CLIENT certificate —
+            // the server's certificate is intentionally not validated here.
+            X509TrustManager trustAllServerCerts = new X509TrustManager() {
+                public void checkClientTrusted(X509Certificate[] chain, String authType) { }
+                public void checkServerTrusted(X509Certificate[] chain, String authType) { }
+                public X509Certificate[] getAcceptedIssuers() { return new X509Certificate[0]; }
+            };
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(keyManagerFactory.getKeyManagers(),
+                    new X509TrustManager[]{trustAllServerCerts}, new SecureRandom());
+
+            return client.newBuilder()
+                    .sslSocketFactory(sslContext.getSocketFactory(), trustAllServerCerts)
+                    .hostnameVerifier((hostname, session) -> true)
+                    .build();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load client certificate from " + certPath, e);
+        }
+    }
+
+    /**
      * Sends a POST request using HTTP/2 cleartext prior-knowledge (h2c) rather than HTTP/1.1.
      * <p>
      * gRPC's wire protocol is HTTP/2-only. OkHttp never attempts HTTP/2 over a plain
@@ -188,6 +309,31 @@ public class HttpClient {
             String responseBody = response.body() != null ? response.body().string() : "";
             Map<String, List<String>> responseHeaders = extractHeaders(response);
             return new HttpResponse(response.code(), responseBody, responseHeaders);
+        }
+    }
+
+    /**
+     * Binary-safe sibling of {@link #postH2c}, for protocols like gRPC's reflection service whose
+     * messages are protobuf-encoded binary data. {@code postH2c}'s {@code String} body/response
+     * would corrupt arbitrary binary bytes that aren't valid UTF-8 when round-tripped through
+     * Java's {@code String} (which is UTF-16 internally) — this method reads/writes raw bytes
+     * throughout so the binary payload survives intact.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include (the caller is responsible for setting
+     *                 {@code Content-Type: application/grpc} and any gRPC-required headers)
+     * @param body The raw request body bytes (e.g. a gRPC-framed protobuf message)
+     * @return The raw response body bytes
+     * @throws IOException If the request fails
+     */
+    public byte[] postBytesH2c(String url, Map<String, String> headers, byte[] body) throws IOException {
+        RequestBody requestBody = RequestBody.create(body, MediaType.parse("application/grpc"));
+        Request request = createRequest(url, "POST", headers, MediaType.parse("application/grpc"), requestBody);
+
+        OkHttpClient targetClient = url.startsWith("https://") ? client : h2cClient();
+        try (Response response = targetClient.newCall(request).execute()) {
+            ResponseBody responseBody = response.body();
+            return responseBody != null ? responseBody.bytes() : new byte[0];
         }
     }
 

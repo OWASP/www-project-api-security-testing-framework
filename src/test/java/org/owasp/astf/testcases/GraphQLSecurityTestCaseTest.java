@@ -18,6 +18,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -250,6 +251,194 @@ class GraphQLSecurityTestCaseTest {
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertTrue(findings.isEmpty(), "Non-GraphQL endpoints should produce no findings");
+    }
+
+    // ── resolver injection ────────────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Extracts mutations with a String-typed argument from introspection, unwrapping NON_NULL")
+    void testExtractStringArgMutations() {
+        String introspection = """
+                {
+                  "data": {
+                    "__schema": {
+                      "mutationType": {
+                        "fields": [
+                          {
+                            "name": "createPost",
+                            "args": [
+                              { "name": "title", "type": { "name": null, "kind": "NON_NULL",
+                                  "ofType": { "name": "String", "kind": "SCALAR" } } },
+                              { "name": "authorId", "type": { "name": "ID", "kind": "SCALAR" } }
+                            ]
+                          },
+                          {
+                            "name": "deletePost",
+                            "args": [
+                              { "name": "id", "type": { "name": "ID", "kind": "SCALAR" } }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+                """;
+
+        List<?> results = testCase.extractStringArgMutations(introspection);
+
+        assertEquals(1, results.size(), "Only createPost has a String-typed argument");
+    }
+
+    @Test
+    @DisplayName("Flags GraphQL resolver injection when a mutation reflects an unescaped XSS payload")
+    void testResolverInjectionDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String introspection = """
+                {
+                  "data": {
+                    "__schema": {
+                      "mutationType": {
+                        "fields": [
+                          {
+                            "name": "createComment",
+                            "args": [
+                              { "name": "body", "type": { "name": "String", "kind": "SCALAR" } }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("__schema")))
+                .thenReturn(ok(introspection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("createComment")))
+                .thenReturn(ok("{\"data\":{\"createComment\":\"<script>alert('xss')</script>\"}}"));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect resolver injection when the payload is reflected unescaped");
+        assertEquals("GraphQL Resolver Injection Vulnerability", findings.get(0).getTitle());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Handles a Relay-style wrapped mutation result with multiple required args (DVGA createPaste shape)")
+    void testResolverInjectionHandlesWrappedResultAndMultipleArgs() throws IOException {
+        // Mirrors OWASP DVGA's real createPaste mutation exactly, as observed manually:
+        // createPaste(burn, content, public, title) -> CreatePaste { paste: PasteObject }
+        // PasteObject has scalar fields (content, title, ...) plus a nested "owner" object.
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String mutationIntrospection = """
+                {
+                  "data": { "__schema": { "mutationType": { "fields": [
+                    { "name": "createPaste",
+                      "type": { "name": "CreatePaste", "kind": "OBJECT" },
+                      "args": [
+                        { "name": "burn", "type": { "name": "Boolean", "kind": "SCALAR" } },
+                        { "name": "content", "type": { "name": "String", "kind": "SCALAR" } },
+                        { "name": "public", "type": { "name": "Boolean", "kind": "SCALAR" } },
+                        { "name": "title", "type": { "name": "String", "kind": "SCALAR" } }
+                      ]
+                    }
+                  ] } } }
+                }
+                """;
+        String createPasteTypeFields = """
+                {
+                  "data": { "__type": { "fields": [
+                    { "name": "paste", "type": { "name": "PasteObject", "kind": "OBJECT" } }
+                  ] } }
+                }
+                """;
+        String pasteObjectTypeFields = """
+                {
+                  "data": { "__type": { "fields": [
+                    { "name": "title", "type": { "name": "String", "kind": "SCALAR" } },
+                    { "name": "content", "type": { "name": "String", "kind": "SCALAR" } },
+                    { "name": "owner", "type": { "name": "OwnerObject", "kind": "OBJECT" } }
+                  ] } }
+                }
+                """;
+        String mutationResult = """
+                {"data":{"createPaste":{"paste":{"title":"test","content":"<script>alert('xss')</script>"}}}}
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("__schema")))
+                .thenReturn(ok(mutationIntrospection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("CreatePaste")))
+                .thenReturn(ok(createPasteTypeFields));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("PasteObject")))
+                .thenReturn(ok(pasteObjectTypeFields));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("createPaste(")))
+                .thenReturn(ok(mutationResult));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect the injection reflected inside the nested 'paste' object");
+        assertEquals("GraphQL Resolver Injection Vulnerability", findings.get(0).getTitle());
+
+        ArgumentCaptor<String> queryCaptor = ArgumentCaptor.forClass(String.class);
+        verify(httpClient, atLeastOnce()).postWithStatus(anyString(), anyMap(), anyString(), queryCaptor.capture());
+        String mutationQuery = queryCaptor.getAllValues().stream()
+                .filter(q -> q.contains("createPaste("))
+                .findFirst().orElseThrow();
+
+        assertTrue(mutationQuery.contains("burn:true"), "Non-target Boolean arg should get a default value");
+        assertTrue(mutationQuery.contains("title:\\\"test\\\""), "Non-target String arg should get a default value");
+        assertTrue(mutationQuery.contains("paste{"), "Selection set should recurse into the nested 'paste' object");
+        assertTrue(mutationQuery.contains("content"), "Selection set should include the field that echoes injected content");
+    }
+
+    @Test
+    @DisplayName("No resolver injection finding when the mutation sanitizes its input")
+    void testNoResolverInjectionWhenSanitized() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String introspection = """
+                {
+                  "data": {
+                    "__schema": {
+                      "mutationType": {
+                        "fields": [
+                          {
+                            "name": "createComment",
+                            "args": [
+                              { "name": "body", "type": { "name": "String", "kind": "SCALAR" } }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("__schema")))
+                .thenReturn(ok(introspection));
+        // Server escapes the payload before echoing it back — no injection.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("createComment")))
+                .thenReturn(ok("{\"data\":{\"createComment\":\"&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;\"}}"));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "Should not flag resolver injection when the payload is properly escaped");
+    }
+
+    @Test
+    @DisplayName("No resolver injection test when mutation introspection is unavailable")
+    void testResolverInjectionSkippedWithoutIntrospection() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200,
+                        "{\"errors\":[{\"message\":\"Introspection disabled\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "Should not attempt resolver injection without a schema to work from");
     }
 
     @Test

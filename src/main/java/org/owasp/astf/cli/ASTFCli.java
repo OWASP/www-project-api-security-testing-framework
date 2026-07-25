@@ -85,6 +85,11 @@ public class ASTFCli implements Callable<Integer> {
     @Option(names = {"--token"}, description = "Bearer token for authentication")
     private String bearerToken;
 
+    @Option(names = {"--secondary-token"}, description = "Bearer token for a second, distinct " +
+            "authenticated user — enables cross-user authorization (BOLA) testing by checking " +
+            "whether this identity can access objects belonging to the primary --token identity")
+    private String secondaryBearerToken;
+
     @Option(names = {"--api-key"}, description = "API key for authentication")
     private String apiKey;
 
@@ -96,6 +101,22 @@ public class ASTFCli implements Callable<Integer> {
 
     @Option(names = {"--password"}, description = "Basic auth password")
     private String password;
+
+    @Option(names = {"--client-cert"}, description = "Path to a PKCS12 (.p12/.pfx) keystore " +
+            "containing a client certificate to present for mutual TLS (mTLS)")
+    private String clientCertPath;
+
+    @Option(names = {"--client-cert-password"}, description = "Password for --client-cert")
+    private String clientCertPassword;
+
+    @Option(names = {"--invalid-client-cert"}, description = "Path to a PKCS12 (.p12/.pfx) " +
+            "keystore containing a deliberately invalid/untrusted client certificate, used " +
+            "alongside --client-cert to test whether the server actually validates client " +
+            "certificates rather than accepting any presented certificate")
+    private String invalidClientCertPath;
+
+    @Option(names = {"--invalid-client-cert-password"}, description = "Password for --invalid-client-cert")
+    private String invalidClientCertPassword;
 
     @Option(names = {"--header"}, description = "Additional header in Key:Value format (repeatable)")
     private List<String> headers;
@@ -193,6 +214,11 @@ public class ASTFCli implements Callable<Integer> {
 
         // Authentication
         if (bearerToken != null) config.setBearerToken(bearerToken);
+        if (secondaryBearerToken != null) config.setSecondaryBearerToken(secondaryBearerToken);
+        if (clientCertPath != null) config.setClientCertPath(clientCertPath);
+        if (clientCertPassword != null) config.setClientCertPassword(clientCertPassword);
+        if (invalidClientCertPath != null) config.setInvalidClientCertPath(invalidClientCertPath);
+        if (invalidClientCertPassword != null) config.setInvalidClientCertPassword(invalidClientCertPassword);
         if (apiKey != null) config.setApiKey(apiKey);
         if (apiKeyHeader != null) config.setApiKeyHeader(apiKeyHeader);
         if (username != null) config.setBasicAuthUsername(username);
