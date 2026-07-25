@@ -65,13 +65,20 @@ public class GraphQLSecurityTestCase implements TestCase {
     private static final String SUGGESTION_PROBE_QUERY =
             "{\"query\":\"{__typenme}\"}";   // intentional typo: __typenme
 
-    // Deeply nested query designed to trigger resource exhaustion
-    private static final String DEEP_QUERY;
+    // Deeply nested query designed to trigger resource exhaustion.
+    //
+    // Built from __Type.ofType — a self-referencing field that is part of the mandatory
+    // introspection schema every spec-compliant GraphQL server exposes — rather than guessed
+    // application field names. A query built from placeholder names like "{a{b{c{...}}}}"
+    // fails schema validation (HTTP 400 "Cannot query field") on any real schema before depth
+    // is ever assessed; chaining ofType always resolves to a real, deeply-nestable field.
+    static final String DEEP_QUERY;
     static {
-        StringBuilder sb = new StringBuilder("{\"query\":\"{ a { b { c { d { e { f { g { h { i { j");
-        for (int i = 0; i < 10; i++) sb.append(" }");
-        sb.append("}}}\"}");
-        DEEP_QUERY = sb.toString();
+        StringBuilder chain = new StringBuilder("kind name");
+        for (int i = 0; i < 12; i++) {
+            chain = new StringBuilder("kind name ofType{" + chain + "}");
+        }
+        DEEP_QUERY = "{\"query\":\"{__schema{types{" + chain + "}}}\"}";
     }
 
     // Batch query — three introspection operations in one HTTP call
@@ -122,6 +129,24 @@ public class GraphQLSecurityTestCase implements TestCase {
     }
 
     // ── Helper: is this endpoint a GraphQL endpoint? ──────────────────────────
+
+    /**
+     * GraphQL servers return HTTP 200 for both successful queries AND validation/execution
+     * errors — per spec, errors are reported in the response body's {@code "errors"} array,
+     * never via HTTP status. A 2xx status therefore does not by itself prove a query was
+     * accepted; the body must also contain real {@code "data"} and be free of an
+     * {@code "errors"} entry (e.g. a depth-limit or schema-validation rejection).
+     */
+    boolean isAcceptedGraphQLQuery(HttpResponse response) {
+        if (response == null || !response.isSuccess()) {
+            return false;
+        }
+        String body = response.getBody();
+        if (body == null || body.isBlank() || !body.contains("\"data\"")) {
+            return false;
+        }
+        return !body.contains("\"errors\"");
+    }
 
     boolean isGraphQLEndpoint(EndpointInfo endpoint) {
         String path = endpoint.getPath().toLowerCase();
@@ -175,9 +200,13 @@ public class GraphQLSecurityTestCase implements TestCase {
             HttpResponse response = httpClient.postWithStatus(
                     endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, INTROSPECTION_QUERY);
 
-            if (response != null && response.isSuccess()) {
+            if (isAcceptedGraphQLQuery(response)) {
                 String body = response.getBody();
-                if (body != null && body.contains("__schema")) {
+                // "queryType" only appears in a genuine introspection result (it's a field we
+                // explicitly requested) — unlike a bare "__schema" substring check, it can't be
+                // accidentally matched by an error message such as
+                // `"Cannot query field \"__schema\" on type \"Query\"."` when introspection is disabled.
+                if (body != null && body.contains("queryType")) {
                     Finding f = new Finding(
                             UUID.randomUUID().toString(),
                             "GraphQL Introspection Enabled in Production",
@@ -254,8 +283,9 @@ public class GraphQLSecurityTestCase implements TestCase {
             HttpResponse response = httpClient.postWithStatus(
                     endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, DEEP_QUERY);
 
-            if (response != null && response.isSuccess()) {
-                // The server accepted the deeply nested query without rejecting it
+            if (isAcceptedGraphQLQuery(response)) {
+                // The server resolved the deeply nested query (real "data", no "errors") instead
+                // of rejecting it — depth limiting is not enforced.
                 Finding f = new Finding(
                         UUID.randomUUID().toString(),
                         "GraphQL Query Depth Limit Not Enforced",
@@ -270,7 +300,7 @@ public class GraphQLSecurityTestCase implements TestCase {
                         "Recommended maximum depth: 5-10 levels."
                 );
                 f.setEvidence("Server returned HTTP " + response.getStatusCode() +
-                        " for a query nested 10+ levels deep");
+                        " with resolved data (no errors) for a query nested 12+ levels deep via __Type.ofType");
                 findings.add(f);
             }
         } catch (Exception e) {
