@@ -8,6 +8,7 @@ import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.http.HttpClient;
+import org.owasp.astf.core.http.HttpResponse;
 
 import java.io.IOException;
 import java.util.List;
@@ -26,6 +27,14 @@ class EndpointDiscoveryServiceTest {
 
     private ScanConfig config;
     private EndpointDiscoveryService discoveryService;
+
+    private static HttpResponse ok(String body) {
+        return new HttpResponse(200, body, Map.of());
+    }
+
+    private static HttpResponse notFound() {
+        return new HttpResponse(404, "Not Found", Map.of());
+    }
 
     @BeforeEach
     void setUp() {
@@ -49,7 +58,7 @@ class EndpointDiscoveryServiceTest {
                 """;
 
         // All spec path probes return the swagger JSON
-        when(httpClient.get(anyString(), anyMap())).thenReturn(swagger);
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(swagger));
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
@@ -76,7 +85,7 @@ class EndpointDiscoveryServiceTest {
                 }
                 """;
 
-        when(httpClient.get(anyString(), anyMap())).thenReturn(openApi);
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
@@ -97,7 +106,7 @@ class EndpointDiscoveryServiceTest {
     @DisplayName("Should return fallback endpoints when no spec is found and discovery fails")
     void testFallbackEndpointsOnEmptyResponse() throws IOException {
         // All HTTP calls return empty — simulates no spec and no reachable endpoints
-        when(httpClient.get(anyString(), anyMap())).thenReturn("");
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(""));
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
@@ -109,7 +118,7 @@ class EndpointDiscoveryServiceTest {
     @Test
     @DisplayName("Should return fallback endpoints when HTTP calls throw exceptions")
     void testFallbackEndpointsOnException() throws IOException {
-        when(httpClient.get(anyString(), anyMap())).thenThrow(new IOException("Connection refused"));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenThrow(new IOException("Connection refused"));
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
@@ -120,15 +129,15 @@ class EndpointDiscoveryServiceTest {
     @DisplayName("Should discover endpoints from reachable API roots")
     void testDiscoverFromApiRoot() throws IOException {
         // Spec paths return empty, but the /api root returns a non-empty JSON response
-        when(httpClient.get(anyString(), anyMap())).thenAnswer(inv -> {
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
             String url = inv.getArgument(0);
             if (url.contains("swagger") || url.contains("openapi") || url.contains("api-docs")) {
-                return "";
+                return ok("");
             }
             if (url.endsWith("/api")) {
-                return "{\"links\":[]}";
+                return ok("{\"links\":[]}");
             }
-            return "";
+            return ok("");
         });
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
@@ -141,9 +150,28 @@ class EndpointDiscoveryServiceTest {
     @DisplayName("Should not throw when spec JSON is malformed")
     void testMalformedSpecJson() throws IOException {
         String malformedJson = "{invalid json content}";
-        when(httpClient.get(anyString(), anyMap())).thenReturn(malformedJson);
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(malformedJson));
 
         assertDoesNotThrow(() -> discoveryService.discoverEndpoints());
+    }
+
+    @Test
+    @DisplayName("Should not mistake a non-empty 404 error page for a real API root (regression)")
+    void testDoesNotTreat404PageAsDiscoveredEndpoint() throws IOException {
+        // Reproduces the crAPI false-discovery bug: every generic path guess reached a real
+        // web server that replied with a non-empty 404 page (a very common server behavior).
+        // A body-emptiness-only check would misread every single one of these as "found".
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(notFound());
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        // Discovery should fall back to the honest hardcoded fallback list rather than
+        // reporting any of the generic /api, /api/v1, /rest, ... guesses as real endpoints.
+        assertTrue(endpoints.stream().noneMatch(e -> "/api".equals(e.getPath())),
+                "A 404 response for /api should not be reported as a discovered endpoint");
+        assertTrue(endpoints.stream().noneMatch(e -> "/rest".equals(e.getPath())),
+                "A 404 response for /rest should not be reported as a discovered endpoint");
+        assertFalse(endpoints.isEmpty(), "Should still return the fallback endpoint list");
     }
 
     @Test
@@ -161,7 +189,7 @@ class EndpointDiscoveryServiceTest {
                   }
                 }
                 """;
-        when(httpClient.get(anyString(), anyMap())).thenReturn(openApi);
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
