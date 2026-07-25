@@ -46,6 +46,16 @@ public class ScanConfig {
     private List<String> enabledTestCaseIds;
     private List<String> disabledTestCaseIds;
 
+    // mTLS client-certificate testing. clientCert* is the certificate the scan authenticates
+    // with normally (a valid identity for the target); invalidClientCert* is a deliberately
+    // wrong/untrusted certificate (self-signed, or with a mismatched subject) supplied by the
+    // operator to test whether the server actually validates client certificates rather than
+    // accepting any presented certificate. Both are PKCS12 keystores (.p12/.pfx).
+    private String clientCertPath;
+    private String clientCertPassword;
+    private String invalidClientCertPath;
+    private String invalidClientCertPassword;
+
     // Execution settings
     private int threads = 10;
     private int timeoutMinutes = 30;
@@ -305,6 +315,42 @@ public class ScanConfig {
      */
     public void setSecondaryBearerToken(String secondaryBearerToken) {
         this.secondaryBearerToken = secondaryBearerToken;
+    }
+
+    /** @return path to the PKCS12 keystore containing the scan's normal client certificate identity */
+    public String getClientCertPath() {
+        return clientCertPath;
+    }
+
+    public void setClientCertPath(String clientCertPath) {
+        this.clientCertPath = clientCertPath;
+    }
+
+    /** @return password for {@link #getClientCertPath()}'s keystore */
+    public String getClientCertPassword() {
+        return clientCertPassword;
+    }
+
+    public void setClientCertPassword(String clientCertPassword) {
+        this.clientCertPassword = clientCertPassword;
+    }
+
+    /** @return path to a PKCS12 keystore containing a deliberately invalid/untrusted certificate */
+    public String getInvalidClientCertPath() {
+        return invalidClientCertPath;
+    }
+
+    public void setInvalidClientCertPath(String invalidClientCertPath) {
+        this.invalidClientCertPath = invalidClientCertPath;
+    }
+
+    /** @return password for {@link #getInvalidClientCertPath()}'s keystore */
+    public String getInvalidClientCertPassword() {
+        return invalidClientCertPassword;
+    }
+
+    public void setInvalidClientCertPassword(String invalidClientCertPassword) {
+        this.invalidClientCertPassword = invalidClientCertPassword;
     }
 
     // Proxy getters/setters

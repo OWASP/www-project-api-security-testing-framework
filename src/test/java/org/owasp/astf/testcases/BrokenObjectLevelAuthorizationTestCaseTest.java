@@ -90,6 +90,63 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should detect real cross-user BOLA when a secondary identity accesses the same object (regression, #87)")
+    void testCrossUserBolaDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A secondary identity is configured — HttpClient reports its override headers.
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        // Both the primary (Map.of() headers) and secondary (override headers) requests to the
+        // exact same object ID succeed — no ID substitution involved at all.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"owner\":\"someone-else\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should detect BOLA when a second identity accesses the same object without ID substitution");
+    }
+
+    @Test
+    @DisplayName("Should NOT run cross-user BOLA check when no secondary identity is configured")
+    void testNoCrossUserBolaWithoutSecondaryIdentity() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // getSecondaryAuthHeaders() defaults to an empty map (Mockito's default for
+        // unstubbed Map-returning methods) — simulating no --secondary-token configured.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should not attempt cross-user BOLA testing when no secondary identity is configured");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag cross-user BOLA when the secondary identity is rejected")
+    void testNoCrossUserBolaWhenSecondaryRejected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        // Primary succeeds; secondary is correctly rejected with 403 — proper authorization.
+        when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+                .thenReturn(new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should not flag cross-user BOLA when the secondary identity is correctly rejected");
+    }
+
+    @Test
     @DisplayName("Should handle exceptions gracefully")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users/1", "GET");

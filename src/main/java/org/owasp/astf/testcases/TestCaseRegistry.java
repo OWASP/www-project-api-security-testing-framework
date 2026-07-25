@@ -38,7 +38,9 @@ public class TestCaseRegistry {
         register(new UnsafeConsumptionOfApisTestCase());           // API10
         register(new GraphQLSecurityTestCase());                   // GraphQL-specific
         register(new GrpcEndpointDetectionTestCase());             // gRPC detection
-        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023 + GraphQL/gRPC)",
+        register(new MutualTlsValidationTestCase());               // mTLS client-cert validation
+        register(new LlmPromptInjectionTestCase());                // LLM/chatbot prompt injection
+        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023 + GraphQL/gRPC/mTLS/LLM)",
                 availableTestCases.size());
     }
 

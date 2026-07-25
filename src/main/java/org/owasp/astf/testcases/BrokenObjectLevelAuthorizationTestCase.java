@@ -60,8 +60,76 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         logger.info("Executing {} test on {}", getId(), endpoint);
         List<Finding> findings = new ArrayList<>();
 
+        findings.addAll(testCrossUserAccess(endpoint, httpClient));
         findings.addAll(testNumericIdManipulation(endpoint, httpClient));
         findings.addAll(testUuidManipulation(endpoint, httpClient));
+
+        return findings;
+    }
+
+    /**
+     * Tests real cross-user BOLA: whether a second, distinct authenticated identity (configured
+     * via {@code --secondary-token}) can access the exact same object — no ID substitution
+     * involved — that the primary identity can access. Unlike {@link #testNumericIdManipulation}
+     * and {@link #testUuidManipulation}, which only prove a single identity can swap IDs, this
+     * proves the stronger claim BOLA actually names: a different user's credentials reading an
+     * object without demonstrated ownership of it.
+     * <p>
+     * Skips entirely when no secondary identity is configured — {@link HttpClient#getSecondaryAuthHeaders()}
+     * returns an empty map in that case, and the single-identity checks above remain the fallback.
+     */
+    private List<Finding> testCrossUserAccess(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        Map<String, String> secondaryHeaders = httpClient.getSecondaryAuthHeaders();
+        if (secondaryHeaders.isEmpty()) {
+            return findings;
+        }
+
+        // Only meaningful for endpoints that identify a specific object and that the scan
+        // considers to require authentication in the first place.
+        if (!endpoint.isRequiresAuthentication()) {
+            return findings;
+        }
+        boolean hasNumericId = NUMERIC_ID_PATTERN.matcher(endpoint.getPath()).find();
+        boolean hasUuid = UUID_PATTERN.matcher(endpoint.getPath()).find();
+        if (!hasNumericId && !hasUuid) {
+            return findings;
+        }
+
+        try {
+            HttpResponse primaryResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient, Map.of());
+            HttpResponse secondaryResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient, secondaryHeaders);
+
+            if (primaryResponse != null && secondaryResponse != null
+                    && primaryResponse.isSuccess()
+                    && secondaryResponse.isSuccess()
+                    && !secondaryResponse.isNotFound()) {
+
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Broken Object Level Authorization (Cross-User Access Confirmed)",
+                        String.format("A second, distinct authenticated identity was able to access " +
+                                "'%s' — the same object the primary identity can access — without any " +
+                                "ID substitution. This is direct evidence of a missing object-level " +
+                                "authorization check, not an inference from ID guessing.",
+                                endpoint.getPath()),
+                        Severity.CRITICAL,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Verify that every object-returning endpoint checks the authenticated caller's " +
+                        "ownership of or explicit permission for the specific object requested, not merely " +
+                        "that the caller is authenticated at all."
+                );
+                finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
+                        " — requested with two distinct identities (primary and secondary tokens)");
+                finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                        "\nSecondary identity status: " + secondaryResponse.getStatusCode());
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing cross-user BOLA on {}: {}", endpoint, e.getMessage());
+        }
 
         return findings;
     }
@@ -167,14 +235,25 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     }
 
     private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient) throws IOException {
+        return makeRequest(endpoint, url, httpClient, Map.of());
+    }
+
+    /**
+     * Same as {@link #makeRequest(EndpointInfo, String, HttpClient)}, but with a caller-supplied
+     * header override — used by {@link #testCrossUserAccess} to substitute the secondary
+     * identity's Authorization header for a single request without touching the client's
+     * default identity.
+     */
+    private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                      Map<String, String> headers) throws IOException {
         return switch (endpoint.getMethod().toUpperCase()) {
-            case "GET"    -> httpClient.getWithStatus(url, Map.of());
-            case "POST"   -> httpClient.postWithStatus(url, Map.of(), endpoint.getContentType(),
+            case "GET"    -> httpClient.getWithStatus(url, headers);
+            case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(),
                                 endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
-            case "PUT"    -> httpClient.putWithStatus(url, Map.of(), endpoint.getContentType(),
+            case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(),
                                 endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
-            case "DELETE" -> httpClient.deleteWithStatus(url, Map.of());
-            default       -> httpClient.getWithStatus(url, Map.of());
+            case "DELETE" -> httpClient.deleteWithStatus(url, headers);
+            default       -> httpClient.getWithStatus(url, headers);
         };
     }
 
