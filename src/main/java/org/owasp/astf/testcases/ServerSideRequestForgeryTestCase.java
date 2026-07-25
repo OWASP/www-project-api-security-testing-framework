@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -89,6 +91,7 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         }
 
         String baseUrl = endpoint.getFullUrl();
+        Set<String> baselineIndicators = fetchBaselineIndicators(endpoint, httpClient);
 
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
@@ -97,7 +100,7 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                 try {
                     HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
 
-                    if (response != null && containsSsrfIndicator(response.getBody())) {
+                    if (response != null && containsNewSsrfIndicator(response.getBody(), baselineIndicators)) {
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
                                 "Server Side Request Forgery (SSRF) via Query Parameter",
@@ -134,6 +137,8 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
             return findings;
         }
 
+        Set<String> baselineIndicators = fetchBaselineIndicators(endpoint, httpClient);
+
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
                 String body = String.format("{\"%s\":\"%s\"}", param, payload);
@@ -145,7 +150,7 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                         default      -> null;
                     };
 
-                    if (response != null && containsSsrfIndicator(response.getBody())) {
+                    if (response != null && containsNewSsrfIndicator(response.getBody(), baselineIndicators)) {
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
                                 "Server Side Request Forgery (SSRF) via Request Body",
@@ -173,10 +178,40 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         return findings;
     }
 
-    private boolean containsSsrfIndicator(String body) {
+    /**
+     * Fetches the endpoint's normal (un-injected) response and returns the set of SSRF
+     * indicators that already appear in it. Some indicators (notably the generic environment
+     * words "docker"/"kubernetes"/"k8s") can legitimately appear in an API's ordinary response —
+     * without this baseline, every probe against such an endpoint would be a false positive.
+     */
+    private Set<String> fetchBaselineIndicators(EndpointInfo endpoint, HttpClient httpClient) {
+        try {
+            HttpResponse baseline = httpClient.getWithStatus(endpoint.getFullUrl(), Map.of());
+            if (baseline == null || baseline.getBody() == null) {
+                return Set.of();
+            }
+            String lower = baseline.getBody().toLowerCase();
+            return SSRF_INDICATORS.stream()
+                    .filter(indicator -> lower.contains(indicator.toLowerCase()))
+                    .collect(Collectors.toUnmodifiableSet());
+        } catch (Exception e) {
+            logger.debug("Error fetching SSRF baseline for {}: {}", endpoint, e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /**
+     * Returns true only when the response contains an SSRF indicator that was NOT already
+     * present in the endpoint's baseline (un-injected) response — i.e. the indicator's
+     * appearance is actually attributable to the injected payload, not just how this API
+     * normally talks.
+     */
+    private boolean containsNewSsrfIndicator(String body, Set<String> baselineIndicators) {
         if (body == null || body.isEmpty()) return false;
         String lower = body.toLowerCase();
-        return SSRF_INDICATORS.stream().anyMatch(indicator -> lower.contains(indicator.toLowerCase()));
+        return SSRF_INDICATORS.stream()
+                .filter(indicator -> !baselineIndicators.contains(indicator))
+                .anyMatch(indicator -> lower.contains(indicator.toLowerCase()));
     }
 
     private String urlEncode(String value) {

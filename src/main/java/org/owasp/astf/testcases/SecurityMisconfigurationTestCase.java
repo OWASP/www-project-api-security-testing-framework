@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -34,6 +35,14 @@ public class SecurityMisconfigurationTestCase implements TestCase {
             "X-XSS-Protection"
     );
 
+    // Endpoints that are conventionally, intentionally public (e.g. container orchestration
+    // liveness/readiness probes) — exposure alone isn't a meaningful misconfiguration, so these
+    // get a lower severity than genuine debug/dump endpoints unless they leak real content.
+    private static final List<String> CONVENTIONALLY_PUBLIC_ENDPOINTS = List.of(
+            "/info", "/health", "/status", "/ping",
+            "/actuator/health", "/actuator/info"
+    );
+
     private static final List<String> DEBUG_ENDPOINTS = List.of(
             "/actuator", "/actuator/health", "/actuator/env", "/actuator/beans",
             "/actuator/mappings", "/actuator/metrics", "/actuator/info",
@@ -46,12 +55,19 @@ public class SecurityMisconfigurationTestCase implements TestCase {
             "/trace", "/dump", "/heapdump", "/threaddump"
     );
 
+    // Sensitive-value patterns require a colon/quote after the keyword, so a generic message
+    // like "invalid API key" (no actual value disclosed) doesn't match — only an actual
+    // key-value-shaped disclosure like "password": "..." or apiKey=... does.
+    private static final List<String> ERROR_SENSITIVE_VALUE_PATTERNS = List.of(
+            "password[\"']?\\s*[:=]", "secret[\"']?\\s*[:=]", "api[_-]?key[\"']?\\s*[:=]",
+            "credential[\"']?\\s*[:=]", "private[_-]?key[\"']?\\s*[:=]"
+    );
+
     private static final List<String> ERROR_SENSITIVE_PATTERNS = List.of(
             "stack trace", "stacktrace", "at org.", "at java.", "at com.",
             "exception", "NullPointerException", "SQLException",
             "org.springframework", "hibernate", "datasource",
-            "internal server error at", "caused by:",
-            "password", "secret", "token", "key", "credential"
+            "internal server error at", "caused by:"
     );
 
     @Override
@@ -192,19 +208,28 @@ public class SecurityMisconfigurationTestCase implements TestCase {
 
                 if (response != null && response.isSuccess()
                         && !response.getBody().isEmpty()) {
+                    boolean conventionallyPublic = CONVENTIONALLY_PUBLIC_ENDPOINTS.contains(debugPath);
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "Debug/Diagnostic Endpoint Exposed",
                             String.format("The debug or diagnostic endpoint '%s' is publicly accessible " +
-                                    "and returned a non-empty response. Debug endpoints can expose sensitive " +
-                                    "configuration, environment variables, internal routes, and system internals.",
-                                    debugPath),
-                            Severity.HIGH,
+                                    "and returned a non-empty response.%s",
+                                    debugPath,
+                                    conventionallyPublic
+                                            ? " This path is conventionally public (e.g. container " +
+                                              "orchestration health checks) — verify it doesn't leak " +
+                                              "internal details beyond a basic status."
+                                            : " Debug endpoints can expose sensitive configuration, " +
+                                              "environment variables, internal routes, and system internals."),
+                            conventionallyPublic ? Severity.LOW : Severity.HIGH,
                             getId(),
                             "GET " + debugPath,
-                            "Disable or restrict access to debug endpoints in production environments. " +
-                            "If these endpoints are required, protect them with authentication and restrict " +
-                            "access to internal networks or VPN only."
+                            conventionallyPublic
+                                    ? "Confirm this endpoint returns only a minimal status payload with no " +
+                                      "environment, configuration, or internal implementation details."
+                                    : "Disable or restrict access to debug endpoints in production environments. " +
+                                      "If these endpoints are required, protect them with authentication and " +
+                                      "restrict access to internal networks or VPN only."
                     );
                     finding.setRequestDetails("GET " + testUrl);
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
@@ -243,6 +268,14 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                     for (String pattern : ERROR_SENSITIVE_PATTERNS) {
                         if (body.contains(pattern.toLowerCase())) {
                             foundPatterns.add(pattern);
+                        }
+                    }
+                    // Value-shaped patterns require the keyword to be followed by ":" or "=" —
+                    // a generic message like "invalid API key" doesn't match, but an actual
+                    // disclosed value like "password": "hunter2" or apiKey=abc123 does.
+                    for (String valuePattern : ERROR_SENSITIVE_VALUE_PATTERNS) {
+                        if (Pattern.compile(valuePattern).matcher(body).find()) {
+                            foundPatterns.add(valuePattern.replaceAll("[\\[\\]\"'?:=\\\\+-]", "").trim());
                         }
                     }
 

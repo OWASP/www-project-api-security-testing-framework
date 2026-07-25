@@ -64,8 +64,11 @@ class ServerSideRequestForgeryTestCaseTest {
         // GET endpoint — the test case exercises testQueryParameterSsrf
         EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
 
-        // Any GET call returns a body containing an SSRF indicator
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        // Baseline (no injected params, URL has no "=") is clean; only the payload-bearing
+        // probe URLs (which always append "?param=...") return the SSRF indicator.
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
                 .thenReturn(new HttpResponse(200,
                         "{\"result\":\"ami-id: ami-0abcdef1234567890\"}",
                         Map.of()));
@@ -77,6 +80,23 @@ class ServerSideRequestForgeryTestCaseTest {
                 findings.stream().anyMatch(f -> f.getTitle().contains("SSRF")
                         || f.getTitle().contains("Server Side Request Forgery")),
                 "Finding title should reference SSRF");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag SSRF when the indicator is already present in the baseline (unmodified) response")
+    void testNoSsrfWhenIndicatorAlreadyInBaseline() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        // Every response — baseline AND payload-probe alike — mentions "docker", simulating an
+        // API that just happens to describe its own deployment environment. Since the word is
+        // already present without any injected payload, it must not be treated as SSRF evidence.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"platform\":\"docker\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(),
+                "Should not flag SSRF when the indicator word is already present in the endpoint's normal response");
     }
 
     @Test

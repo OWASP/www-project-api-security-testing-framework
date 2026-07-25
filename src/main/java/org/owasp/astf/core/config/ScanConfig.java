@@ -30,6 +30,12 @@ public class ScanConfig {
     private String apiKeyHeader = "X-API-Key";
     private String bearerToken;
 
+    // A second, distinct authenticated identity (e.g. a separate registered test account),
+    // used only by test cases that need to prove a cross-user authorization bypass (BOLA) —
+    // never merged into the default request headers, since it must never be used as the
+    // scan's primary identity.
+    private String secondaryBearerToken;
+
     // Proxy settings
     private String proxyHost;
     private int proxyPort;
@@ -279,6 +285,26 @@ public class ScanConfig {
                 !headers.containsKey("Authorization")) {
             headers.put("Authorization", "Bearer " + bearerToken);
         }
+    }
+
+    /**
+     * Gets the secondary bearer token — a second, distinct authenticated identity used only for
+     * cross-user authorization testing (e.g. BOLA). Deliberately never merged into the default
+     * request headers.
+     *
+     * @return The secondary bearer token, or {@code null} if not configured
+     */
+    public String getSecondaryBearerToken() {
+        return secondaryBearerToken;
+    }
+
+    /**
+     * Sets the secondary bearer token.
+     *
+     * @param secondaryBearerToken The secondary bearer token
+     */
+    public void setSecondaryBearerToken(String secondaryBearerToken) {
+        this.secondaryBearerToken = secondaryBearerToken;
     }
 
     // Proxy getters/setters

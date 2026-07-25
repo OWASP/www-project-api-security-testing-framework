@@ -169,6 +169,26 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
     }
 
     /**
+     * A server that sanitizes the field and echoes back the safe value (e.g. "isAdmin":false)
+     * should NOT be flagged — the key being present is not evidence of privilege escalation,
+     * only the privileged VALUE being reflected is.
+     */
+    @Test
+    @DisplayName("No mass-assignment finding when the key is present but sanitized to a safe value")
+    void noMassAssignmentWhenValueIsSanitized() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST");
+
+        // Server echoes the field name back but with the safe/sanitized value, not the submitted one
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"id\":5,\"name\":\"Dave\",\"isAdmin\":false,\"role\":\"user\"}"));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(findings.stream().anyMatch(f -> f.getTitle().contains("Mass Assignment")),
+                "Should not flag mass assignment when the privileged value was sanitized, even if the key is echoed back");
+    }
+
+    /**
      * GET endpoints should be skipped by the mass-assignment check (only POST/PUT/PATCH apply).
      */
     @Test

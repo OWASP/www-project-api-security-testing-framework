@@ -101,7 +101,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
             try {
                 HttpResponse response = httpClient.getWithStatus(oldUrl, Map.of());
 
-                if (response != null && response.isSuccess()) {
+                if (response != null && response.isSuccess() && isApiResponse(response)) {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "Deprecated API Version Still Accessible",
@@ -133,7 +133,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
             String shadowUrl = cleanBase + shadowPath;
             try {
                 HttpResponse response = httpClient.getWithStatus(shadowUrl, Map.of());
-                if (response != null && response.isSuccess()) {
+                if (response != null && response.isSuccess() && isApiResponse(response)) {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "Shadow/Non-Production API Endpoint Accessible",
@@ -168,12 +168,21 @@ public class ImproperInventoryManagementTestCase implements TestCase {
 
         String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
 
+        // Several of the probed paths (e.g. /docs, /redoc, /swagger-ui.html) are legitimately
+        // HTML by design, so a content-type guard would wrongly reject real documentation pages.
+        // Instead, fetch a deliberately-nonexistent path first: a SPA/reverse-proxy catch-all
+        // that returns the same generic fallback page for every unknown path will return
+        // identical content here and for every doc path probed below — that shared fallback
+        // body is not evidence of real documentation being exposed.
+        String fallbackBody = fetchFallbackBaseline(cleanBase, httpClient);
+
         for (String docPath : EXPOSED_DOC_ENDPOINTS) {
             String testUrl = cleanBase + docPath;
             try {
                 HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
 
-                if (response != null && response.isSuccess() && !response.getBody().isEmpty()) {
+                if (response != null && response.isSuccess() && !response.getBody().isEmpty()
+                        && !response.getBody().equals(fallbackBody)) {
                     boolean isApiSpec = response.getBody().contains("\"openapi\"")
                             || response.getBody().contains("\"swagger\"")
                             || response.getBody().contains("swagger:")
@@ -207,5 +216,55 @@ public class ImproperInventoryManagementTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /**
+     * Fetches a deliberately-nonexistent path so its response body can be used as a baseline for
+     * "this is just the generic SPA/reverse-proxy fallback page", per the comment in
+     * {@link #testExposedDocumentation}. Returns {@code null} on any failure, in which case no
+     * doc-path response will match it and the check behaves as it did before this fix.
+     */
+    private String fetchFallbackBaseline(String cleanBase, HttpClient httpClient) {
+        try {
+            HttpResponse response = httpClient.getWithStatus(
+                    cleanBase + "/__astf_nonexistent_path_check__", Map.of());
+            return response != null ? response.getBody() : null;
+        } catch (Exception e) {
+            logger.debug("Error fetching fallback baseline for {}: {}", cleanBase, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Returns true when a response looks like a real API/service response rather than an HTML
+     * page. SPAs and reverse proxies typically return HTTP 200 with text/html for every unknown
+     * path (client-side routing fallback), which would otherwise produce false positives for
+     * deprecated-version and shadow-endpoint probing (documentation endpoints are handled
+     * separately in {@link #testExposedDocumentation}, since some of them are legitimately HTML).
+     */
+    private boolean isApiResponse(HttpResponse response) {
+        String contentType = response.getHeaders().entrySet().stream()
+                .filter(e -> e.getKey() != null && e.getKey().equalsIgnoreCase("Content-Type"))
+                .flatMap(e -> e.getValue().stream())
+                .findFirst()
+                .orElse("")
+                .toLowerCase();
+
+        if (!contentType.isEmpty()) {
+            if (contentType.contains("text/html")) {
+                return false;
+            }
+            if (contentType.contains("json") || contentType.contains("xml") || contentType.contains("text/plain")) {
+                return true;
+            }
+        }
+
+        String body = response.getBody();
+        if (body != null) {
+            String trimmed = body.stripLeading();
+            return trimmed.startsWith("{") || trimmed.startsWith("[");
+        }
+
+        return false;
     }
 }

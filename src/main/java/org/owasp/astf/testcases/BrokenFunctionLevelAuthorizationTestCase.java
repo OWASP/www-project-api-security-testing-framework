@@ -174,7 +174,8 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
 
                 if (getResponse != null && testResponse != null
                         && getResponse.isSuccess()
-                        && testResponse.isSuccess()) {
+                        && testResponse.isSuccess()
+                        && isApiResponse(testResponse)) {
 
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
