@@ -24,6 +24,7 @@ import okhttp3.Credentials;
 import okhttp3.HttpUrl;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
+import okhttp3.Protocol;
 import okhttp3.Request;
 import okhttp3.RequestBody;
 import okhttp3.Response;
@@ -50,6 +51,9 @@ public class HttpClient {
     private final ScanConfig config;
     private final Map<String, String> defaultHeaders;
     private final Map<String, List<Cookie>> cookieStore = new HashMap<>();
+
+    // Lazily-built client for HTTP/2 cleartext (h2c) prior-knowledge requests — see postH2c().
+    private volatile OkHttpClient h2cClient;
 
     /**
      * Creates a new HTTP client with the specified configuration.
@@ -152,6 +156,55 @@ public class HttpClient {
         MediaType mediaType = MediaType.parse(contentType);
         RequestBody requestBody = RequestBody.create(body, mediaType);
         return executeRequest(createRequest(url, "PATCH", headers, mediaType, requestBody));
+    }
+
+    /**
+     * Sends a POST request using HTTP/2 cleartext prior-knowledge (h2c) rather than HTTP/1.1.
+     * <p>
+     * gRPC's wire protocol is HTTP/2-only. OkHttp never attempts HTTP/2 over a plain
+     * {@code "http://"} URL by default — without TLS there is no ALPN negotiation, so a
+     * standard client silently falls back to HTTP/1.1, which a gRPC server cannot understand
+     * at all (the connection is rejected outright). This method routes cleartext targets
+     * through a dedicated client configured for {@link Protocol#H2_PRIOR_KNOWLEDGE} so the
+     * request can actually reach a gRPC service.
+     * <p>
+     * {@code "https://"} targets are unaffected and continue to use the standard client, which
+     * already negotiates HTTP/2 automatically via ALPN when the server supports it.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @param contentType The content type of the request
+     * @param body The request body
+     * @return The full HTTP response
+     * @throws IOException If the request fails (including when the target does not speak h2c)
+     */
+    public HttpResponse postH2c(String url, Map<String, String> headers, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        Request request = createRequest(url, "POST", headers, mediaType, requestBody);
+
+        OkHttpClient targetClient = url.startsWith("https://") ? client : h2cClient();
+        try (Response response = targetClient.newCall(request).execute()) {
+            String responseBody = response.body() != null ? response.body().string() : "";
+            Map<String, List<String>> responseHeaders = extractHeaders(response);
+            return new HttpResponse(response.code(), responseBody, responseHeaders);
+        }
+    }
+
+    private OkHttpClient h2cClient() {
+        OkHttpClient local = h2cClient;
+        if (local == null) {
+            synchronized (this) {
+                local = h2cClient;
+                if (local == null) {
+                    local = client.newBuilder()
+                            .protocols(List.of(Protocol.H2_PRIOR_KNOWLEDGE))
+                            .build();
+                    h2cClient = local;
+                }
+            }
+        }
+        return local;
     }
 
     /**

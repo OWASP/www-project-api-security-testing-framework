@@ -100,8 +100,10 @@ public class GrpcEndpointDetectionTestCase implements TestCase {
             try {
                 String url = baseUrl + path;
                 // gRPC frames are binary, but an HTTP POST with the gRPC content-type
-                // lets us detect the service from the response headers alone.
-                HttpResponse response = httpClient.postWithStatus(
+                // lets us detect the service from the response headers alone. gRPC is
+                // HTTP/2-only, so this must go over h2c prior-knowledge for cleartext
+                // targets — a plain HTTP/1.1 request cannot connect to a gRPC server at all.
+                HttpResponse response = httpClient.postH2c(
                         url,
                         Map.of("Content-Type", GRPC_CONTENT_TYPE, "TE", "trailers"),
                         GRPC_CONTENT_TYPE,
@@ -130,7 +132,7 @@ public class GrpcEndpointDetectionTestCase implements TestCase {
 
         try {
             String url = baseUrl + REFLECTION_PATH;
-            HttpResponse response = httpClient.postWithStatus(
+            HttpResponse response = httpClient.postH2c(
                     url,
                     Map.of("Content-Type", GRPC_CONTENT_TYPE, "TE", "trailers"),
                     GRPC_CONTENT_TYPE,
