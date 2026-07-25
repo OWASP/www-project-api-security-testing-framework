@@ -108,6 +108,25 @@ class UnsafeConsumptionOfApisTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should detect SQL injection when a 500 response contains a database error (regression)")
+    void testSqlInjectionDetectedOn500() throws IOException {
+        // Error-based SQL injection almost always surfaces as a 500 with the raw DB error,
+        // not a 2xx — this must be detected even though the response is a server error.
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(500,
+                        "{\"error\":\"You have an error in your SQL syntax; check the manual that " +
+                        "corresponds to your MySQL server version\"}",
+                        Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("SQL Injection")),
+                "Should detect SQL injection from a 500 response containing a database error");
+    }
+
+    @Test
     @DisplayName("Should detect open redirect when Location header echoes attacker domain")
     void testOpenRedirectDetected() throws IOException {
         // GET endpoint — testOpenRedirect only fires on GET

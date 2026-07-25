@@ -5,6 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -136,11 +137,14 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
                 };
 
                 if (response != null && response.isSuccess()) {
-                    String responseBody = response.getBody().toLowerCase();
+                    String responseBody = response.getBody();
 
-                    // Check if the response reflects the privileged properties we tried to set
-                    boolean privilegeAccepted = payload.keySet().stream()
-                            .anyMatch(key -> responseBody.contains("\"" + key.toLowerCase() + "\""));
+                    // Check the response actually reflects the PRIVILEGED VALUE we submitted, not
+                    // merely the presence of the key. A correctly-defended API commonly echoes back
+                    // the sanitized object (e.g. "isAdmin":false) — checking for the key alone would
+                    // misread that safe behavior as a successful privilege escalation.
+                    boolean privilegeAccepted = payload.entrySet().stream()
+                            .anyMatch(entry -> valueWasReflected(responseBody, entry.getKey(), entry.getValue()));
 
                     if (privilegeAccepted) {
                         Finding finding = new Finding(
@@ -168,6 +172,31 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
         }
 
         return findings;
+    }
+
+    /**
+     * Checks whether the response body reflects the specific privileged VALUE submitted for
+     * {@code key} (not merely the key name). A boolean/numeric value must match exactly
+     * (e.g. {@code "isAdmin":true}); a string value must match as a quoted JSON string; a list
+     * value is treated as reflected if any non-empty JSON array follows the key, since matching
+     * the exact array contents isn't worth the complexity for the wildcard-permission case.
+     */
+    private boolean valueWasReflected(String responseBody, String key, Object expectedValue) {
+        if (responseBody == null || responseBody.isEmpty()) {
+            return false;
+        }
+        String valuePattern;
+        if (expectedValue instanceof Boolean || expectedValue instanceof Number) {
+            valuePattern = Pattern.quote(String.valueOf(expectedValue).toLowerCase());
+        } else if (expectedValue instanceof String) {
+            valuePattern = "\"" + Pattern.quote(((String) expectedValue).toLowerCase()) + "\"";
+        } else if (expectedValue instanceof List) {
+            valuePattern = "\\[[^\\]]+\\]";
+        } else {
+            return false;
+        }
+        String keyValuePattern = "\"" + Pattern.quote(key.toLowerCase()) + "\"\\s*:\\s*" + valuePattern;
+        return Pattern.compile(keyValuePattern).matcher(responseBody.toLowerCase()).find();
     }
 
     private String buildJsonPayload(Map<String, Object> payload) {

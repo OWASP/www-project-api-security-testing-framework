@@ -29,6 +29,14 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
     private static final int RATE_LIMIT_TEST_REQUESTS = 20;
     private static final int RATE_LIMIT_THRESHOLD = 15; // 15+ successes = likely no rate limiting
 
+    // A 2xx status alone doesn't prove the request was genuinely accepted — some APIs return
+    // 200 with an explicit rate-limit/quota rejection message in the body instead of a 429/4xx
+    // status. These phrases are specific enough that they're unlikely to appear in an unrelated
+    // healthy response.
+    private static final List<String> FAILURE_BODY_MARKERS = List.of(
+            "quota exceeded", "rate limit exceeded", "too many requests", "throttled", "slow down"
+    );
+
     @Override
     public String getId() {
         return "ASTF-API4-2023";
@@ -80,7 +88,7 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
             try {
                 HttpResponse response = httpClient.getWithStatus(fullUrl, Map.of());
                 if (response != null) {
-                    if (response.isRateLimited()) {
+                    if (response.isRateLimited() || bodyIndicatesRateLimited(response.getBody())) {
                         rateLimitedCount++;
                         break; // Rate limiting is working
                     } else if (response.isSuccess()) {
@@ -116,6 +124,22 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
         return findings;
     }
 
+    private boolean looksLikeJsonData(String body) {
+        if (body == null) {
+            return false;
+        }
+        String trimmed = body.stripLeading();
+        return trimmed.startsWith("{") || trimmed.startsWith("[");
+    }
+
+    private boolean bodyIndicatesRateLimited(String body) {
+        if (body == null || body.isEmpty()) {
+            return false;
+        }
+        String lower = body.toLowerCase();
+        return FAILURE_BODY_MARKERS.stream().anyMatch(lower::contains);
+    }
+
     private List<Finding> testLargePaginationRequests(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
@@ -138,8 +162,11 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
                 HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
                 if (response != null && response.isSuccess()) {
                     String body = response.getBody();
-                    // A response body larger than 1MB suggests unbounded data return
-                    if (body.length() > 1_000_000) {
+                    // A response body larger than 1MB suggests unbounded data return — but only
+                    // when it's actually JSON/array data. A large non-JSON body (e.g. a default
+                    // server error page, or an HTML page for an unrecognized query param) is not
+                    // evidence of a missing pagination limit.
+                    if (body.length() > 1_000_000 && looksLikeJsonData(body)) {
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
                                 "Missing Pagination Limit - Large Response Returned",
@@ -194,8 +221,9 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
                     || body.contains("\"next\"") || body.contains("\"pagination\"")
                     || body.contains("\"cursor\"");
 
-            // If large response with no pagination indicators, flag it
-            if (body.length() > 100_000 && !hasPaginationHeaders && !hasPaginationInBody) {
+            // If large response with no pagination indicators, flag it — again, only when the
+            // body is actually JSON data, to avoid miscounting a large non-API HTML page.
+            if (body.length() > 100_000 && looksLikeJsonData(body) && !hasPaginationHeaders && !hasPaginationInBody) {
                 Finding finding = new Finding(
                         UUID.randomUUID().toString(),
                         "Missing Pagination on Collection Endpoint",

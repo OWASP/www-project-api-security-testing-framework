@@ -94,6 +94,28 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT flag method escalation when responses are an SPA/reverse-proxy HTML fallback (regression)")
+    void testNoMethodEscalationOnHtmlFallback() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A single-page app / catch-all reverse proxy returns 200 text/html for every method,
+        // including PUT/DELETE/PATCH — this must not be read as "method escalation allowed".
+        HttpResponse htmlFallback = new HttpResponse(200, "<html><body>App</body></html>",
+                Map.of("Content-Type", List.of("text/html")));
+
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(htmlFallback);
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString())).thenReturn(htmlFallback);
+        when(httpClient.deleteWithStatus(anyString(), anyMap())).thenReturn(htmlFallback);
+        when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString())).thenReturn(htmlFallback);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Method")),
+                "Should not flag HTTP method escalation when the response is an HTML SPA fallback page");
+    }
+
+    @Test
     @DisplayName("Should return empty when admin endpoints return 401/403")
     void testAdminEndpointReturns401() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");

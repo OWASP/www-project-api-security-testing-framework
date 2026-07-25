@@ -137,6 +137,62 @@ class SecurityMisconfigurationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should flag conventionally-public endpoints (health/status/ping) as LOW, not HIGH")
+    void testConventionallyPublicEndpointGetsLowSeverity() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.endsWith("/health")) {
+                        return new HttpResponse(200, "{\"status\":\"UP\"}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        findings.stream()
+                .filter(f -> f.getTitle().contains("Debug") && f.getEndpoint() != null && f.getEndpoint().contains("/health"))
+                .findFirst()
+                .ifPresentOrElse(
+                        f -> assertEquals(Severity.LOW, f.getSeverity(),
+                                "A conventionally-public health endpoint should be LOW severity, not HIGH"),
+                        () -> fail("Expected a finding for the /health endpoint"));
+    }
+
+    @Test
+    @DisplayName("Should NOT flag a generic error message that merely mentions 'key' without disclosing a value")
+    void testNoVerboseErrorFalsePositiveOnGenericMessage() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        String genericError = "{\"error\":\"invalid API key\"}";
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(500, genericError, Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Verbose")),
+                "Should not flag a generic 'invalid API key' message as verbose error disclosure");
+    }
+
+    @Test
+    @DisplayName("Should still flag a genuine disclosed credential value in an error message")
+    void testVerboseErrorStillDetectedForRealDisclosure() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        String realDisclosure = "{\"error\":\"db connection failed\",\"password\": \"hunter2\"}";
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(500, realDisclosure, Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Verbose")),
+                "Should still flag a genuine 'password: value' disclosure in an error response");
+    }
+
+    @Test
     @DisplayName("Should handle exceptions during testing")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");

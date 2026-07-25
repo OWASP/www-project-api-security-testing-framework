@@ -46,14 +46,21 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             "\r\nX-Injected-Header: value" // HTTP header injection
     );
 
-    // Patterns that indicate successful injection in responses
+    // Patterns that indicate successful injection in a 2xx response
     private static final List<String> INJECTION_SUCCESS_PATTERNS = List.of(
             "<script>",               // Unescaped XSS
             "alert('xss')",           // XSS executed context
             "49",                     // 7*7=49 template injection
             "root:x:0:0",            // /etc/passwd content
-            "X-Injected-Header",     // Header injection reflected
-            "sql", "syntax error", "mysql", "sqlite", "postgresql" // SQL errors
+            "X-Injected-Header"      // Header injection reflected
+    );
+
+    // SQL-error patterns are checked separately against error (5xx) responses — real
+    // error-based SQL injection almost always manifests as a 500 with the DB error text,
+    // not a 2xx, so gating these behind isSuccess() would make the most common signal
+    // unreachable.
+    private static final List<String> SQL_ERROR_PATTERNS = List.of(
+            "sql syntax", "syntax error", "mysql", "sqlite", "postgresql", "ora-0", "sqlstate"
     );
 
     @Override
@@ -136,6 +143,32 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
                             finding.setEvidence("Payload: " + payload + "\nPattern found: " + pattern);
                             findings.add(finding);
                             return findings; // One injection finding is enough
+                        }
+                    }
+                } else if (response != null && response.isServerError()) {
+                    // Error-based SQL injection almost always surfaces as a 5xx with the raw
+                    // database error text, not a 2xx — check separately from the success path.
+                    String responseBody = response.getBody().toLowerCase();
+                    for (String pattern : SQL_ERROR_PATTERNS) {
+                        if (responseBody.contains(pattern)) {
+                            Finding finding = new Finding(
+                                    UUID.randomUUID().toString(),
+                                    "SQL Injection in API Integration Endpoint",
+                                    String.format("The API integration endpoint at '%s' returned a database " +
+                                            "error containing '%s' after receiving an injection payload, " +
+                                            "indicating the input was passed unsanitized into a database query.",
+                                            endpoint.getPath(), pattern),
+                                    Severity.CRITICAL,
+                                    getId(),
+                                    endpoint.getMethod() + " " + endpoint.getPath(),
+                                    "Use parameterized queries or prepared statements for all database " +
+                                    "operations. Never concatenate untrusted input into SQL strings. " +
+                                    "Return generic error messages to clients; log details server-side only."
+                            );
+                            finding.setEvidence("Payload: " + payload + "\nHTTP " + response.getStatusCode() +
+                                    " with pattern found: " + pattern);
+                            findings.add(finding);
+                            return findings;
                         }
                     }
                 }

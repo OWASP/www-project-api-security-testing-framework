@@ -88,6 +88,26 @@ class ImproperInventoryManagementTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT flag deprecated version/shadow endpoints on an SPA/reverse-proxy HTML fallback (regression)")
+    void testNoOldVersionFindingOnHtmlFallback() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v2/users", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A catch-all SPA/reverse-proxy returns 200 text/html for every guessed old-version
+        // or shadow path — this must not be read as a real deprecated/shadow endpoint.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "<html><body>App</body></html>",
+                        Map.of("Content-Type", List.of("text/html"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f ->
+                        f.getTitle().contains("Deprecated") || f.getTitle().contains("Shadow")),
+                "Should not flag deprecated/shadow endpoints when the response is an HTML SPA fallback page");
+    }
+
+    @Test
     @DisplayName("Should return no findings when shadow/old version paths return 404")
     void testNoFindingWhenShadowPathReturns404() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/v2/users", "GET");
@@ -113,8 +133,13 @@ class ImproperInventoryManagementTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        // Documentation paths return 200 with OpenAPI spec content
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        // The fallback-baseline probe (a deliberately nonexistent path) returns 404/empty;
+        // real documentation paths return 200 with OpenAPI spec content. They must differ,
+        // otherwise the baseline-diff guard (added to avoid SPA-fallback false positives)
+        // would treat the doc content as "just the generic fallback page".
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(notFound());
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
                 .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -124,6 +149,25 @@ class ImproperInventoryManagementTestCaseTest {
                 findings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
                         || f.getTitle().contains("Exposed")),
                 "Finding should reference exposed documentation");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag documentation exposure when every path returns the same SPA fallback page (regression)")
+    void testNoDocumentationFindingOnSpaFallback() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // Every path, including the nonexistent-path baseline probe, returns the identical
+        // generic SPA shell — none of it is real documentation content.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(ok("<html><body>App Shell</body></html>"));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
+                        || f.getTitle().contains("Exposed")),
+                "Should not report documentation exposure when the content is identical to the generic fallback page");
     }
 
     @Test
