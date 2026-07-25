@@ -115,7 +115,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectGrpcEndpointFound() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/grpc.health.v1.Health/Check", "POST");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(grpcResponse());
 
         List<Finding> findings = testCase.detectGrpcEndpoint(endpoint, httpClient);
@@ -131,7 +131,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectGrpcEndpointNotFound() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(notFound());
 
         List<Finding> findings = testCase.detectGrpcEndpoint(endpoint, httpClient);
@@ -145,7 +145,7 @@ class GrpcEndpointDetectionTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/grpc.health.v1.Health/Check", "POST");
 
         // All probes succeed — but we should only get one finding
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(grpcResponse());
 
         List<Finding> findings = testCase.detectGrpcEndpoint(endpoint, httpClient);
@@ -158,7 +158,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectGrpcEndpointExceptionHandled() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/grpc.health.v1.Health/Check", "POST");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenThrow(new IOException("Connection refused"));
 
         assertDoesNotThrow(() -> testCase.detectGrpcEndpoint(endpoint, httpClient),
@@ -172,7 +172,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectServerReflectionEnabled() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", "POST");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(grpcResponse());
 
         List<Finding> findings = testCase.detectServerReflection(endpoint, httpClient);
@@ -190,7 +190,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectServerReflectionNotEnabled() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(notFound());
 
         List<Finding> findings = testCase.detectServerReflection(endpoint, httpClient);
@@ -203,7 +203,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testDetectServerReflectionExceptionHandled() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo", "POST");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenThrow(new IOException("Connection refused"));
 
         assertDoesNotThrow(() -> testCase.detectServerReflection(endpoint, httpClient),
@@ -218,7 +218,7 @@ class GrpcEndpointDetectionTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/grpc.health.v1.Health/Check", "POST");
 
         // All probes (detection + reflection) respond with gRPC content-type
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(grpcResponse());
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -236,7 +236,7 @@ class GrpcEndpointDetectionTestCaseTest {
     void testExecuteExceptionHandledGracefully() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
 
-        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.postH2c(anyString(), anyMap(), anyString(), anyString()))
                 .thenThrow(new IOException("Network error"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient),
