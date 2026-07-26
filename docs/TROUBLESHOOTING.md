@@ -140,7 +140,7 @@ The `release.yml` workflow only fires on tags pushed to the remote — a local t
 
 ### Release workflow failed at the test step
 
-The release workflow runs the full test suite before building the JAR. If any of the 224 tests fail, the release is aborted — no JAR is published and no GitHub Release is created.  
+The release workflow runs the full test suite before building the JAR. If any of the 350 tests fail, the release is aborted — no JAR is published and no GitHub Release is created.  
 **Fix:** Check the failed Actions run for the test failure, fix it on `main`, delete the tag, and re-tag:
 
 ```bash

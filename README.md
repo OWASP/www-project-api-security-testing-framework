@@ -3,7 +3,7 @@
 [![OWASP Incubator](https://img.shields.io/badge/owasp-incubator-blue.svg)](https://owasp.org/www-project-api-security-testing-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-235%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-350%20passing-brightgreen.svg)](#)
 [![Release](https://img.shields.io/github/v/release/OWASP/www-project-api-security-testing-framework?include_prereleases&label=latest)](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)
 
 A comprehensive automated testing framework for detecting API security vulnerabilities based on the **OWASP API Security Top 10 2023**.
@@ -73,7 +73,7 @@ start crapi-report.html
 
 ## Releases
 
-Releases are published automatically when a version tag is pushed. The workflow runs all 235 tests, builds the fat JAR, and attaches it to the GitHub Release.
+Releases are published automatically when a version tag is pushed. The workflow runs all 350 tests, builds the fat JAR, and attaches it to the GitHub Release.
 
 | Tag format | Release type | Example |
 |---|---|---|
@@ -139,6 +139,11 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--format` | `-f` | Output: `JSON`, `HTML`, `SARIF`, `XML` | `JSON` |
 | `--output` | `-o` | Output file path | stdout |
 | `--token` | | Bearer token (`Authorization: Bearer …`) | — |
+| `--secondary-token` | | Bearer token for a **second, distinct** authenticated identity — enables cross-user BOLA testing (see [Testing Guidelines](docs/TESTING_GUIDELINES.md#authorization-testing-methodologies)) | — |
+| `--client-cert` | | Path to a PKCS12 (`.p12`/`.pfx`) keystore with a client certificate to present for mutual TLS | — |
+| `--client-cert-password` | | Password for `--client-cert` | — |
+| `--invalid-client-cert` | | Path to a deliberately invalid/untrusted PKCS12 keystore, used alongside `--client-cert` to test whether the server actually validates client certificates | — |
+| `--invalid-client-cert-password` | | Password for `--invalid-client-cert` | — |
 | `--api-key` | | API key value | — |
 | `--api-key-header` | | Header name for API key | `X-API-Key` |
 | `--username` | | Basic auth username | — |
@@ -154,6 +159,22 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--verbose` | `-v` | Verbose output | false |
 | `--version` | `-V` | Print version | — |
 | `--help` | `-h` | Show help | — |
+
+**Cross-user authorization testing example:**
+```bash
+java -jar astf.jar -u https://api.example.com \
+  --token "$USER_A_TOKEN" --secondary-token "$USER_B_TOKEN"
+# Checks whether User B's identity can access/modify objects reachable via User A's token
+# without any ID substitution — the strongest form of evidence ASTF produces for BOLA.
+```
+
+**Mutual TLS validation example:**
+```bash
+java -jar astf.jar -u https://api.example.com \
+  --client-cert valid-client.p12 --client-cert-password "changeit" \
+  --invalid-client-cert untrusted-client.p12 --invalid-client-cert-password "changeit"
+# Flags the server if it accepts the untrusted certificate just as readily as the valid one.
+```
 
 ### Endpoint Input Precedence
 
@@ -191,22 +212,26 @@ java -jar astf-v1.0.0.jar -u https://api.example.com \
 
 ## Test Case Catalog
 
-100% coverage of the **OWASP API Security Top 10 2023**, plus GraphQL and gRPC:
+100% coverage of the **OWASP API Security Top 10 2023**, plus GraphQL, gRPC, mTLS, LLM, and general injection — **16 test cases** in total. See [Testing Guidelines](docs/TESTING_GUIDELINES.md) for the methodology behind each category, not just what it checks.
 
 | ID | Name | Implementation Class | What It Detects |
 |---|---|---|---|
-| `ASTF-API1-2023` | Broken Object Level Authorization | `BrokenObjectLevelAuthorizationTestCase` | BOLA/IDOR — manipulates numeric and UUID IDs in URL paths to access other users' resources |
-| `ASTF-API2-2023` | Broken Authentication | `BrokenAuthenticationTestCase` | Missing auth, JWT `none` algorithm, expired tokens, tokens in URL, 2FA bypass with guessable OTPs, insecure session cookies |
+| `ASTF-API1-2023` | Broken Object Level Authorization | `BrokenObjectLevelAuthorizationTestCase` | BOLA/IDOR — numeric/UUID ID substitution, unresolved-template-path resolution, and **cross-user access confirmation** (same URL, two distinct identities via `--secondary-token`, no ID guessing) |
+| `ASTF-API2-2023` | Broken Authentication | `BrokenAuthenticationTestCase` | Missing auth, JWT `none` algorithm, `kid` path traversal, RS256→HS256 algorithm confusion (via real JWKS fetch), `jku` header abuse, expired tokens, tokens in URL, username/password enumeration, brute-force lockout, 2FA bypass, insecure session cookies |
 | `ASTF-API3-2023` | Broken Object Property Level Authorization | `BrokenObjectPropertyLevelAuthorizationTestCase` | Password/secret fields in responses (excessive data exposure), mass assignment via POST |
-| `ASTF-API4-2023` | Unrestricted Resource Consumption | `UnrestrictedResourceConsumptionTestCase` | Missing `X-RateLimit-*` / `Retry-After` headers on resource-heavy endpoints |
-| `ASTF-API5-2023` | Broken Function Level Authorization | `BrokenFunctionLevelAuthorizationTestCase` | Admin endpoints (`/admin`, `/internal`, `/manage`) reachable without elevated privileges |
+| `ASTF-API4-2023` | Unrestricted Resource Consumption | `UnrestrictedResourceConsumptionTestCase` | Missing rate limiting (burst-request test, HTTP 429/423 or body-level rejection signal) on resource-heavy endpoints |
+| `ASTF-API5-2023` | Broken Function Level Authorization | `BrokenFunctionLevelAuthorizationTestCase` | Admin endpoints reachable without elevated privileges, HTTP method escalation, and **privilege-tier path substitution** (`/user/...` → `/admin/...` on an otherwise identical request) |
 | `ASTF-API6-2023` | Unrestricted Access to Sensitive Flows | `UnrestrictedAccessToSensitiveFlowsTestCase` | Rate limiting and bot protection absent on login, OTP, payment, and password-reset flows |
-| `ASTF-API7-2023` | Server-Side Request Forgery | `ServerSideRequestForgeryTestCase` | SSRF via `url`, `webhook`, `redirect`, `callback` parameters — injects AWS metadata URL |
+| `ASTF-API7-2023` | Server-Side Request Forgery | `ServerSideRequestForgeryTestCase` | SSRF via `url`, `webhook`, `redirect`, `callback` parameters — injects cloud metadata endpoint URLs |
 | `ASTF-API8-2023` | Security Misconfiguration | `SecurityMisconfigurationTestCase` | Missing security headers, verbose error messages, stack traces in responses |
-| `ASTF-API9-2023` | Improper Inventory Management | `ImproperInventoryManagementTestCase` | Deprecated API versions (`/v1`, `/v2`), shadow endpoints, exposed API docs |
+| `ASTF-API9-2023` | Improper Inventory Management | `ImproperInventoryManagementTestCase` | Deprecated API versions, shadow endpoints, exposed API docs |
 | `ASTF-API10-2023` | Unsafe Consumption of APIs | `UnsafeConsumptionOfApisTestCase` | Injection via webhook/integration endpoints, open redirect in callback URLs |
-| `ASTF-GRAPHQL-2023` | GraphQL Security | `GraphQLSecurityTestCase` | Introspection enabled, field suggestion leakage, query depth attacks, batch query abuse |
-| `ASTF-GRPC-2023` | gRPC Endpoint Detection | `GrpcEndpointDetectionTestCase` | gRPC service detection, server reflection enabled (schema enumeration risk) |
+| `ASTF-GRAPHQL-2023` | GraphQL Security | `GraphQLSecurityTestCase` | Introspection, field suggestion leakage, query depth/batch/field-duplication/alias/circular-fragment DoS, resolver injection (SQL/OS-command/XSS/SSRF) across every mutation and query field, GraphiQL/IDE exposure, deny-list bypass via fragments, argument-based auth bypass, login brute-force, stack-trace disclosure |
+| `ASTF-GRPC-2023` | gRPC Endpoint Detection | `GrpcEndpointDetectionTestCase` | gRPC service detection over h2c, server reflection enabled (schema enumeration risk), scoped injection testing |
+| `ASTF-MTLS-2023` | Mutual TLS Validation | `MutualTlsValidationTestCase` | Whether the server actually validates client certificate trust chains, or accepts any presented certificate |
+| `ASTF-LLM-2023` | LLM Prompt Injection | `LlmPromptInjectionTestCase` | Prompt injection against LLM/chatbot-backed endpoints, via a distinctive canary-string instruction |
+| `ASTF-INJECTION-2023` | SQL/NoSQL Injection | `SqlNoSqlInjectionTestCase` | General-purpose SQL/NoSQL injection on REST body fields and path parameters (resolved or unresolved), independent of endpoint naming |
+| `ASTF-REDOS-2023` | Regular Expression Denial of Service | `RegexDosTestCase` | Catastrophic-backtracking-triggering payloads, detected via response-time comparison against a baseline |
 
 Run only specific test cases:
 ```bash
@@ -328,14 +353,15 @@ www-project-api-security-testing-framework/
 │   │   ├── java/org/owasp/astf/
 │   │   │   ├── cli/           # ASTFCli.java — picocli entry point
 │   │   │   ├── core/          # Scanner, EndpointDiscoveryService, HTTP client
-│   │   │   ├── testcases/     # 12 security test cases + TestCaseRegistry
+│   │   │   ├── testcases/     # 16 security test cases + TestCaseRegistry
 │   │   │   ├── reporting/     # JSON, HTML, SARIF, XML report generators
 │   │   │   └── integrations/  # GitHub Actions result processor
 │   │   └── resources/
 │   │       └── log4j2.xml     # Logging configuration
-│   └── test/                  # 235 unit tests across 25 test suites
+│   └── test/                  # 350 unit tests
 ├── docs/
-│   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 12 test cases, crAPI results
+│   ├── TESTING_GUIDELINES.md  # Methodology: how to test, interpret results, reduce false positives
+│   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 16 test cases, live-verification results
 │   ├── ARCHITECTURE.md        # Component design, data flow, extension guide
 │   ├── TROUBLESHOOTING.md     # Logging, common errors, issue templates
 │   └── examples/
@@ -355,7 +381,8 @@ www-project-api-security-testing-framework/
 
 | Document | Description |
 |---|---|
-| [Framework Overview](docs/FRAMEWORK_OVERVIEW.md) | All 12 test cases, crAPI proof of concept, use cases |
+| [Testing Guidelines](docs/TESTING_GUIDELINES.md) | **Start here for methodology** — testing approaches, auth/authz/data-validation/rate-limiting strategies, result interpretation, false-positive reduction, remediation guidance |
+| [Framework Overview](docs/FRAMEWORK_OVERVIEW.md) | All 16 test cases, live-verification results against real vulnerable targets, use cases |
 | [Architecture](docs/ARCHITECTURE.md) | Component design, data flow, how to add a test case |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Logging config, common errors, issue templates |
 | [Full Config Reference](docs/examples/scan-config.yaml) | Every config option with inline comments |
@@ -384,7 +411,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The `release.yml` workflow will run all 235 tests, build `astf-v1.0.0.jar`,
+The `release.yml` workflow will run all 350 tests, build `astf-v1.0.0.jar`,
 create a GitHub Release marked as pre-release, and attach the JAR as a downloadable asset.
 
 ---

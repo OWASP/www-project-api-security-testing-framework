@@ -140,7 +140,7 @@ The scanner uses a thread pool to execute test cases concurrently:
 
 ## Registered Test Cases
 
-The `TestCaseRegistry` registers 12 test cases at startup:
+The `TestCaseRegistry` registers 16 test cases at startup:
 
 | ID | Class | Category |
 |---|---|---|
@@ -156,6 +156,10 @@ The `TestCaseRegistry` registers 12 test cases at startup:
 | `ASTF-API10-2023` | `UnsafeConsumptionOfApisTestCase` | API10:2023 |
 | `ASTF-GRAPHQL-2023` | `GraphQLSecurityTestCase` | API3/4/8:2023 |
 | `ASTF-GRPC-2023` | `GrpcEndpointDetectionTestCase` | API8/9:2023 |
+| `ASTF-MTLS-2023` | `MutualTlsValidationTestCase` | API2:2023 (transport-layer auth) |
+| `ASTF-LLM-2023` | `LlmPromptInjectionTestCase` | API10:2023 (unsafe consumption, LLM-specific) |
+| `ASTF-INJECTION-2023` | `SqlNoSqlInjectionTestCase` | Cross-cutting (not a single Top 10 category) |
+| `ASTF-REDOS-2023` | `RegexDosTestCase` | API4:2023 (resource consumption) |
 
 ## Adding New Test Cases
 
@@ -165,6 +169,8 @@ To add a new test case:
 2. Implement the four required methods
 3. Register the test case in `TestCaseRegistry.registerDefaultTestCases()`
 4. Add unit tests (see any existing `*TestCaseTest.java` for the Mockito pattern)
+
+**ID convention:** use `ASTF-API<N>-2023` only when the check maps cleanly to a single OWASP API Security Top 10 category. For cross-cutting concerns that don't (GraphQL, gRPC, mTLS, LLM, general injection, ReDoS), use `ASTF-<CATEGORY>-<YEAR>` instead — see `ASTF-GRAPHQL-2023`, `ASTF-MTLS-2023`, `ASTF-LLM-2023`, `ASTF-INJECTION-2023`, `ASTF-REDOS-2023` for precedent.
 
 Example skeleton:
 
@@ -207,9 +213,9 @@ public class NewVulnerabilityTestCase implements TestCase {
 
 ## Test Coverage
 
-The framework has **229 passing unit tests** across 25 test suites, covering:
+The framework has **350 passing unit tests**, covering:
 
-- All 12 test case implementations (positive and negative cases)
+- All 16 test case implementations (positive and negative cases)
 - Core scanner, HTTP client, configuration loader
 - All 4 report generators (JSON, HTML, SARIF, XML)
 - GitHub Actions result processor
