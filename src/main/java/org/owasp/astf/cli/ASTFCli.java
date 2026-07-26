@@ -9,6 +9,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.Scanner;
+import org.owasp.astf.core.VersionInfo;
 import org.owasp.astf.core.config.ConfigLoader;
 import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.result.Finding;
@@ -60,11 +61,23 @@ import picocli.CommandLine.Option;
 @Command(
         name = "astf",
         mixinStandardHelpOptions = true,
-        version = "OWASP API Security Testing Framework v1.0.0",
+        versionProvider = ASTFCli.VersionProvider.class,
         description = "Scans API endpoints for OWASP API Security Top 10 vulnerabilities."
 )
 public class ASTFCli implements Callable<Integer> {
     private static final Logger logger = LogManager.getLogger(ASTFCli.class);
+
+    /**
+     * Supplies {@code --version} output from {@link VersionInfo} instead of a literal string —
+     * an {@code @Command} annotation attribute must be a compile-time constant, so a static
+     * version string was exactly the kind of thing that silently went stale at every release.
+     */
+    static class VersionProvider implements CommandLine.IVersionProvider {
+        @Override
+        public String[] getVersion() {
+            return new String[] { "OWASP API Security Testing Framework v" + VersionInfo.getVersion() };
+        }
+    }
 
     @Option(names = {"-u", "--url"}, description = "Target API base URL")
     private String targetUrl;
@@ -359,7 +372,7 @@ public class ASTFCli implements Callable<Integer> {
         System.out.println("| | | |  __/\\__/ /\\__/ / | |    |  __| ");
         System.out.println("\\_| |_/_\\___|\\___/\\____/  \\_/    |__|   ");
         System.out.println();
-        System.out.println("  OWASP API Security Testing Framework v1.0.0");
+        System.out.println("  OWASP API Security Testing Framework v" + VersionInfo.getVersion());
         System.out.println("  https://owasp.org/www-project-api-security-testing-framework");
         System.out.println();
     }

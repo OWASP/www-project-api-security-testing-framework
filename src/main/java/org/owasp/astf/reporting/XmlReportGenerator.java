@@ -9,6 +9,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.owasp.astf.core.VersionInfo;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.ScanResult;
 import org.owasp.astf.core.result.Severity;
@@ -28,7 +29,7 @@ public class XmlReportGenerator implements ReportGenerator {
         sb.append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
         sb.append("<astf-report>\n");
         sb.append("  <tool>OWASP API Security Testing Framework</tool>\n");
-        sb.append("  <version>1.0.0</version>\n");
+        sb.append("  <version>").append(VersionInfo.getVersion()).append("</version>\n");
         sb.append("  <targetUrl>").append(esc(result.getTargetUrl())).append("</targetUrl>\n");
         sb.append("  <scanStartTime>").append(
                 result.getScanStartTime() != null ? result.getScanStartTime().format(FORMATTER) : "")

@@ -11,6 +11,7 @@ import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.owasp.astf.core.VersionInfo;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.ScanResult;
 import org.owasp.astf.core.result.Severity;
@@ -50,7 +51,7 @@ public class SarifReportGenerator implements ReportGenerator {
         ObjectNode driver = mapper.createObjectNode();
         driver.put("name", "OWASP-ASTF");
         driver.put("fullName", "OWASP API Security Testing Framework");
-        driver.put("version", "1.0.0");
+        driver.put("version", VersionInfo.getVersion());
         driver.put("informationUri", "https://github.com/OWASP/www-project-api-security-testing-framework");
 
         // Collect unique rules from findings

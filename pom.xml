@@ -112,6 +112,28 @@
     </dependencies>
 
     <build>
+        <!-- version.properties is filtered so project.version is baked in at build time and
+             read at runtime by org.owasp.astf.core.VersionInfo (used for the CLI's own version
+             flag output and every generated report, which used to hardcode a literal "1.0.0"
+             string that silently went stale at every release); this is the only place the
+             version needs to be set now. log4j2.xml is excluded from filtering since it isn't
+             meant to be templated. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+                <includes>
+                    <include>version.properties</include>
+                </includes>
+            </resource>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>false</filtering>
+                <excludes>
+                    <exclude>version.properties</exclude>
+                </excludes>
+            </resource>
+        </resources>
         <plugins>
             <!-- Pin maven-resources-plugin to avoid 3.4.0 which is not in Maven Central -->
             <plugin>
