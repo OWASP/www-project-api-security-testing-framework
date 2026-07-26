@@ -9,6 +9,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.owasp.astf.core.VersionInfo;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.ScanResult;
 import org.owasp.astf.core.result.Severity;
@@ -35,7 +36,7 @@ public class JsonReportGenerator implements ReportGenerator {
         ObjectNode root = mapper.createObjectNode();
 
         root.put("tool", "OWASP API Security Testing Framework");
-        root.put("version", "1.0.0");
+        root.put("version", VersionInfo.getVersion());
         root.put("targetUrl", result.getTargetUrl());
         root.put("scanStartTime", result.getScanStartTime() != null
                 ? result.getScanStartTime().format(FORMATTER) : "");
