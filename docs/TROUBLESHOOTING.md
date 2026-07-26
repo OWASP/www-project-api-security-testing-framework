@@ -145,12 +145,12 @@ The release workflow runs the full test suite before building the JAR. If any of
 
 ```bash
 # Delete tag locally and remotely, then re-push after the fix
-git tag -d v1.0.0
-git push origin :refs/tags/v1.0.0
+git tag -d v2.0.0
+git push origin :refs/tags/v2.0.0
 
 # After fixing and merging to main:
-git tag v1.0.0
-git push origin v1.0.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 ---
@@ -183,11 +183,11 @@ java -version   # must show 21 or higher
 
 ## Reporting Issues
 
-This is a **beta release** — we actively want your feedback.
+We actively want your feedback.
 
 ### Bug Reports
 Use the [Bug Report template](../.github/ISSUE_TEMPLATE/bug_report.md). Include:
-- ASTF version (`java -jar astf-v1.0.0.jar -V`)
+- ASTF version (`java -jar astf-v2.0.0.jar -V`)
 - Java version (`java -version`)
 - The exact command you ran (redact any tokens)
 - Relevant output from `astf-scan.log`

@@ -6,7 +6,7 @@
 
     <groupId>org.owasp</groupId>
     <artifactId>api-security-testing-framework</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <packaging>jar</packaging>
 
     <name>OWASP API Security Testing Framework</name>
