@@ -69,10 +69,11 @@ jobs:
             - Java 21+
 
             ### What's included
-            - 12 security test cases — full OWASP API Security Top 10 2023 + GraphQL + gRPC
+            - 16 security test cases — full OWASP API Security Top 10 2023 + GraphQL, gRPC, mutual TLS, LLM prompt injection, general SQL/NoSQL injection, and ReDoS
+            - Cross-user authorization testing (`--secondary-token`) for BOLA, mutual TLS client-certificate validation
             - Output formats: JSON, HTML, SARIF, XML
             - Auto endpoint discovery
-            - 235 passing unit tests
+            - 350 passing unit tests
 
             See the [README](https://github.com/OWASP/www-project-api-security-testing-framework#readme)
             and [docs/](https://github.com/OWASP/www-project-api-security-testing-framework/tree/main/docs)
