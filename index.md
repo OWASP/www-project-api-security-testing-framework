@@ -14,7 +14,7 @@ pitch: A comprehensive automated testing framework for detecting API security vu
 
 The OWASP API Security Testing Framework (ASTF) is a specialized security testing tool designed to automatically detect vulnerabilities in APIs based on the **OWASP API Security Top 10 2023**. It discovers endpoints automatically, runs 16 security test cases covering the full Top 10 plus GraphQL, gRPC, mutual TLS, LLM/chatbot, and general injection testing, and produces findings in JSON, HTML, SARIF, and XML formats.
 
-**Current release: [v2.0.0](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)**
+**Current release: [v2.0.1](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)**
 
 ASTF has been validated against real, intentionally-vulnerable API targets — [OWASP crAPI](https://github.com/OWASP/crAPI), [VAmPI](https://github.com/erev0s/VAmPI), and [DVGA](https://github.com/dolevf/Damn-Vulnerable-GraphQL-Application) — with findings live-verified against the actual running applications, not just unit tests. That verification confirmed real exploitable conditions: a genuine cross-user account takeover (one identity changing another's password with no ownership check) and a genuine privilege escalation (a non-admin token succeeding on an unprotected admin-tier sibling endpoint) against the public crAPI demo, among others.
 
@@ -57,13 +57,13 @@ ASTF has been validated against real, intentionally-vulnerable API targets — [
 
 ```bash
 # Download the latest release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.0.jar
+curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
 
 # Run against your API
-java -jar astf-v2.0.0.jar -u https://api.example.com --token "YOUR_TOKEN" -f HTML -o report.html
+java -jar astf-v2.0.1.jar -u https://api.example.com --token "YOUR_TOKEN" -f HTML -o report.html
 
 # Try against OWASP crAPI (zero config needed)
-java -jar astf-v2.0.0.jar -u http://crapi.apisec.ai -f HTML -o crapi-report.html
+java -jar astf-v2.0.1.jar -u http://crapi.apisec.ai -f HTML -o crapi-report.html
 ```
 
 Or build from source:
@@ -71,7 +71,7 @@ Or build from source:
 git clone https://github.com/OWASP/www-project-api-security-testing-framework.git
 cd www-project-api-security-testing-framework
 mvn clean package -DskipTests
-java -jar target/api-security-testing-framework-2.0.0.jar -u https://api.example.com
+java -jar target/api-security-testing-framework-2.0.1.jar -u https://api.example.com
 ```
 
 For methodology — what to test, how to interpret results, how to avoid false positives — see the [Testing Guidelines](https://github.com/OWASP/www-project-api-security-testing-framework/blob/main/docs/TESTING_GUIDELINES.md). For full documentation see the [GitHub repository](https://github.com/OWASP/www-project-api-security-testing-framework).
@@ -82,10 +82,10 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
 
 ```yaml
 - name: Download ASTF
-  run: curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.0.jar
+  run: curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
 
 - name: Run security scan
-  run: java -jar astf-v2.0.0.jar -u ${{ secrets.API_URL }} --token ${{ secrets.API_TOKEN }} -f SARIF -o results.sarif
+  run: java -jar astf-v2.0.1.jar -u ${{ secrets.API_URL }} --token ${{ secrets.API_TOKEN }} -f SARIF -o results.sarif
 
 - name: Upload to Code Scanning
   uses: github/codeql-action/upload-sarif@v3
@@ -129,6 +129,9 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
   authorization testing, mutual TLS/LLM/general-injection/ReDoS coverage, GraphQL depth,
   and live-verified findings against real vulnerable applications since v1.0.0
 - Comprehensive Testing Guidelines and a full documentation refresh
+- **v2.0.1** — the v2.0.0 jar itself reported its own version as v1.0.0 in `--version`
+  output and in every generated report; fixed by resolving the version dynamically from the
+  build instead of a hardcoded literal, so this can't silently go stale at future releases
 
 ### 🔜 Phase 6 — Real-World Pen-Testing Utility (Planned)
 - **Multi-step business-logic flow testing** — chained requests where a vulnerable endpoint
