@@ -534,6 +534,50 @@ class GraphQLSecurityTestCaseTest {
     }
 
     @Test
+    @DisplayName("Extracts every candidate field, not just the first 5 (regression: DVGA importPaste/uploadPaste live-test gap)")
+    void testExtractStringArgFieldsHasNoArtificialCap() {
+        StringBuilder fieldsJson = new StringBuilder();
+        int fieldCount = 8;
+        for (int i = 0; i < fieldCount; i++) {
+            if (i > 0) fieldsJson.append(",");
+            fieldsJson.append(String.format("""
+                    { "name": "field%d", "args": [
+                        { "name": "value", "type": { "name": "String", "kind": "SCALAR" } }
+                    ] }
+                    """, i));
+        }
+        String introspection = "{\"data\":{\"__schema\":{\"mutationType\":{\"fields\":[" + fieldsJson + "]}}}}";
+
+        List<?> results = testCase.extractStringArgFields(introspection, "mutationType");
+
+        assertEquals(fieldCount, results.size(),
+                "Every field with a String argument must be tested — a prior 5-field cap silently " +
+                "dropped DVGA's importPaste (SSRF/OS injection) and uploadPaste (path traversal) from testing.");
+    }
+
+    @Test
+    @DisplayName("Excludes a token-shaped argument as the injection target, but still tests the field if it has another string arg (regression: DVGA me(token) crash)")
+    void testExtractStringArgFieldsSkipsTokenLikeArgAsTarget() {
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    { "name": "me", "args": [
+                        { "name": "token", "type": { "name": "String", "kind": "SCALAR" } }
+                    ] },
+                    { "name": "search", "args": [
+                        { "name": "token", "type": { "name": "String", "kind": "SCALAR" } },
+                        { "name": "keyword", "type": { "name": "String", "kind": "SCALAR" } }
+                    ] }
+                ]}}}}
+                """;
+
+        List<?> results = testCase.extractStringArgFields(introspection, "queryType");
+
+        assertEquals(1, results.size(),
+                "'me' has only a token-shaped string arg, so it must be excluded entirely — feeding " +
+                "generic SQL/XSS payloads into a token argument crashed DVGA's JWT decoder in live testing");
+    }
+
+    @Test
     @DisplayName("Flags GraphQL resolver injection when a mutation reflects an unescaped XSS payload")
     void testResolverInjectionDetected() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
@@ -783,5 +827,110 @@ class GraphQLSecurityTestCaseTest {
                 .thenThrow(new IOException("Connection refused"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+    }
+
+    // ── stack trace / debug error disclosure ─────────────────────────────────
+
+    @Test
+    @DisplayName("Flags GraphQL stack trace disclosure when a malformed query leaks a Python traceback (regression: DVGA gap)")
+    void testStackTraceDisclosureDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(500,
+                        "Traceback (most recent call last):\n  File \"app.py\", line 42, in resolve\n" +
+                        "    raise ValueError('bad type')\n", Map.of()));
+
+        List<Finding> findings = testCase.testStackTraceDisclosure(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect the leaked Python traceback");
+        assertEquals("GraphQL Stack Trace / Debug Error Disclosure", findings.get(0).getTitle());
+    }
+
+    @Test
+    @DisplayName("Does not flag stack trace disclosure when errors are generic")
+    void testNoStackTraceDisclosureWhenGeneric() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400, "{\"errors\":[{\"message\":\"Bad request\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testStackTraceDisclosure(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    // ── login mutation brute-force ───────────────────────────────────────────
+
+    private static final String LOGIN_MUTATION_INTROSPECTION = """
+            {
+              "data": {
+                "__schema": {
+                  "mutationType": {
+                    "fields": [
+                      {
+                        "name": "login",
+                        "args": [
+                          { "name": "username", "type": { "name": "String", "kind": "SCALAR" } },
+                          { "name": "password", "type": { "name": "String", "kind": "SCALAR" } }
+                        ],
+                        "type": { "name": "AuthPayload", "kind": "OBJECT" }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+    @Test
+    @DisplayName("Flags missing brute-force lockout on a discovered GraphQL login mutation (regression: DVGA gap)")
+    void testLoginMutationBruteForceDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("__schema")))
+                .thenReturn(new HttpResponse(200, LOGIN_MUTATION_INTROSPECTION, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("mutation{login")))
+                .thenReturn(new HttpResponse(200, "{\"errors\":[{\"message\":\"Invalid credentials\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testLoginMutationBruteForce(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should flag missing lockout after repeated failed attempts");
+        assertEquals("No Account Lockout or Rate Limiting on GraphQL Login Mutation", findings.get(0).getTitle());
+    }
+
+    @Test
+    @DisplayName("Does not flag brute-force when the server rate-limits repeated login attempts")
+    void testLoginMutationBruteForceNotFlaggedWhenRateLimited() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("__schema")))
+                .thenReturn(new HttpResponse(200, LOGIN_MUTATION_INTROSPECTION, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("mutation{login")))
+                .thenReturn(new HttpResponse(429, "{\"errors\":[{\"message\":\"Too many requests\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testLoginMutationBruteForce(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "Should not flag brute-force when the server properly rate-limits");
+    }
+
+    @Test
+    @DisplayName("Does not attempt brute-force when no login-shaped mutation is discovered")
+    void testLoginMutationBruteForceSkippedWhenNoLoginMutation() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        String introspection = """
+                {"data":{"__schema":{"mutationType":{"fields":[
+                    {"name":"createPost","args":[{"name":"title","type":{"name":"String","kind":"SCALAR"}}]}
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, introspection, Map.of()));
+
+        List<Finding> findings = testCase.testLoginMutationBruteForce(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "Should not run brute-force testing without a login mutation to target");
     }
 }

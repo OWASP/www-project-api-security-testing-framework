@@ -83,12 +83,51 @@ public class GraphQLSecurityTestCase implements TestCase {
     // than (or in addition to) the Authorization header.
     private static final List<String> CURRENT_USER_FIELD_NAMES = List.of("me", "viewer", "currentUser", "profile");
 
+    // Argument names shaped like a token/credential rather than ordinary user input — excluded
+    // from testFieldInjection's generic SQL/XSS/path-traversal payload battery. Found necessary
+    // by live-testing against DVGA: its "me(token: String)" query field only surfaces once the
+    // 5-field extraction cap is removed (it sits at schema position 11), and feeding it generic
+    // injection payloads instead of a real JWT shape repeatedly hits DVGA's JWT-decode path with
+    // garbage, which crashed the container outright (reproducible, single-threaded, exit 139) —
+    // not just a wasted request. A token-shaped argument is already tested appropriately, with a
+    // real forged-JWT payload, by testArgumentBasedAuthBypass.
+    private static final List<String> TOKEN_LIKE_ARG_NAMES = List.of("token", "jwt", "apikey", "api_key", "sessionid", "session_id");
+
     // JWT with "none" algorithm, claiming an admin subject — the same forged-token technique
     // BrokenAuthenticationTestCase uses for header-based bypass, reused here as a query argument.
     private static final String NONE_ALG_JWT_ARG =
             "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" +
             ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwicm9sZSI6ImFkbWluIn0" +
             ".";
+
+    // Mutation-name keywords identifying a login/authentication field — the target for the
+    // brute-force lockout check, mirroring BrokenAuthenticationTestCase's REST-side check but
+    // applied to a GraphQL argument-based login instead of a JSON body (found needed: DVGA's own
+    // "Weak Password / Brute Force" scenario is a GraphQL login mutation, which the REST-oriented
+    // check never reaches since it never sends a GraphQL-shaped request body).
+    private static final List<String> LOGIN_MUTATION_KEYWORDS = List.of("login", "signin", "authenticate", "auth");
+    private static final List<String> USERNAME_ARG_NAMES = List.of("username", "email", "login", "user");
+    private static final List<String> PASSWORD_ARG_NAMES = List.of("password", "pass", "pwd");
+    private static final int GRAPHQL_BRUTE_FORCE_ATTEMPTS = 8;
+
+    // Malformed/type-invalid GraphQL request bodies, sent as raw strings — meant to trigger a
+    // resolver-level or query-execution exception rather than a clean schema-validation rejection,
+    // the same intent as SecurityMisconfigurationTestCase's malformed-payload probe but shaped for
+    // GraphQL's JSON envelope instead of a REST body.
+    private static final List<String> STACK_TRACE_PROBE_QUERIES = List.of(
+            "{\"query\":\"{__schema{types{name fields{name args{name type{name ofType{name",
+            "{\"query\":\"query{__type(name:123){name}}\"}",
+            "{\"query\":\"mutation{createPaste(title:null,content:null){id}}\"}"
+    );
+
+    // Python/Flask/Ariadne-style traceback markers (DVGA's actual backend) alongside the same
+    // generic exception/stack-trace indicators SecurityMisconfigurationTestCase already uses for
+    // the REST-side equivalent check.
+    private static final List<String> STACK_TRACE_INDICATORS = List.of(
+            "traceback (most recent call last)", "file \"", ", line ", "raise ",
+            "stack trace", "stacktrace", "at org.", "at java.", "at com.",
+            "nullpointerexception", "sqlexception", "internal server error at", "caused by:"
+    );
 
     // Standard introspection query — smallest form that reveals the full schema
     private static final String INTROSPECTION_QUERY =
@@ -238,6 +277,8 @@ public class GraphQLSecurityTestCase implements TestCase {
         findings.addAll(testGraphiQLExposure(endpoint, httpClient));
         findings.addAll(testOperationDenyListBypass(endpoint, httpClient));
         findings.addAll(testArgumentBasedAuthBypass(endpoint, httpClient));
+        findings.addAll(testStackTraceDisclosure(endpoint, httpClient));
+        findings.addAll(testLoginMutationBruteForce(endpoint, httpClient));
 
         return findings;
     }
@@ -845,6 +886,152 @@ public class GraphQLSecurityTestCase implements TestCase {
         return findings;
     }
 
+    // ── Test: stack trace / debug error disclosure ────────────────────────────
+
+    /**
+     * Sends malformed/type-invalid GraphQL requests designed to trigger a resolver-level or
+     * query-execution exception, then checks whether the response body leaks a raw stack trace or
+     * other internal implementation detail rather than a clean, generic error message — the
+     * GraphQL-shaped equivalent of {@code SecurityMisconfigurationTestCase#testVerboseErrors},
+     * which never runs against GraphQL endpoints since it POSTs a plain malformed body rather than
+     * a {@code {"query": "..."}} envelope and never gets past the server's JSON-parse step.
+     */
+    List<Finding> testStackTraceDisclosure(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        for (String probe : STACK_TRACE_PROBE_QUERIES) {
+            try {
+                HttpResponse response = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, probe);
+                String body = response != null ? response.getBody() : null;
+                if (body == null) {
+                    continue;
+                }
+
+                String lowerBody = body.toLowerCase();
+                List<String> foundIndicators = new ArrayList<>();
+                for (String indicator : STACK_TRACE_INDICATORS) {
+                    if (lowerBody.contains(indicator)) {
+                        foundIndicators.add(indicator);
+                    }
+                }
+
+                if (!foundIndicators.isEmpty()) {
+                    Finding f = new Finding(
+                            UUID.randomUUID().toString(),
+                            "GraphQL Stack Trace / Debug Error Disclosure",
+                            "A malformed or type-invalid GraphQL request produced a response containing " +
+                            "raw implementation details (" + String.join(", ", foundIndicators) + ") " +
+                            "instead of a generic error message — this reveals framework, file paths, and " +
+                            "internal logic useful for crafting further attacks.",
+                            Severity.MEDIUM,
+                            getId(),
+                            "POST " + endpoint.getPath(),
+                            "Catch resolver-level exceptions and return a generic error message to the " +
+                            "client. Log the full exception server-side only, and disable any GraphQL " +
+                            "server debug/development mode in production."
+                    );
+                    f.setEvidence("Query: " + probe + "\nIndicators found: " + String.join(", ", foundIndicators));
+                    findings.add(f);
+                    return findings; // one confirmed instance is enough
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing GraphQL stack trace disclosure on {}: {}", endpoint, e.getMessage());
+            }
+        }
+
+        return findings;
+    }
+
+    // ── Test: login mutation brute-force lockout ──────────────────────────────
+
+    /**
+     * Introspects mutation fields for a login/authentication-shaped mutation (name containing
+     * "login", "signin", "authenticate", or "auth", with both a username-like and password-like
+     * String argument), then sends {@link #GRAPHQL_BRUTE_FORCE_ATTEMPTS} consecutive failed
+     * attempts and checks whether the server ever responds with a rate-limit/lockout signal —
+     * the GraphQL-argument equivalent of {@code BrokenAuthenticationTestCase#testBruteForceLockout},
+     * which only ever sends a REST-shaped JSON body and never reaches a GraphQL login mutation.
+     */
+    List<Finding> testLoginMutationBruteForce(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse introspectionResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, MUTATION_INTROSPECTION_QUERY);
+            if (!isAcceptedGraphQLQuery(introspectionResponse)) {
+                return findings;
+            }
+
+            List<MutationCandidate> allCandidates = extractStringArgFields(
+                    introspectionResponse.getBody(), "mutationType");
+
+            MutationCandidate loginMutation = null;
+            String usernameArg = null;
+            String passwordArg = null;
+            for (MutationCandidate candidate : allCandidates) {
+                String lowerName = candidate.name().toLowerCase();
+                if (LOGIN_MUTATION_KEYWORDS.stream().noneMatch(lowerName::contains)) {
+                    continue;
+                }
+                String foundUsernameArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> USERNAME_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                String foundPasswordArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> PASSWORD_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                if (foundUsernameArg != null && foundPasswordArg != null) {
+                    loginMutation = candidate;
+                    usernameArg = foundUsernameArg;
+                    passwordArg = foundPasswordArg;
+                    break;
+                }
+            }
+            if (loginMutation == null) {
+                return findings;
+            }
+
+            HttpResponse lastResponse = null;
+            for (int attempt = 0; attempt < GRAPHQL_BRUTE_FORCE_ATTEMPTS; attempt++) {
+                String mutationCall = String.format(
+                        "mutation{%s(%s:\\\"admin\\\",%s:\\\"WrongPass-%d!\\\"){__typename}}",
+                        loginMutation.name(), usernameArg, passwordArg, attempt);
+                String requestBody = "{\"query\":\"" + mutationCall + "\"}";
+
+                lastResponse = httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, requestBody);
+                if (lastResponse == null) {
+                    return findings;
+                }
+                if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
+                    return findings; // lockout/rate-limiting is working correctly
+                }
+            }
+
+            Finding f = new Finding(
+                    UUID.randomUUID().toString(),
+                    "No Account Lockout or Rate Limiting on GraphQL Login Mutation",
+                    String.format("%d consecutive failed login attempts against the '%s' mutation produced " +
+                            "no rate-limiting or lockout response (HTTP 429/423). This allows unrestricted " +
+                            "brute-force and credential-stuffing attacks against user accounts via GraphQL.",
+                            GRAPHQL_BRUTE_FORCE_ATTEMPTS, loginMutation.name()),
+                    Severity.MEDIUM,
+                    getId(),
+                    "POST " + endpoint.getPath() + " (mutation " + loginMutation.name() + ")",
+                    "Implement account lockout or exponential rate limiting after a small number of failed " +
+                    "attempts (e.g. 5), and consider CAPTCHA or IP-based throttling for repeated failures — " +
+                    "regardless of whether login happens over REST or GraphQL."
+            );
+            f.setEvidence("Last of " + GRAPHQL_BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
+                    lastResponse.getStatusCode() + " with no lockout signal");
+            findings.add(f);
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL login brute-force on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
     // ── Test 5: Resolver-level injection ─────────────────────────────────────
 
     /**
@@ -857,7 +1044,8 @@ public class GraphQLSecurityTestCase implements TestCase {
      * {@link #testIntrospectionEnabled}) — without the schema, there's no way to know which
      * mutations exist or what arguments they accept without guessing field names, which fails
      * schema validation before ever reaching the resolver (the same class of bug fixed for the
-     * query-depth probe). Limited to the first 5 discovered mutations to bound request volume.
+     * query-depth probe). Every discovered mutation/query field is tested — see
+     * {@link #extractStringArgFields}.
      * <p>
      * Two real-world complications this handles, found by testing against DVGA rather than just
      * unit tests: (1) many resolvers require values for arguments the schema marks as nullable —
@@ -883,7 +1071,7 @@ public class GraphQLSecurityTestCase implements TestCase {
      * Shared implementation behind {@link #testResolverInjection}, parameterized over whether
      * it's testing {@code mutationType} or {@code queryType} fields.
      * <p>
-     * Tests every discovered candidate field (bounded to 5, see {@link #extractStringArgFields}),
+     * Tests every discovered candidate field (see {@link #extractStringArgFields}),
      * not just the first one that yields a finding — a mutation being vulnerable doesn't mean
      * every other mutation is safe, and stopping at the first confirmed hit (the original
      * behavior) silently skipped every other candidate in the same scan.
@@ -1005,8 +1193,13 @@ public class GraphQLSecurityTestCase implements TestCase {
      * Parses a mutationType/queryType introspection response and returns, for each field with at
      * least one String-typed argument, its name, its first String argument (the injection
      * target), every argument the field accepts (so all of them can be given a valid default —
-     * see {@link #testFieldInjection}), and its own resolved return type name. Bounded to the
-     * first 5 fields found, to keep request volume reasonable.
+     * see {@link #testFieldInjection}), and its own resolved return type name.
+     * <p>
+     * Every candidate field is returned — an earlier version bounded this to the first 5 fields
+     * found to limit request volume, but that silently dropped every field beyond the bound from
+     * testing entirely (confirmed live: DVGA's importPaste SSRF/OS-injection and uploadPaste path
+     * traversal all sit past position 5 in the schema and were never reached). Coverage completeness
+     * takes priority over request-volume trimming here.
      */
     List<MutationCandidate> extractStringArgFields(String introspectionBody, String schemaFieldName) {
         List<MutationCandidate> results = new ArrayList<>();
@@ -1017,7 +1210,6 @@ public class GraphQLSecurityTestCase implements TestCase {
                 return results;
             }
             for (JsonNode field : fields) {
-                if (results.size() >= 5) break;
                 String mutationName = field.path("name").asText(null);
                 if (mutationName == null) continue;
 
@@ -1028,7 +1220,9 @@ public class GraphQLSecurityTestCase implements TestCase {
                     if (argName == null) continue;
                     String argType = resolveScalarTypeName(arg.path("type"));
                     allArgs.add(new ArgSpec(argName, argType));
-                    if (targetArgName == null && "String".equals(argType)) {
+                    boolean isTokenLikeArg = TOKEN_LIKE_ARG_NAMES.stream()
+                            .anyMatch(argName.toLowerCase()::contains);
+                    if (targetArgName == null && "String".equals(argType) && !isTokenLikeArg) {
                         targetArgName = argName;
                     }
                 }
