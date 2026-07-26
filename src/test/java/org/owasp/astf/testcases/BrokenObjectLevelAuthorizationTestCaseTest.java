@@ -193,6 +193,36 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Cross-user PUT sends a realistic body instead of '{}' (regression: VAmPI password-change gap)")
+    void testCrossUserBolaOnPutUsesRealisticBodyNotEmpty() throws IOException {
+        // VAmPI's password-change endpoint resolves and is reachable, but sending an empty "{}"
+        // body never exercises the actual password-change semantics the vulnerability is about.
+        EndpointInfo endpoint = new EndpointInfo(
+                "/users/v1/name1/password", "PUT", "application/json", null, true);
+        endpoint.setResolvedFromTemplate(true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should still detect cross-user access on the PUT");
+
+        org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.atLeastOnce())
+                .putWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
+        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(body -> body.contains("password")),
+                "Request body must contain a real 'password' field, not an empty '{}' — " +
+                "an empty body reaches the endpoint but never exercises password-change behavior");
+        assertTrue(bodyCaptor.getAllValues().stream().noneMatch(body -> body.equals("{}")),
+                "Should never fall back to an empty '{}' body for a state-changing request");
+    }
+
+    @Test
     @DisplayName("Handles exceptions gracefully")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users/1", "GET");
