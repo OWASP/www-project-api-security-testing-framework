@@ -36,6 +36,20 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
 
     private static final List<String> SENSITIVE_HTTP_METHODS = List.of("PUT", "DELETE", "PATCH");
 
+    // A path segment that exactly matches one of these (case-insensitive) is a candidate for
+    // privilege-tier substitution — swapping it for a higher-privilege keyword and replaying the
+    // SAME request (same credentials, same ID, same method) at that alternate path. Found by
+    // tracing crAPI's actual source: its real BFLA vulnerability is exactly this pattern —
+    // DELETE /identity/api/v2/user/videos/{id} is a deliberate decoy that always returns
+    // 403/404, while DELETE /identity/api/v2/admin/videos/{id} (same ID, same non-admin token)
+    // succeeds with no role check at all. Appending a generic "/admin" to the base URL root
+    // (see testAdminEndpointAccess) never finds this, since the vulnerable path only exists as a
+    // sibling of an already-known, specific resource endpoint.
+    private static final List<String> LOW_PRIVILEGE_SEGMENT_KEYWORDS = List.of("user", "customer", "member", "public");
+    private static final List<String> HIGH_PRIVILEGE_SEGMENT_REPLACEMENTS = List.of(
+            "admin", "administrator", "internal", "staff", "management", "superuser"
+    );
+
     @Override
     public String getId() {
         return "ASTF-API5-2023";
@@ -59,8 +73,109 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
 
         findings.addAll(testAdminEndpointAccess(endpoint, httpClient));
         findings.addAll(testHttpMethodEscalation(endpoint, httpClient));
+        findings.addAll(testPrivilegeTierPathSubstitution(endpoint, httpClient));
 
         return findings;
+    }
+
+    /**
+     * Substitutes a low-privilege path segment (e.g. {@code /user/}) with a high-privilege one
+     * (e.g. {@code /admin/}) in an otherwise identical, already-known resource path — same
+     * method, same ID, same credentials — and checks whether the substituted path succeeds where
+     * the original wouldn't (or where no elevated role should be able to succeed with a
+     * non-elevated token). This is the "predictable REST naming" BFLA pattern named directly in
+     * crAPI's own challenge doc ("leverage the predictable nature of REST APIs to find an admin
+     * endpoint"), confirmed against crAPI's real source: the vulnerable endpoint only exists as
+     * a same-shaped sibling of a known user-facing one, which {@link #testAdminEndpointAccess}
+     * (root-relative admin paths only) can never reach.
+     */
+    List<Finding> testPrivilegeTierPathSubstitution(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        String baseUrl = endpoint.getBaseUrl();
+        if (baseUrl == null || baseUrl.isEmpty()) {
+            return findings;
+        }
+
+        String path = endpoint.getPath();
+        String[] segments = path.split("/");
+        int targetIndex = -1;
+        for (int i = 0; i < segments.length; i++) {
+            if (LOW_PRIVILEGE_SEGMENT_KEYWORDS.stream().anyMatch(segments[i]::equalsIgnoreCase)) {
+                targetIndex = i;
+                break;
+            }
+        }
+        if (targetIndex == -1) {
+            return findings;
+        }
+
+        try {
+            HttpResponse originalResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient);
+
+            for (String replacement : HIGH_PRIVILEGE_SEGMENT_REPLACEMENTS) {
+                String[] altSegments = segments.clone();
+                altSegments[targetIndex] = replacement;
+                String altPath = String.join("/", altSegments);
+                String altUrl = buildUrl(baseUrl, altPath);
+
+                try {
+                    HttpResponse altResponse = makeRequest(endpoint, altUrl, httpClient);
+
+                    if (altResponse != null && altResponse.isSuccess() && isApiResponse(altResponse)
+                            && (originalResponse == null || !originalResponse.isSuccess())) {
+
+                        Finding finding = new Finding(
+                                UUID.randomUUID().toString(),
+                                "Broken Function Level Authorization (Privilege-Tier Path Substitution)",
+                                String.format("Replacing the '%s' path segment with '%s' in an otherwise " +
+                                        "identical request (%s %s) succeeded using the same, non-elevated " +
+                                        "credentials — indicating the higher-privilege-tier endpoint performs " +
+                                        "no role check of its own.",
+                                        segments[targetIndex], replacement, endpoint.getMethod(), path),
+                                Severity.CRITICAL,
+                                getId(),
+                                endpoint.getMethod() + " " + path,
+                                "Enforce role-based access control on every endpoint independently of naming " +
+                                "convention. An endpoint's path (e.g. containing '/admin/') must never be the " +
+                                "only thing distinguishing its authorization requirements from a sibling path."
+                        );
+                        finding.setRequestDetails("Original: " + endpoint.getMethod() + " " + endpoint.getFullUrl() +
+                                "\nSubstituted: " + endpoint.getMethod() + " " + altUrl);
+                        finding.setResponseDetails("Original status: " +
+                                (originalResponse != null ? originalResponse.getStatusCode() : "n/a") +
+                                "\nSubstituted status: " + altResponse.getStatusCode());
+                        findings.add(finding);
+                        return findings; // one confirmed instance is enough for this endpoint
+                    }
+                } catch (Exception e) {
+                    logger.debug("Error testing privilege-tier substitution ({}) on {}: {}",
+                            replacement, endpoint, e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing privilege-tier path substitution on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
+    private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient) throws IOException {
+        return switch (endpoint.getMethod().toUpperCase()) {
+            case "GET"    -> httpClient.getWithStatus(url, Map.of());
+            case "POST"   -> httpClient.postWithStatus(url, Map.of(), endpoint.getContentType(),
+                                endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
+            case "PUT"    -> httpClient.putWithStatus(url, Map.of(), endpoint.getContentType(),
+                                endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
+            case "PATCH"  -> httpClient.patchWithStatus(url, Map.of(), endpoint.getContentType(),
+                                endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
+            case "DELETE" -> httpClient.deleteWithStatus(url, Map.of());
+            default       -> httpClient.getWithStatus(url, Map.of());
+        };
+    }
+
+    private String buildUrl(String baseUrl, String path) {
+        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        return base + (path.startsWith("/") ? path : "/" + path);
     }
 
     private List<Finding> testAdminEndpointAccess(EndpointInfo endpoint, HttpClient httpClient) {

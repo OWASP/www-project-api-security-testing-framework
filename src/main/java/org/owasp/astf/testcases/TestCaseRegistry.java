@@ -40,7 +40,9 @@ public class TestCaseRegistry {
         register(new GrpcEndpointDetectionTestCase());             // gRPC detection
         register(new MutualTlsValidationTestCase());               // mTLS client-cert validation
         register(new LlmPromptInjectionTestCase());                // LLM/chatbot prompt injection
-        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023 + GraphQL/gRPC/mTLS/LLM)",
+        register(new SqlNoSqlInjectionTestCase());                  // general REST body SQL/NoSQL injection
+        register(new RegexDosTestCase());                           // ReDoS via catastrophic-backtracking input
+        logger.info("Registered {} default test cases (OWASP API Security Top 10 2023 + GraphQL/gRPC/mTLS/LLM/Injection/ReDoS)",
                 availableTestCases.size());
     }
 

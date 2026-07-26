@@ -11,10 +11,14 @@ import java.util.regex.Pattern;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
+import org.owasp.astf.core.discovery.PathTemplateResolver;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * Tests for API1:2023 Broken Object Level Authorization (BOLA/IDOR).
@@ -39,6 +43,21 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     private static final List<String> ALTERNATIVE_NUMERIC_IDS = List.of("1", "2", "100", "999", "0");
     private static final String ALTERNATIVE_UUID = "00000000-0000-0000-0000-000000000001";
 
+    // Used to build a realistic PUT/POST/PATCH body when the endpoint has no discovered request
+    // body — found necessary by live-testing VAmPI's password-change endpoint: sending "{}" let
+    // the request reach the endpoint, but never actually exercised the password-change semantics
+    // the vulnerability is about, understating what "cross-user access confirmed" should mean for
+    // a state-changing request. Extra fields an endpoint doesn't expect are typically ignored, so
+    // sending all of these together costs nothing.
+    private static final List<Map.Entry<String, String>> COMMON_STATE_CHANGE_BODY_FIELDS = List.of(
+            Map.entry("password", "N3wP@ssw0rd!"),
+            Map.entry("new_password", "N3wP@ssw0rd!"),
+            Map.entry("email", "test@example.com"),
+            Map.entry("name", "Test User")
+    );
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     @Override
     public String getId() {
         return "ASTF-API1-2023";
@@ -60,9 +79,15 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         logger.info("Executing {} test on {}", getId(), endpoint);
         List<Finding> findings = new ArrayList<>();
 
-        findings.addAll(testCrossUserAccess(endpoint, httpClient));
-        findings.addAll(testNumericIdManipulation(endpoint, httpClient));
-        findings.addAll(testUuidManipulation(endpoint, httpClient));
+        // Centralized in PathTemplateResolver — Scanner already calls this for every endpoint
+        // before test cases run, so in normal operation this is a fast no-op; it's called here
+        // too so BOLA still resolves correctly when invoked directly (e.g. in unit tests) without
+        // going through Scanner first.
+        EndpointInfo resolvedEndpoint = PathTemplateResolver.resolve(endpoint, httpClient);
+
+        findings.addAll(testCrossUserAccess(resolvedEndpoint, httpClient));
+        findings.addAll(testNumericIdManipulation(resolvedEndpoint, httpClient));
+        findings.addAll(testUuidManipulation(resolvedEndpoint, httpClient));
 
         return findings;
     }
@@ -77,6 +102,12 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      * <p>
      * Skips entirely when no secondary identity is configured — {@link HttpClient#getSecondaryAuthHeaders()}
      * returns an empty map in that case, and the single-identity checks above remain the fallback.
+     *
+     * Unlike {@link #testNumericIdManipulation}/{@link #testUuidManipulation}, which need a
+     * numeric/UUID value to substitute an alternative into, this check only compares two
+     * identities against the same URL — so a successfully-resolved non-numeric, non-UUID value
+     * (a username, slug, or title — see {@link EndpointInfo#isResolvedFromTemplate()}) is just
+     * as valid a target here as a numeric/UUID one.
      */
     private List<Finding> testCrossUserAccess(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
@@ -93,7 +124,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         }
         boolean hasNumericId = NUMERIC_ID_PATTERN.matcher(endpoint.getPath()).find();
         boolean hasUuid = UUID_PATTERN.matcher(endpoint.getPath()).find();
-        if (!hasNumericId && !hasUuid) {
+        if (!hasNumericId && !hasUuid && !endpoint.isResolvedFromTemplate()) {
             return findings;
         }
 
@@ -248,13 +279,41 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                                       Map<String, String> headers) throws IOException {
         return switch (endpoint.getMethod().toUpperCase()) {
             case "GET"    -> httpClient.getWithStatus(url, headers);
-            case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(),
-                                endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
-            case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(),
-                                endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}");
+            case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
+            case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
             case "DELETE" -> httpClient.deleteWithStatus(url, headers);
             default       -> httpClient.getWithStatus(url, headers);
         };
+    }
+
+    /**
+     * Returns the endpoint's own discovered request body when it's a usable, non-empty JSON
+     * object, otherwise builds a realistic body from common field names (see
+     * {@link #COMMON_STATE_CHANGE_BODY_FIELDS}) rather than falling back to an empty {@code "{}"}
+     * — an empty body reaches a PUT/POST endpoint but doesn't exercise its actual state-changing
+     * behavior, which is exactly what {@link #testCrossUserAccess} needs to prove.
+     */
+    private String resolveRequestBody(EndpointInfo endpoint) {
+        String discovered = endpoint.getRequestBody();
+        if (discovered != null && !discovered.isBlank()) {
+            try {
+                JsonNode root = objectMapper.readTree(discovered);
+                if (root.isObject() && root.size() > 0) {
+                    return discovered;
+                }
+            } catch (Exception e) {
+                logger.debug("Discovered request body for {} isn't valid JSON, using fallback: {}",
+                        endpoint, e.getMessage());
+            }
+        }
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < COMMON_STATE_CHANGE_BODY_FIELDS.size(); i++) {
+            if (i > 0) sb.append(",");
+            Map.Entry<String, String> field = COMMON_STATE_CHANGE_BODY_FIELDS.get(i);
+            sb.append("\"").append(field.getKey()).append("\":\"").append(field.getValue()).append("\"");
+        }
+        sb.append("}");
+        return sb.toString();
     }
 
     private String buildUrl(EndpointInfo endpoint, String path) {

@@ -22,14 +22,14 @@ class TestCaseRegistryTest {
     }
 
     @Test
-    @DisplayName("Should register all 14 default test cases (OWASP API Top 10 + GraphQL + gRPC + mTLS + LLM)")
+    @DisplayName("Should register all 16 default test cases (OWASP API Top 10 + GraphQL + gRPC + mTLS + LLM + Injection + ReDoS)")
     void testDefaultRegistration() {
         List<TestCase> testCases = registry.getAllTestCases();
-        assertEquals(14, testCases.size(), "Should have 14 default test cases");
+        assertEquals(16, testCases.size(), "Should have 16 default test cases");
     }
 
     @Test
-    @DisplayName("Should register all expected OWASP test case IDs plus GraphQL, gRPC, mTLS, and LLM")
+    @DisplayName("Should register all expected OWASP test case IDs plus GraphQL, gRPC, mTLS, LLM, Injection, and ReDoS")
     void testExpectedTestCaseIds() {
         List<TestCase> testCases = registry.getAllTestCases();
         List<String> ids = testCases.stream().map(TestCase::getId).toList();
@@ -48,6 +48,8 @@ class TestCaseRegistryTest {
         assertTrue(ids.contains("ASTF-GRPC-2023"), "Should contain gRPC test case");
         assertTrue(ids.contains("ASTF-MTLS-2023"), "Should contain mTLS test case");
         assertTrue(ids.contains("ASTF-LLM-2023"), "Should contain LLM prompt injection test case");
+        assertTrue(ids.contains("ASTF-INJECTION-2023"), "Should contain SQL/NoSQL injection test case");
+        assertTrue(ids.contains("ASTF-REDOS-2023"), "Should contain ReDoS test case");
     }
 
     @Test
@@ -62,7 +64,7 @@ class TestCaseRegistryTest {
     @DisplayName("Should return all test cases when no enabled/disabled filters set")
     void testGetEnabledNoFilter() {
         List<TestCase> enabled = registry.getEnabledTestCases(config);
-        assertEquals(14, enabled.size());
+        assertEquals(16, enabled.size());
     }
 
     @Test
@@ -80,7 +82,7 @@ class TestCaseRegistryTest {
     void testGetEnabledWithDisabled() {
         config.setDisabledTestCaseIds(List.of("ASTF-API1-2023", "ASTF-API2-2023"));
         List<TestCase> enabled = registry.getEnabledTestCases(config);
-        assertEquals(12, enabled.size());
+        assertEquals(14, enabled.size());
         assertTrue(enabled.stream().noneMatch(tc ->
                 tc.getId().equals("ASTF-API1-2023") || tc.getId().equals("ASTF-API2-2023")));
     }

@@ -59,6 +59,76 @@ public class GraphQLSecurityTestCase implements TestCase {
             "/api/query"
     );
 
+    // GraphQL IDE/explorer interfaces — never meant to be reachable in production, since they
+    // expose the full schema and a live query console to anyone who finds the path.
+    private static final List<String> GRAPHQL_IDE_PATHS = List.of(
+            "/graphiql", "/graphql-playground", "/playground", "/altair", "/voyager", "/graphql/console"
+    );
+
+    // A guessed cookie some targets use to gate an otherwise-blocked debug/IDE interface behind —
+    // client-controllable "trust" flags like this are a common, weak access-control pattern.
+    private static final Map<String, String> DEBUG_COOKIE_HEADERS = Map.of("Cookie", "debug=true; isAdmin=true");
+
+    // Keywords suggesting a query field is sensitive enough that a naive string-based deny-list
+    // (checking the raw query text rather than the parsed AST) might specifically target it —
+    // and therefore a good candidate for testing whether wrapping it in a fragment bypasses that
+    // deny-list (since a text-matching filter looking for "fieldName(" won't see it once it's
+    // referenced only via "...FragmentName").
+    private static final List<String> SENSITIVE_FIELD_KEYWORDS = List.of(
+            "admin", "debug", "diagnostic", "system", "internal", "secret", "config"
+    );
+
+    // Query fields commonly used to fetch the current authenticated user — the natural target
+    // for testing whether auth can be bypassed by passing a token as a query ARGUMENT rather
+    // than (or in addition to) the Authorization header.
+    private static final List<String> CURRENT_USER_FIELD_NAMES = List.of("me", "viewer", "currentUser", "profile");
+
+    // Argument names shaped like a token/credential rather than ordinary user input — excluded
+    // from testFieldInjection's generic SQL/XSS/path-traversal payload battery. Found necessary
+    // by live-testing against DVGA: its "me(token: String)" query field only surfaces once the
+    // 5-field extraction cap is removed (it sits at schema position 11), and feeding it generic
+    // injection payloads instead of a real JWT shape repeatedly hits DVGA's JWT-decode path with
+    // garbage, which crashed the container outright (reproducible, single-threaded, exit 139) —
+    // not just a wasted request. A token-shaped argument is already tested appropriately, with a
+    // real forged-JWT payload, by testArgumentBasedAuthBypass.
+    private static final List<String> TOKEN_LIKE_ARG_NAMES = List.of("token", "jwt", "apikey", "api_key", "sessionid", "session_id");
+
+    // JWT with "none" algorithm, claiming an admin subject — the same forged-token technique
+    // BrokenAuthenticationTestCase uses for header-based bypass, reused here as a query argument.
+    private static final String NONE_ALG_JWT_ARG =
+            "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" +
+            ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwicm9sZSI6ImFkbWluIn0" +
+            ".";
+
+    // Mutation-name keywords identifying a login/authentication field — the target for the
+    // brute-force lockout check, mirroring BrokenAuthenticationTestCase's REST-side check but
+    // applied to a GraphQL argument-based login instead of a JSON body (found needed: DVGA's own
+    // "Weak Password / Brute Force" scenario is a GraphQL login mutation, which the REST-oriented
+    // check never reaches since it never sends a GraphQL-shaped request body).
+    private static final List<String> LOGIN_MUTATION_KEYWORDS = List.of("login", "signin", "authenticate", "auth");
+    private static final List<String> USERNAME_ARG_NAMES = List.of("username", "email", "login", "user");
+    private static final List<String> PASSWORD_ARG_NAMES = List.of("password", "pass", "pwd");
+    private static final int GRAPHQL_BRUTE_FORCE_ATTEMPTS = 8;
+
+    // Malformed/type-invalid GraphQL request bodies, sent as raw strings — meant to trigger a
+    // resolver-level or query-execution exception rather than a clean schema-validation rejection,
+    // the same intent as SecurityMisconfigurationTestCase's malformed-payload probe but shaped for
+    // GraphQL's JSON envelope instead of a REST body.
+    private static final List<String> STACK_TRACE_PROBE_QUERIES = List.of(
+            "{\"query\":\"{__schema{types{name fields{name args{name type{name ofType{name",
+            "{\"query\":\"query{__type(name:123){name}}\"}",
+            "{\"query\":\"mutation{createPaste(title:null,content:null){id}}\"}"
+    );
+
+    // Python/Flask/Ariadne-style traceback markers (DVGA's actual backend) alongside the same
+    // generic exception/stack-trace indicators SecurityMisconfigurationTestCase already uses for
+    // the REST-side equivalent check.
+    private static final List<String> STACK_TRACE_INDICATORS = List.of(
+            "traceback (most recent call last)", "file \"", ", line ", "raise ",
+            "stack trace", "stacktrace", "at org.", "at java.", "at com.",
+            "nullpointerexception", "sqlexception", "internal server error at", "caused by:"
+    );
+
     // Standard introspection query — smallest form that reveals the full schema
     private static final String INTROSPECTION_QUERY =
             "{\"query\":\"{__schema{queryType{name}mutationType{name}types{name kind}}}\"}";
@@ -88,11 +158,35 @@ public class GraphQLSecurityTestCase implements TestCase {
     private static final String BATCH_QUERY =
             "[{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"},{\"query\":\"{__typename}\"}]";
 
+    // A moderately expensive, always-valid selection (real schema-walking work, not a free
+    // meta-field like __typename) used as the repeated unit for the field-duplication and
+    // alias-based DoS probes below — chosen because it works on any schema without knowing the
+    // target's own (potentially actually expensive) resolvers.
+    private static final String DOS_PROBE_SELECTION = "__schema{types{name kind fields{name}}}";
+    private static final int DOS_REPETITION_COUNT = 60;
+
+    private static final long DOS_ABSOLUTE_SLOW_THRESHOLD_MS = 3000;
+    private static final long DOS_BASELINE_MULTIPLIER = 8;
+
+    // Two fragments that reference each other — a cycle the GraphQL spec requires servers to
+    // reject at validation time (before execution). A server that doesn't check for this can
+    // recurse indefinitely trying to resolve the cycle.
+    private static final String CIRCULAR_FRAGMENT_QUERY =
+            "{\"query\":\"fragment A on Query{...B} fragment B on Query{...A} query{...A}\"}";
+
     // Introspects mutation fields, their argument types/names, AND their own return type, so
     // injection payloads can be sent to real mutations discovered from the schema (rather than
     // guessed field names) with a request shape the resolver will actually accept.
     private static final String MUTATION_INTROSPECTION_QUERY =
             "{\"query\":\"{__schema{mutationType{fields{name " +
+            "type{name kind ofType{name kind ofType{name kind}}} " +
+            "args{name type{name kind ofType{name kind ofType{name kind}}}}}}}}\"}";
+
+    // Same shape as MUTATION_INTROSPECTION_QUERY but for queryType — resolver-level injection
+    // isn't unique to mutations; a query field with a string argument (e.g. DVGA's pastes(filter))
+    // can just as easily concatenate it into a SQL query or shell command.
+    private static final String QUERY_INTROSPECTION_QUERY =
+            "{\"query\":\"{__schema{queryType{fields{name " +
             "type{name kind ofType{name kind ofType{name kind}}} " +
             "args{name type{name kind ofType{name kind ofType{name kind}}}}}}}}\"}";
 
@@ -118,6 +212,22 @@ public class GraphQLSecurityTestCase implements TestCase {
 
     private static final List<String> RESOLVER_INJECTION_INDICATORS = List.of(
             "<script>alert('xss')</script>", "root:x:0:0", "sql syntax", "syntax error near"
+    );
+
+    // Argument names suggesting the value is used to make an outbound request — the same GraphQL
+    // mutation/query-argument surface as resolver injection, but tested with SSRF payloads
+    // instead when the argument name looks URL/host-shaped (e.g. DVGA's importPaste(host, path)).
+    private static final List<String> SSRF_LIKE_ARG_NAMES = List.of(
+            "url", "uri", "host", "link", "callback", "webhook", "endpoint", "target", "path", "src"
+    );
+
+    private static final List<String> GRAPHQL_SSRF_PAYLOADS = List.of(
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/"
+    );
+
+    private static final List<String> GRAPHQL_SSRF_INDICATORS = List.of(
+            "ami-id", "instance-id", "iam/security-credentials", "computemetadata", "instance/service-accounts"
     );
 
     private static final String CONTENT_TYPE_JSON = "application/json";
@@ -161,6 +271,14 @@ public class GraphQLSecurityTestCase implements TestCase {
         findings.addAll(testQueryDepthAttack(endpoint, httpClient));
         findings.addAll(testBatchQueryAbuse(endpoint, httpClient));
         findings.addAll(testResolverInjection(endpoint, httpClient));
+        findings.addAll(testFieldDuplicationAttack(endpoint, httpClient));
+        findings.addAll(testAliasBasedAttack(endpoint, httpClient));
+        findings.addAll(testCircularFragmentAttack(endpoint, httpClient));
+        findings.addAll(testGraphiQLExposure(endpoint, httpClient));
+        findings.addAll(testOperationDenyListBypass(endpoint, httpClient));
+        findings.addAll(testArgumentBasedAuthBypass(endpoint, httpClient));
+        findings.addAll(testStackTraceDisclosure(endpoint, httpClient));
+        findings.addAll(testLoginMutationBruteForce(endpoint, httpClient));
 
         return findings;
     }
@@ -386,6 +504,534 @@ public class GraphQLSecurityTestCase implements TestCase {
         return findings;
     }
 
+    // ── Test: field duplication / alias-based / circular-fragment DoS ────────
+
+    /**
+     * Repeats an identical, moderately expensive selection {@link #DOS_REPETITION_COUNT} times
+     * within a single query and compares its response time against a single-copy baseline. A
+     * server without duplicate-selection protection may re-execute the underlying resolver once
+     * per repetition rather than merging them, making response time scale with repetition count.
+     */
+    List<Finding> testFieldDuplicationAttack(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            String baselineQuery = "{\"query\":\"{" + DOS_PROBE_SELECTION + "}\"}";
+            long baselineStart = System.currentTimeMillis();
+            HttpResponse baseline = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, baselineQuery);
+            long baselineElapsed = System.currentTimeMillis() - baselineStart;
+            if (!isAcceptedGraphQLQuery(baseline)) {
+                return findings;
+            }
+
+            StringBuilder repeated = new StringBuilder("{\"query\":\"{");
+            for (int i = 0; i < DOS_REPETITION_COUNT; i++) {
+                repeated.append(DOS_PROBE_SELECTION).append(" ");
+            }
+            repeated.append("}\"}");
+
+            boolean timedOut = false;
+            long start = System.currentTimeMillis();
+            try {
+                httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, repeated.toString());
+            } catch (IOException e) {
+                timedOut = true;
+            }
+            long elapsed = System.currentTimeMillis() - start;
+            long threshold = Math.max(DOS_ABSOLUTE_SLOW_THRESHOLD_MS, baselineElapsed * DOS_BASELINE_MULTIPLIER);
+
+            if (timedOut || elapsed > threshold) {
+                Finding f = new Finding(
+                        UUID.randomUUID().toString(),
+                        "GraphQL Field Duplication Denial of Service",
+                        String.format("Repeating the same selection %d times in a single query took %s " +
+                                "versus a %dms single-copy baseline, indicating the server re-executes the " +
+                                "underlying resolver once per repetition instead of de-duplicating identical " +
+                                "selections before execution.",
+                                DOS_REPETITION_COUNT, timedOut ? "longer than the connection timeout" : elapsed + "ms",
+                                baselineElapsed),
+                        Severity.MEDIUM,
+                        getId(),
+                        "POST " + endpoint.getPath(),
+                        "Impose a maximum query cost/complexity limit (counting repeated selections), or " +
+                        "de-duplicate identical field selections before execution."
+                );
+                f.setEvidence(timedOut
+                        ? "Request timed out (baseline: " + baselineElapsed + "ms)"
+                        : "Response took " + elapsed + "ms for " + DOS_REPETITION_COUNT +
+                          " repetitions (baseline: " + baselineElapsed + "ms)");
+                findings.add(f);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL field duplication on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /**
+     * Same technique as {@link #testFieldDuplicationAttack}, but each repetition is given a
+     * unique alias — bypassing any protection that only de-duplicates identical (non-aliased)
+     * field selections, since aliased selections are never considered "the same field" for
+     * merging purposes even when they're otherwise identical.
+     */
+    List<Finding> testAliasBasedAttack(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            String baselineQuery = "{\"query\":\"{a0:" + DOS_PROBE_SELECTION + "}\"}";
+            long baselineStart = System.currentTimeMillis();
+            HttpResponse baseline = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, baselineQuery);
+            long baselineElapsed = System.currentTimeMillis() - baselineStart;
+            if (!isAcceptedGraphQLQuery(baseline)) {
+                return findings;
+            }
+
+            StringBuilder aliased = new StringBuilder("{\"query\":\"{");
+            for (int i = 0; i < DOS_REPETITION_COUNT; i++) {
+                aliased.append("a").append(i).append(":").append(DOS_PROBE_SELECTION).append(" ");
+            }
+            aliased.append("}\"}");
+
+            boolean timedOut = false;
+            long start = System.currentTimeMillis();
+            try {
+                httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, aliased.toString());
+            } catch (IOException e) {
+                timedOut = true;
+            }
+            long elapsed = System.currentTimeMillis() - start;
+            long threshold = Math.max(DOS_ABSOLUTE_SLOW_THRESHOLD_MS, baselineElapsed * DOS_BASELINE_MULTIPLIER);
+
+            if (timedOut || elapsed > threshold) {
+                Finding f = new Finding(
+                        UUID.randomUUID().toString(),
+                        "GraphQL Alias-Based Denial of Service",
+                        String.format("Requesting the same expensive selection %d times under distinct " +
+                                "aliases in a single query took %s versus a %dms single-alias baseline. " +
+                                "Aliases bypass duplicate-field detection that only matches identical, " +
+                                "non-aliased selections, letting an attacker multiply resolver load far " +
+                                "beyond what query-depth limiting alone would catch.",
+                                DOS_REPETITION_COUNT, timedOut ? "longer than the connection timeout" : elapsed + "ms",
+                                baselineElapsed),
+                        Severity.MEDIUM,
+                        getId(),
+                        "POST " + endpoint.getPath(),
+                        "Impose a query cost/complexity limit that counts every aliased selection " +
+                        "individually, not just unique field names."
+                );
+                f.setEvidence(timedOut
+                        ? "Request timed out (baseline: " + baselineElapsed + "ms)"
+                        : "Response took " + elapsed + "ms for " + DOS_REPETITION_COUNT +
+                          " aliased repetitions (baseline: " + baselineElapsed + "ms)");
+                findings.add(f);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL alias-based attack on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /**
+     * Sends two fragments that reference each other in a cycle. The GraphQL specification
+     * requires servers to detect and reject fragment cycles at validation time, before
+     * execution — a server that instead tries to resolve the cycle can hang or crash.
+     */
+    List<Finding> testCircularFragmentAttack(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            boolean timedOut = false;
+            long start = System.currentTimeMillis();
+            HttpResponse response = null;
+            try {
+                response = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, CIRCULAR_FRAGMENT_QUERY);
+            } catch (IOException e) {
+                timedOut = true;
+            }
+            long elapsed = System.currentTimeMillis() - start;
+
+            if (timedOut || elapsed > DOS_ABSOLUTE_SLOW_THRESHOLD_MS) {
+                Finding f = new Finding(
+                        UUID.randomUUID().toString(),
+                        "GraphQL Circular Fragment Denial of Service",
+                        String.format("Two mutually-referencing fragments — a cycle the GraphQL spec requires " +
+                                "servers to reject at validation time — caused the response to take %s. " +
+                                "A spec-compliant server rejects this instantly with a validation error; " +
+                                "this server instead appears to attempt resolving the cycle.",
+                                timedOut ? "longer than the connection timeout" : elapsed + "ms"),
+                        Severity.HIGH,
+                        getId(),
+                        "POST " + endpoint.getPath(),
+                        "Ensure the GraphQL server library's fragment-cycle validation is enabled (it's " +
+                        "part of the GraphQL specification and enabled by default in virtually every " +
+                        "compliant implementation — verify no custom validation rules have disabled it)."
+                );
+                f.setEvidence(timedOut ? "Request timed out" : "Response took " + elapsed + "ms");
+                findings.add(f);
+            } else if (response != null) {
+                logger.debug("GraphQL server correctly rejected the circular fragment query on {} (HTTP {})",
+                        endpoint, response.getStatusCode());
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL circular fragment attack on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    // ── Test: GraphQL IDE exposure (with cookie-gated bypass check) ───────────
+
+    /**
+     * Probes for exposed GraphQL IDE/explorer interfaces (GraphiQL, Playground, Altair, Voyager),
+     * which are development tools that should never be reachable in production — they expose a
+     * live, schema-aware query console to anyone who finds the path. If unauthenticated access is
+     * blocked, retries with a guessed "debug"/"admin" cookie: some targets gate the IDE behind a
+     * client-controllable cookie rather than real authentication, and a request that succeeds only
+     * with that cookie present is itself evidence of that weak gate.
+     */
+    List<Finding> testGraphiQLExposure(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        String baseUrl = endpoint.getBaseUrl() != null ? endpoint.getBaseUrl() : "";
+
+        for (String path : GRAPHQL_IDE_PATHS) {
+            try {
+                String url = baseUrl + path;
+                HttpResponse response = httpClient.getWithStatus(url, Map.of());
+
+                if (response != null && response.isSuccess() && looksLikeGraphQLIde(response.getBody())) {
+                    Finding f = new Finding(
+                            UUID.randomUUID().toString(),
+                            "GraphQL IDE Exposed in Production",
+                            String.format("A GraphQL IDE/explorer interface is publicly accessible at '%s'. " +
+                                    "These developer tools expose the full schema and a live query console " +
+                                    "to anyone who finds the path, and should never be reachable outside " +
+                                    "development environments.", path),
+                            Severity.MEDIUM,
+                            getId(),
+                            "GET " + path,
+                            "Disable the GraphQL IDE/playground in production builds, or restrict it to " +
+                            "internal networks / behind real authentication."
+                    );
+                    f.setEvidence("GET " + url + " returned HTTP " + response.getStatusCode() + " with IDE markup");
+                    findings.add(f);
+                    continue;
+                }
+
+                if (response != null && !response.isSuccess()) {
+                    HttpResponse withCookie = httpClient.getWithStatus(url, DEBUG_COOKIE_HEADERS);
+                    if (withCookie != null && withCookie.isSuccess() && looksLikeGraphQLIde(withCookie.getBody())) {
+                        Finding f = new Finding(
+                                UUID.randomUUID().toString(),
+                                "GraphQL IDE Access Gated by a Guessable Cookie",
+                                String.format("The GraphQL IDE at '%s' is blocked without any cookie, but " +
+                                        "became accessible after sending a guessed 'debug=true; isAdmin=true' " +
+                                        "cookie. Client-controllable cookies are not an access-control " +
+                                        "mechanism — any client can set them.", path),
+                                Severity.HIGH,
+                                getId(),
+                                "GET " + path,
+                                "Never gate access to internal tools behind a client-supplied cookie value. " +
+                                "Disable the IDE in production entirely, or require real server-side session " +
+                                "authentication."
+                        );
+                        f.setEvidence("GET " + url + " without cookie: HTTP " + response.getStatusCode() +
+                                "; with debug cookie: HTTP " + withCookie.getStatusCode());
+                        findings.add(f);
+                    }
+                }
+            } catch (Exception e) {
+                logger.debug("Error probing GraphQL IDE path {} on {}: {}", path, endpoint, e.getMessage());
+            }
+        }
+
+        return findings;
+    }
+
+    private boolean looksLikeGraphQLIde(String body) {
+        if (body == null) return false;
+        String lower = body.toLowerCase();
+        return lower.contains("graphiql") || lower.contains("graphql-playground")
+                || lower.contains("altair") || lower.contains("voyager");
+    }
+
+    // ── Test: operation deny-list bypass via fragment wrapping ────────────────
+
+    /**
+     * Tests whether a naive, string-matching deny-list (checking the raw query text for a
+     * blocked field name, rather than parsing the AST) can be bypassed by referencing the same
+     * field only through a fragment spread. Picks the first schema field whose name suggests
+     * it's sensitive enough to plausibly be deny-listed, calls it directly, then calls the exact
+     * same field wrapped in a fragment — if the direct call is rejected but the fragment-wrapped
+     * one succeeds, that's concrete evidence of a text-based (rather than AST-based) filter.
+     */
+    List<Finding> testOperationDenyListBypass(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse introspectionResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, QUERY_INTROSPECTION_QUERY);
+            if (!isAcceptedGraphQLQuery(introspectionResponse)) {
+                return findings;
+            }
+
+            JsonNode root = objectMapper.readTree(introspectionResponse.getBody());
+            JsonNode fields = root.path("data").path("__schema").path("queryType").path("fields");
+            if (!fields.isArray()) {
+                return findings;
+            }
+
+            String sensitiveFieldName = null;
+            for (JsonNode field : fields) {
+                String name = field.path("name").asText(null);
+                if (name == null) continue;
+                String lowerName = name.toLowerCase();
+                if (SENSITIVE_FIELD_KEYWORDS.stream().anyMatch(lowerName::contains)) {
+                    sensitiveFieldName = name;
+                    break;
+                }
+            }
+            if (sensitiveFieldName == null) {
+                return findings;
+            }
+
+            String directQuery = "{\"query\":\"{" + sensitiveFieldName + "{__typename}}\"}";
+            HttpResponse directResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, directQuery);
+
+            boolean directBlocked = directResponse == null
+                    || !directResponse.isSuccess()
+                    || (directResponse.getBody() != null && directResponse.getBody().toLowerCase().contains("error"));
+            if (!directBlocked) {
+                return findings; // not blocked directly — nothing to bypass
+            }
+
+            String fragmentField = sensitiveFieldName;
+            String fragmentQuery = String.format(
+                    "{\"query\":\"fragment F on Query{%s{__typename}} query{...F}\"}", fragmentField);
+            HttpResponse fragmentResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, fragmentQuery);
+
+            if (isAcceptedGraphQLQuery(fragmentResponse)) {
+                Finding f = new Finding(
+                        UUID.randomUUID().toString(),
+                        "GraphQL Deny-List Bypass via Fragment Wrapping",
+                        String.format("The field '%s' is rejected when called directly, but succeeds when " +
+                                "referenced only through a fragment spread ('...FragmentName'). This " +
+                                "indicates the block is a text-based filter checking for the field name in " +
+                                "the raw query string, rather than proper AST-based validation.",
+                                sensitiveFieldName),
+                        Severity.HIGH,
+                        getId(),
+                        "POST " + endpoint.getPath(),
+                        "Enforce field-level access control in the resolver layer or via AST-based query " +
+                        "validation, not by string-matching the raw query text — fragments, aliases, and " +
+                        "whitespace variations all defeat text-based filters."
+                );
+                f.setEvidence("Direct call to " + sensitiveFieldName + " blocked; fragment-wrapped call succeeded");
+                findings.add(f);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL deny-list bypass on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    // ── Test: argument-based authentication bypass ────────────────────────────
+
+    /**
+     * Tests whether authentication can be bypassed by passing a forged JWT as a query
+     * ARGUMENT — e.g. {@code me(token: "...")} — rather than (or in addition to) the standard
+     * Authorization header. Some GraphQL APIs accept a token argument on user-lookup fields as a
+     * convenience and end up trusting it the same way as the header, without validating its
+     * signature — the same "none" algorithm forgery {@code BrokenAuthenticationTestCase} uses for
+     * the header-based variant, applied here as a query argument instead.
+     */
+    List<Finding> testArgumentBasedAuthBypass(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse baseline = httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON,
+                    "{\"query\":\"{__typename}\"}");
+            if (!isAcceptedGraphQLQuery(baseline)) {
+                return findings; // can't even do introspection-free queries — skip
+            }
+
+            for (String fieldName : CURRENT_USER_FIELD_NAMES) {
+                String query = String.format(
+                        "{\"query\":\"{%s(token:\\\"%s\\\"){__typename}}\"}", fieldName, NONE_ALG_JWT_ARG);
+                HttpResponse response = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, query);
+
+                if (isAcceptedGraphQLQuery(response)) {
+                    Finding f = new Finding(
+                            UUID.randomUUID().toString(),
+                            "GraphQL Argument-Based Authentication Bypass",
+                            String.format("The query field '%s' accepted a 'token' argument containing a " +
+                                    "JWT signed with the 'none' algorithm and returned a successful response, " +
+                                    "indicating the token argument is trusted without signature validation.",
+                                    fieldName),
+                            Severity.CRITICAL,
+                            getId(),
+                            "POST " + endpoint.getPath() + " (query " + fieldName + ")",
+                            "Never accept authentication tokens as query arguments — use the Authorization " +
+                            "header exclusively, and always validate JWT signatures against a known algorithm " +
+                            "and key before trusting any claim in the token."
+                    );
+                    f.setEvidence("query{" + fieldName + "(token: <none-alg JWT>){__typename}} returned HTTP " +
+                            response.getStatusCode());
+                    findings.add(f);
+                    return findings; // one confirmed instance is enough
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL argument-based auth bypass on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    // ── Test: stack trace / debug error disclosure ────────────────────────────
+
+    /**
+     * Sends malformed/type-invalid GraphQL requests designed to trigger a resolver-level or
+     * query-execution exception, then checks whether the response body leaks a raw stack trace or
+     * other internal implementation detail rather than a clean, generic error message — the
+     * GraphQL-shaped equivalent of {@code SecurityMisconfigurationTestCase#testVerboseErrors},
+     * which never runs against GraphQL endpoints since it POSTs a plain malformed body rather than
+     * a {@code {"query": "..."}} envelope and never gets past the server's JSON-parse step.
+     */
+    List<Finding> testStackTraceDisclosure(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        for (String probe : STACK_TRACE_PROBE_QUERIES) {
+            try {
+                HttpResponse response = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, probe);
+                String body = response != null ? response.getBody() : null;
+                if (body == null) {
+                    continue;
+                }
+
+                String lowerBody = body.toLowerCase();
+                List<String> foundIndicators = new ArrayList<>();
+                for (String indicator : STACK_TRACE_INDICATORS) {
+                    if (lowerBody.contains(indicator)) {
+                        foundIndicators.add(indicator);
+                    }
+                }
+
+                if (!foundIndicators.isEmpty()) {
+                    Finding f = new Finding(
+                            UUID.randomUUID().toString(),
+                            "GraphQL Stack Trace / Debug Error Disclosure",
+                            "A malformed or type-invalid GraphQL request produced a response containing " +
+                            "raw implementation details (" + String.join(", ", foundIndicators) + ") " +
+                            "instead of a generic error message — this reveals framework, file paths, and " +
+                            "internal logic useful for crafting further attacks.",
+                            Severity.MEDIUM,
+                            getId(),
+                            "POST " + endpoint.getPath(),
+                            "Catch resolver-level exceptions and return a generic error message to the " +
+                            "client. Log the full exception server-side only, and disable any GraphQL " +
+                            "server debug/development mode in production."
+                    );
+                    f.setEvidence("Query: " + probe + "\nIndicators found: " + String.join(", ", foundIndicators));
+                    findings.add(f);
+                    return findings; // one confirmed instance is enough
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing GraphQL stack trace disclosure on {}: {}", endpoint, e.getMessage());
+            }
+        }
+
+        return findings;
+    }
+
+    // ── Test: login mutation brute-force lockout ──────────────────────────────
+
+    /**
+     * Introspects mutation fields for a login/authentication-shaped mutation (name containing
+     * "login", "signin", "authenticate", or "auth", with both a username-like and password-like
+     * String argument), then sends {@link #GRAPHQL_BRUTE_FORCE_ATTEMPTS} consecutive failed
+     * attempts and checks whether the server ever responds with a rate-limit/lockout signal —
+     * the GraphQL-argument equivalent of {@code BrokenAuthenticationTestCase#testBruteForceLockout},
+     * which only ever sends a REST-shaped JSON body and never reaches a GraphQL login mutation.
+     */
+    List<Finding> testLoginMutationBruteForce(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse introspectionResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, MUTATION_INTROSPECTION_QUERY);
+            if (!isAcceptedGraphQLQuery(introspectionResponse)) {
+                return findings;
+            }
+
+            List<MutationCandidate> allCandidates = extractStringArgFields(
+                    introspectionResponse.getBody(), "mutationType");
+
+            MutationCandidate loginMutation = null;
+            String usernameArg = null;
+            String passwordArg = null;
+            for (MutationCandidate candidate : allCandidates) {
+                String lowerName = candidate.name().toLowerCase();
+                if (LOGIN_MUTATION_KEYWORDS.stream().noneMatch(lowerName::contains)) {
+                    continue;
+                }
+                String foundUsernameArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> USERNAME_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                String foundPasswordArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> PASSWORD_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                if (foundUsernameArg != null && foundPasswordArg != null) {
+                    loginMutation = candidate;
+                    usernameArg = foundUsernameArg;
+                    passwordArg = foundPasswordArg;
+                    break;
+                }
+            }
+            if (loginMutation == null) {
+                return findings;
+            }
+
+            HttpResponse lastResponse = null;
+            for (int attempt = 0; attempt < GRAPHQL_BRUTE_FORCE_ATTEMPTS; attempt++) {
+                String mutationCall = String.format(
+                        "mutation{%s(%s:\\\"admin\\\",%s:\\\"WrongPass-%d!\\\"){__typename}}",
+                        loginMutation.name(), usernameArg, passwordArg, attempt);
+                String requestBody = "{\"query\":\"" + mutationCall + "\"}";
+
+                lastResponse = httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, requestBody);
+                if (lastResponse == null) {
+                    return findings;
+                }
+                if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
+                    return findings; // lockout/rate-limiting is working correctly
+                }
+            }
+
+            Finding f = new Finding(
+                    UUID.randomUUID().toString(),
+                    "No Account Lockout or Rate Limiting on GraphQL Login Mutation",
+                    String.format("%d consecutive failed login attempts against the '%s' mutation produced " +
+                            "no rate-limiting or lockout response (HTTP 429/423). This allows unrestricted " +
+                            "brute-force and credential-stuffing attacks against user accounts via GraphQL.",
+                            GRAPHQL_BRUTE_FORCE_ATTEMPTS, loginMutation.name()),
+                    Severity.MEDIUM,
+                    getId(),
+                    "POST " + endpoint.getPath() + " (mutation " + loginMutation.name() + ")",
+                    "Implement account lockout or exponential rate limiting after a small number of failed " +
+                    "attempts (e.g. 5), and consider CAPTCHA or IP-based throttling for repeated failures — " +
+                    "regardless of whether login happens over REST or GraphQL."
+            );
+            f.setEvidence("Last of " + GRAPHQL_BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
+                    lastResponse.getStatusCode() + " with no lockout signal");
+            findings.add(f);
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL login brute-force on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
     // ── Test 5: Resolver-level injection ─────────────────────────────────────
 
     /**
@@ -398,7 +1044,8 @@ public class GraphQLSecurityTestCase implements TestCase {
      * {@link #testIntrospectionEnabled}) — without the schema, there's no way to know which
      * mutations exist or what arguments they accept without guessing field names, which fails
      * schema validation before ever reaching the resolver (the same class of bug fixed for the
-     * query-depth probe). Limited to the first 5 discovered mutations to bound request volume.
+     * query-depth probe). Every discovered mutation/query field is tested — see
+     * {@link #extractStringArgFields}.
      * <p>
      * Two real-world complications this handles, found by testing against DVGA rather than just
      * unit tests: (1) many resolvers require values for arguments the schema marks as nullable —
@@ -412,32 +1059,62 @@ public class GraphQLSecurityTestCase implements TestCase {
      */
     List<Finding> testResolverInjection(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
+        // Resolver-level injection isn't unique to mutations — a query field with a string
+        // argument (e.g. DVGA's pastes(filter)) is just as exploitable, and testing only
+        // mutations (the original scope) missed that whole surface.
+        findings.addAll(testFieldInjection(endpoint, httpClient, MUTATION_INTROSPECTION_QUERY, "mutationType", "mutation"));
+        findings.addAll(testFieldInjection(endpoint, httpClient, QUERY_INTROSPECTION_QUERY, "queryType", "query"));
+        return findings;
+    }
+
+    /**
+     * Shared implementation behind {@link #testResolverInjection}, parameterized over whether
+     * it's testing {@code mutationType} or {@code queryType} fields.
+     * <p>
+     * Tests every discovered candidate field (see {@link #extractStringArgFields}),
+     * not just the first one that yields a finding — a mutation being vulnerable doesn't mean
+     * every other mutation is safe, and stopping at the first confirmed hit (the original
+     * behavior) silently skipped every other candidate in the same scan.
+     */
+    private List<Finding> testFieldInjection(EndpointInfo endpoint, HttpClient httpClient,
+                                              String introspectionQuery, String schemaFieldName,
+                                              String operationKeyword) {
+        List<Finding> findings = new ArrayList<>();
 
         List<MutationCandidate> candidates;
         try {
             HttpResponse introspectionResponse = httpClient.postWithStatus(
-                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, MUTATION_INTROSPECTION_QUERY);
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, introspectionQuery);
 
             if (!isAcceptedGraphQLQuery(introspectionResponse)) {
-                logger.debug("Skipping resolver injection test — mutation introspection unavailable on {}", endpoint);
+                logger.debug("Skipping {} injection test — {} introspection unavailable on {}",
+                        operationKeyword, schemaFieldName, endpoint);
                 return findings;
             }
-            candidates = extractStringArgMutations(introspectionResponse.getBody());
+            candidates = extractStringArgFields(introspectionResponse.getBody(), schemaFieldName);
         } catch (Exception e) {
-            logger.debug("Error introspecting mutations on {}: {}", endpoint, e.getMessage());
+            logger.debug("Error introspecting {} on {}: {}", schemaFieldName, endpoint, e.getMessage());
             return findings;
         }
 
         for (MutationCandidate candidate : candidates) {
             String selectionSet = resolveSelectionSet(candidate.returnTypeName(), endpoint, httpClient, 0);
+            boolean isSsrfLikeArg = SSRF_LIKE_ARG_NAMES.stream()
+                    .anyMatch(name -> candidate.targetArgName().toLowerCase().contains(name));
 
-            for (String payload : RESOLVER_INJECTION_PAYLOADS) {
+            List<String> payloadsToTry = new ArrayList<>(RESOLVER_INJECTION_PAYLOADS);
+            if (isSsrfLikeArg) {
+                payloadsToTry.addAll(GRAPHQL_SSRF_PAYLOADS);
+            }
+
+            boolean confirmedForThisCandidate = false;
+            for (String payload : payloadsToTry) {
                 try {
                     String escapedPayload = payload.replace("\\", "\\\\").replace("\"", "\\\"");
                     String argList = buildArgumentList(candidate, escapedPayload);
-                    String mutation = String.format("mutation{%s(%s)%s}",
-                            candidate.name(), argList, selectionSet);
-                    String requestBody = "{\"query\":\"" + mutation + "\"}";
+                    String fieldCall = String.format("%s{%s(%s)%s}",
+                            operationKeyword, candidate.name(), argList, selectionSet);
+                    String requestBody = "{\"query\":\"" + fieldCall + "\"}";
 
                     HttpResponse response = httpClient.postWithStatus(
                             endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, requestBody);
@@ -445,38 +1122,66 @@ public class GraphQLSecurityTestCase implements TestCase {
 
                     if (response != null && response.isSuccess() && body != null) {
                         String lowerBody = body.toLowerCase();
-                        for (String indicator : RESOLVER_INJECTION_INDICATORS) {
+                        boolean isSsrfPayload = GRAPHQL_SSRF_PAYLOADS.contains(payload);
+                        List<String> indicatorsToCheck = isSsrfPayload
+                                ? GRAPHQL_SSRF_INDICATORS : RESOLVER_INJECTION_INDICATORS;
+
+                        for (String indicator : indicatorsToCheck) {
                             if (lowerBody.contains(indicator.toLowerCase())) {
-                                Finding f = new Finding(
-                                        UUID.randomUUID().toString(),
-                                        "GraphQL Resolver Injection Vulnerability",
-                                        String.format("The mutation '%s' appears to pass its '%s' argument " +
-                                                "unsanitized into a resolver that executes it (SQL query, " +
-                                                "shell command, or renders it unescaped), based on the " +
-                                                "detected pattern '%s' in the response.",
-                                                candidate.name(), candidate.targetArgName(), indicator),
-                                        Severity.CRITICAL,
-                                        getId(),
-                                        "POST " + endpoint.getPath() + " (mutation " + candidate.name() + ")",
-                                        "Never build SQL queries or shell commands by concatenating resolver " +
-                                        "arguments. Use parameterized queries for database access, avoid " +
-                                        "shelling out entirely where possible, and escape/validate all " +
-                                        "resolver input before use, output, or persistence."
-                                );
-                                f.setEvidence("Payload: " + payload + "\nPattern found: " + indicator);
-                                findings.add(f);
-                                return findings; // One confirmed resolver injection is enough
+                                findings.add(buildResolverInjectionFinding(endpoint, candidate, operationKeyword,
+                                        payload, indicator, isSsrfPayload));
+                                confirmedForThisCandidate = true;
+                                break;
                             }
                         }
                     }
                 } catch (Exception e) {
-                    logger.debug("Error testing resolver injection on mutation {}.{}: {}",
-                            candidate.name(), candidate.targetArgName(), e.getMessage());
+                    logger.debug("Error testing {} injection on {}.{}: {}",
+                            operationKeyword, candidate.name(), candidate.targetArgName(), e.getMessage());
+                }
+
+                // One confirmed finding for THIS field is enough — but unlike the original
+                // behavior, this only stops trying payloads against the current candidate; the
+                // outer loop still moves on to test every other candidate field.
+                if (confirmedForThisCandidate) {
+                    break;
                 }
             }
         }
 
         return findings;
+    }
+
+    private Finding buildResolverInjectionFinding(EndpointInfo endpoint, MutationCandidate candidate,
+                                                   String operationKeyword, String payload, String indicator,
+                                                   boolean isSsrf) {
+        Finding f = new Finding(
+                UUID.randomUUID().toString(),
+                isSsrf ? "GraphQL Resolver SSRF Vulnerability" : "GraphQL Resolver Injection Vulnerability",
+                isSsrf
+                        ? String.format("The %s '%s' appears to pass its '%s' argument to a server-side " +
+                                "HTTP request without validating the destination — a cloud metadata endpoint " +
+                                "URL placed in this argument was fetched and its response reflected back, " +
+                                "based on the detected pattern '%s'.",
+                                operationKeyword, candidate.name(), candidate.targetArgName(), indicator)
+                        : String.format("The %s '%s' appears to pass its '%s' argument unsanitized into a " +
+                                "resolver that executes it (SQL query, shell command, or renders it " +
+                                "unescaped), based on the detected pattern '%s' in the response.",
+                                operationKeyword, candidate.name(), candidate.targetArgName(), indicator),
+                Severity.CRITICAL,
+                getId(),
+                "POST " + endpoint.getPath() + " (" + operationKeyword + " " + candidate.name() + ")",
+                isSsrf
+                        ? "Validate and allowlist destination hosts before making any server-side request " +
+                          "built from user input. Block requests to link-local/metadata IP ranges (e.g. " +
+                          "169.254.169.254) at the network layer as defense in depth."
+                        : "Never build SQL queries or shell commands by concatenating resolver arguments. " +
+                          "Use parameterized queries for database access, avoid shelling out entirely where " +
+                          "possible, and escape/validate all resolver input before use, output, or persistence."
+        );
+        f.setEvidence("Payload: " + payload + "\nPattern found: " + indicator);
+        f.setRequestDetails("mutation/query field: " + candidate.name());
+        return f;
     }
 
     private record ArgSpec(String name, String typeName) { }
@@ -485,22 +1190,26 @@ public class GraphQLSecurityTestCase implements TestCase {
                                       String returnTypeName) { }
 
     /**
-     * Parses the mutation-introspection response and returns, for each mutation field with at
+     * Parses a mutationType/queryType introspection response and returns, for each field with at
      * least one String-typed argument, its name, its first String argument (the injection
-     * target), every argument the mutation accepts (so all of them can be given a valid default —
-     * see {@link #testResolverInjection}), and its own resolved return type name. Bounded to the
-     * first 5 mutations found, to keep request volume reasonable.
+     * target), every argument the field accepts (so all of them can be given a valid default —
+     * see {@link #testFieldInjection}), and its own resolved return type name.
+     * <p>
+     * Every candidate field is returned — an earlier version bounded this to the first 5 fields
+     * found to limit request volume, but that silently dropped every field beyond the bound from
+     * testing entirely (confirmed live: DVGA's importPaste SSRF/OS-injection and uploadPaste path
+     * traversal all sit past position 5 in the schema and were never reached). Coverage completeness
+     * takes priority over request-volume trimming here.
      */
-    List<MutationCandidate> extractStringArgMutations(String introspectionBody) {
+    List<MutationCandidate> extractStringArgFields(String introspectionBody, String schemaFieldName) {
         List<MutationCandidate> results = new ArrayList<>();
         try {
             JsonNode root = objectMapper.readTree(introspectionBody);
-            JsonNode fields = root.path("data").path("__schema").path("mutationType").path("fields");
+            JsonNode fields = root.path("data").path("__schema").path(schemaFieldName).path("fields");
             if (!fields.isArray()) {
                 return results;
             }
             for (JsonNode field : fields) {
-                if (results.size() >= 5) break;
                 String mutationName = field.path("name").asText(null);
                 if (mutationName == null) continue;
 
@@ -511,7 +1220,9 @@ public class GraphQLSecurityTestCase implements TestCase {
                     if (argName == null) continue;
                     String argType = resolveScalarTypeName(arg.path("type"));
                     allArgs.add(new ArgSpec(argName, argType));
-                    if (targetArgName == null && "String".equals(argType)) {
+                    boolean isTokenLikeArg = TOKEN_LIKE_ARG_NAMES.stream()
+                            .anyMatch(argName.toLowerCase()::contains);
+                    if (targetArgName == null && "String".equals(argType) && !isTokenLikeArg) {
                         targetArgName = argName;
                     }
                 }
