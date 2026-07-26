@@ -137,6 +137,53 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Detects BFLA via privilege-tier path substitution (regression: crAPI's /user/videos vs /admin/videos)")
+    void testPrivilegeTierPathSubstitutionDetected() throws IOException {
+        // crAPI's real vulnerability: DELETE /identity/api/v2/user/videos/{id} always denies,
+        // but the sibling DELETE /identity/api/v2/admin/videos/{id} succeeds with the same,
+        // non-admin token — confirmed by reading crAPI's actual ProfileController.java source.
+        EndpointInfo endpoint = new EndpointInfo("/identity/api/v2/user/videos/42", "DELETE");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.deleteWithStatus(eq("https://example.com/identity/api/v2/user/videos/42"), anyMap()))
+                .thenReturn(new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of()));
+        when(httpClient.deleteWithStatus(eq("https://example.com/identity/api/v2/admin/videos/42"), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"video deleted\"}", Map.of()));
+
+        List<Finding> findings = testCase.testPrivilegeTierPathSubstitution(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect privilege-tier path substitution BFLA");
+        assertEquals("Broken Function Level Authorization (Privilege-Tier Path Substitution)",
+                findings.get(0).getTitle());
+    }
+
+    @Test
+    @DisplayName("Does not flag privilege-tier substitution when the original request already succeeds")
+    void testPrivilegeTierPathSubstitutionNotFlaggedWhenOriginalSucceeds() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/identity/api/v2/user/videos/42", "DELETE");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.deleteWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"ok\"}", Map.of()));
+
+        List<Finding> findings = testCase.testPrivilegeTierPathSubstitution(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(),
+                "Should not flag substitution when the original (non-substituted) request already succeeds");
+    }
+
+    @Test
+    @DisplayName("Does not attempt privilege-tier substitution when no low-privilege segment is present")
+    void testPrivilegeTierPathSubstitutionSkippedWithoutMatchingSegment() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "DELETE");
+        endpoint.setBaseUrl("https://example.com");
+
+        List<Finding> findings = testCase.testPrivilegeTierPathSubstitution(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "Should not attempt substitution without a matching path segment");
+    }
+
+    @Test
     @DisplayName("Should handle exceptions gracefully")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
