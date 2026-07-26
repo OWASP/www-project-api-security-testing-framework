@@ -147,7 +147,53 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     }
 
     @Test
-    @DisplayName("Should handle exceptions gracefully")
+    @DisplayName("Resolves an unresolved path template (e.g. VAmPI's {book_title}) to a real value and detects BOLA (regression, #95)")
+    void testResolvesTemplatePlaceholderAndDetectsCrossUserBola() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+
+        // The collection endpoint (placeholder segment + everything after it stripped) returns
+        // a list of real books — "bookTitle82" is the plausible identifier to resolve to.
+        when(httpClient.getWithStatus(eq("https://example.com/books/v1"), eq(Map.of())))
+                .thenReturn(new HttpResponse(200,
+                        "[{\"book_title\":\"bookTitle82\",\"secret_content\":\"top secret\"}]", Map.of()));
+
+        // Both identities can read the resolved, real object with no ID substitution.
+        when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
+        when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"),
+                eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+                .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should resolve {book_title} to a real value and detect the cross-user BOLA on it");
+    }
+
+    @Test
+    @DisplayName("Falls back to the original (unresolved) endpoint when the collection lookup fails")
+    void testTemplatePlaceholderResolutionFailsGracefully() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        // Collection lookup fails (404) — nothing to resolve to.
+        when(httpClient.getWithStatus(eq("https://example.com/books/v1"), eq(Map.of())))
+                .thenReturn(new HttpResponse(404, "", Map.of()));
+
+        assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
+                "Should not attempt BOLA testing on a still-unresolved placeholder path");
+    }
+
+    @Test
+    @DisplayName("Handles exceptions gracefully")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users/1", "GET");
         endpoint.setBaseUrl("https://example.com");

@@ -16,6 +16,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.discovery.EndpointDiscoveryService;
+import org.owasp.astf.core.discovery.PathTemplateResolver;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.ScanResult;
@@ -100,6 +101,28 @@ public class Scanner {
                     ep.setBaseUrl(targetUrl);
                 }
             }
+
+            // Resolve unresolved OpenAPI path-template placeholders (e.g. /users/v1/{username})
+            // to real, discovered values ONCE here, centrally, before any test case runs — rather
+            // than leaving each test case to either duplicate this resolution logic itself (only
+            // BrokenObjectLevelAuthorizationTestCase originally did) or send the literal,
+            // unresolved placeholder on every request. That literal-placeholder request isn't
+            // just untested — a raw, unencoded "{" / "}" in an HTTP request line is invalid per
+            // RFC 3986, and live testing against VAmPI found its dev server doesn't error on that,
+            // it hangs the connection with no response at all, burning the full timeout on every
+            // test case that hits it. EndpointInfo.getFullUrl() now percent-encodes as a safety
+            // net regardless, but resolving to a real value here means every test case gets to
+            // exercise the actual target resource instead of a dead template string.
+            //
+            // No endpoint is ever dropped by this step, resolved or not — an endpoint that can't
+            // be resolved is simply left as-is and still tested exactly as before, since the
+            // scan's purpose is to find as many real issues as possible, not to narrow what gets
+            // tested.
+            List<EndpointInfo> resolvedEndpoints = new ArrayList<>(endpoints.size());
+            for (EndpointInfo ep : endpoints) {
+                resolvedEndpoints.add(PathTemplateResolver.resolve(ep, httpClient));
+            }
+            endpoints = resolvedEndpoints;
 
             // Get applicable test cases
             List<TestCase> testCases = testCaseRegistry.getEnabledTestCases(config);

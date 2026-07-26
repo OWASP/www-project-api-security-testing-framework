@@ -11,6 +11,7 @@ import java.util.regex.Pattern;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
+import org.owasp.astf.core.discovery.PathTemplateResolver;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
@@ -60,9 +61,15 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         logger.info("Executing {} test on {}", getId(), endpoint);
         List<Finding> findings = new ArrayList<>();
 
-        findings.addAll(testCrossUserAccess(endpoint, httpClient));
-        findings.addAll(testNumericIdManipulation(endpoint, httpClient));
-        findings.addAll(testUuidManipulation(endpoint, httpClient));
+        // Centralized in PathTemplateResolver — Scanner already calls this for every endpoint
+        // before test cases run, so in normal operation this is a fast no-op; it's called here
+        // too so BOLA still resolves correctly when invoked directly (e.g. in unit tests) without
+        // going through Scanner first.
+        EndpointInfo resolvedEndpoint = PathTemplateResolver.resolve(endpoint, httpClient);
+
+        findings.addAll(testCrossUserAccess(resolvedEndpoint, httpClient));
+        findings.addAll(testNumericIdManipulation(resolvedEndpoint, httpClient));
+        findings.addAll(testUuidManipulation(resolvedEndpoint, httpClient));
 
         return findings;
     }
@@ -77,6 +84,12 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      * <p>
      * Skips entirely when no secondary identity is configured — {@link HttpClient#getSecondaryAuthHeaders()}
      * returns an empty map in that case, and the single-identity checks above remain the fallback.
+     *
+     * Unlike {@link #testNumericIdManipulation}/{@link #testUuidManipulation}, which need a
+     * numeric/UUID value to substitute an alternative into, this check only compares two
+     * identities against the same URL — so a successfully-resolved non-numeric, non-UUID value
+     * (a username, slug, or title — see {@link EndpointInfo#isResolvedFromTemplate()}) is just
+     * as valid a target here as a numeric/UUID one.
      */
     private List<Finding> testCrossUserAccess(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
@@ -93,7 +106,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         }
         boolean hasNumericId = NUMERIC_ID_PATTERN.matcher(endpoint.getPath()).find();
         boolean hasUuid = UUID_PATTERN.matcher(endpoint.getPath()).find();
-        if (!hasNumericId && !hasUuid) {
+        if (!hasNumericId && !hasUuid && !endpoint.isResolvedFromTemplate()) {
             return findings;
         }
 
