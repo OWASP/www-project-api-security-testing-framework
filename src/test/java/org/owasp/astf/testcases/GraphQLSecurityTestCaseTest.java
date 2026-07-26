@@ -253,6 +253,249 @@ class GraphQLSecurityTestCaseTest {
         assertTrue(findings.isEmpty(), "Non-GraphQL endpoints should produce no findings");
     }
 
+    // ── field duplication / alias / circular fragment DoS (#101) ──────────────
+
+    @Test
+    @DisplayName("Detects field duplication DoS when the repeated-selection request times out")
+    void testFieldDuplicationDetectedViaTimeout() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        // Distinguish the short single-copy baseline from the ~60x-repeated probe by length
+        // rather than fragile brace-counting substring matching.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), argThat(q -> q != null && q.length() < 200)))
+                .thenReturn(ok("{\"data\":{\"__schema\":{\"types\":[]}}}"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), argThat(q -> q != null && q.length() >= 200)))
+                .thenThrow(new IOException("Read timed out"));
+
+        List<Finding> findings = testCase.testFieldDuplicationAttack(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect field duplication DoS from the timeout");
+        assertEquals("GraphQL Field Duplication Denial of Service", findings.get(0).getTitle());
+        assertEquals(Severity.MEDIUM, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Does not flag field duplication when both requests are fast")
+    void testFieldDuplicationNotDetectedWhenFast() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"data\":{\"__schema\":{\"types\":[]}}}"));
+
+        List<Finding> findings = testCase.testFieldDuplicationAttack(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Detects alias-based DoS when the aliased-repetition request times out")
+    void testAliasBasedAttackDetectedViaTimeout() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(q -> q != null && q.contains("a59:"))))
+                .thenThrow(new IOException("Read timed out"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(q -> q != null && !q.contains("a59:"))))
+                .thenReturn(ok("{\"data\":{\"a0\":{\"types\":[]}}}"));
+
+        List<Finding> findings = testCase.testAliasBasedAttack(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect alias-based DoS from the timeout");
+        assertEquals("GraphQL Alias-Based Denial of Service", findings.get(0).getTitle());
+    }
+
+    @Test
+    @DisplayName("Does not flag alias-based attack when both requests are fast")
+    void testAliasBasedAttackNotDetectedWhenFast() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"data\":{\"a0\":{\"types\":[]}}}"));
+
+        List<Finding> findings = testCase.testAliasBasedAttack(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Detects circular fragment DoS when the request times out")
+    void testCircularFragmentDetectedViaTimeout() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenThrow(new IOException("Read timed out"));
+
+        List<Finding> findings = testCase.testCircularFragmentAttack(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect circular fragment DoS from the timeout");
+        assertEquals("GraphQL Circular Fragment Denial of Service", findings.get(0).getTitle());
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Does not flag circular fragment when the server rejects it quickly")
+    void testCircularFragmentNotDetectedWhenRejectedFast() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400,
+                        "{\"errors\":[{\"message\":\"Cannot spread fragment 'A' within itself\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testCircularFragmentAttack(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "A fast validation rejection is the correct, safe behavior");
+    }
+
+    // ── GraphQL IDE exposure (#102) ────────────────────────────────────────────
+
+    @Test
+    @DisplayName("Detects an exposed GraphiQL interface")
+    void testGraphiQLExposureDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.endsWith("/graphiql")), anyMap()))
+                .thenReturn(new HttpResponse(200, "<html><title>GraphiQL</title></html>", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.endsWith("/graphiql")), anyMap()))
+                .thenReturn(new HttpResponse(404, "", Map.of()));
+
+        List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().equals("GraphQL IDE Exposed in Production")));
+    }
+
+    @Test
+    @DisplayName("Detects a GraphiQL interface gated behind a guessable debug cookie")
+    void testGraphiQLCookieBypassDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.endsWith("/graphiql")), eq(Map.of())))
+                .thenReturn(new HttpResponse(403, "Forbidden", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.endsWith("/graphiql")),
+                argThat(h -> h != null && h.containsKey("Cookie"))))
+                .thenReturn(new HttpResponse(200, "<html><title>GraphiQL</title></html>", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.endsWith("/graphiql")), anyMap()))
+                .thenReturn(new HttpResponse(404, "", Map.of()));
+
+        List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Guessable Cookie")));
+    }
+
+    @Test
+    @DisplayName("Does not flag GraphiQL exposure when every IDE path is blocked")
+    void testGraphiQLExposureNotDetectedWhenBlocked() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(404, "", Map.of()));
+
+        List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    // ── deny-list bypass via fragment wrapping (#102) ─────────────────────────
+
+    @Test
+    @DisplayName("Detects deny-list bypass when a blocked field succeeds via fragment wrapping")
+    void testDenyListBypassDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String queryIntrospection = """
+                {
+                  "data": { "__schema": { "queryType": { "fields": [
+                    { "name": "adminUsers", "args": [] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(ok(queryIntrospection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(q -> q != null && q.contains("{adminUsers{__typename}}"))))
+                .thenReturn(new HttpResponse(200, "{\"errors\":[{\"message\":\"Operation not allowed\"}]}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(q -> q != null && q.contains("fragment F"))))
+                .thenReturn(ok("{\"data\":{\"adminUsers\":{\"__typename\":\"AdminUsers\"}}}"));
+
+        List<Finding> findings = testCase.testOperationDenyListBypass(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect the fragment-wrapping bypass");
+        assertEquals("GraphQL Deny-List Bypass via Fragment Wrapping", findings.get(0).getTitle());
+    }
+
+    @Test
+    @DisplayName("Does not flag deny-list bypass when the direct call already succeeds")
+    void testDenyListBypassNotDetectedWhenNotBlocked() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String queryIntrospection = """
+                {
+                  "data": { "__schema": { "queryType": { "fields": [
+                    { "name": "adminUsers", "args": [] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(ok(queryIntrospection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("adminUsers")))
+                .thenReturn(ok("{\"data\":{\"adminUsers\":{\"__typename\":\"AdminUsers\"}}}"));
+
+        List<Finding> findings = testCase.testOperationDenyListBypass(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "Nothing to bypass when the field isn't blocked in the first place");
+    }
+
+    @Test
+    @DisplayName("Does not flag deny-list bypass when no sensitive-sounding field exists")
+    void testDenyListBypassSkippedWithoutSensitiveField() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String queryIntrospection = """
+                {
+                  "data": { "__schema": { "queryType": { "fields": [
+                    { "name": "products", "args": [] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok(queryIntrospection));
+
+        List<Finding> findings = testCase.testOperationDenyListBypass(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    // ── argument-based auth bypass (#102) ──────────────────────────────────────
+
+    @Test
+    @DisplayName("Detects argument-based auth bypass when a none-alg JWT query argument is accepted")
+    void testArgumentBasedAuthBypassDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), eq("{\"query\":\"{__typename}\"}")))
+                .thenReturn(ok("{\"data\":{\"__typename\":\"Query\"}}"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("me(token:")))
+                .thenReturn(ok("{\"data\":{\"me\":{\"__typename\":\"User\"}}}"));
+
+        List<Finding> findings = testCase.testArgumentBasedAuthBypass(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect the argument-based auth bypass");
+        assertEquals("GraphQL Argument-Based Authentication Bypass", findings.get(0).getTitle());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Does not flag argument-based auth bypass when every candidate field rejects the forged token")
+    void testArgumentBasedAuthBypassNotDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), eq("{\"query\":\"{__typename}\"}")))
+                .thenReturn(ok("{\"data\":{\"__typename\":\"Query\"}}"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("token:")))
+                .thenReturn(new HttpResponse(200, "{\"errors\":[{\"message\":\"Unauthorized\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testArgumentBasedAuthBypass(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
     // ── resolver injection ────────────────────────────────────────────────────
 
     @Test
@@ -285,7 +528,7 @@ class GraphQLSecurityTestCaseTest {
                 }
                 """;
 
-        List<?> results = testCase.extractStringArgMutations(introspection);
+        List<?> results = testCase.extractStringArgFields(introspection, "mutationType");
 
         assertEquals(1, results.size(), "Only createPost has a String-typed argument");
     }
@@ -425,6 +668,96 @@ class GraphQLSecurityTestCaseTest {
         List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
 
         assertTrue(findings.isEmpty(), "Should not flag resolver injection when the payload is properly escaped");
+    }
+
+    @Test
+    @DisplayName("Detects injection in a SECOND vulnerable mutation instead of stopping after the first (regression, #100)")
+    void testResolverInjectionFindsMultipleVulnerableMutations() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String introspection = """
+                {
+                  "data": { "__schema": { "mutationType": { "fields": [
+                    { "name": "createComment", "args": [
+                        { "name": "body", "type": { "name": "String", "kind": "SCALAR" } } ] },
+                    { "name": "updateBio", "args": [
+                        { "name": "bio", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("mutationType")))
+                .thenReturn(ok(introspection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(new HttpResponse(200, "{\"errors\":[{\"message\":\"no query fields\"}]}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("createComment")))
+                .thenReturn(ok("{\"data\":{\"createComment\":\"<script>alert('xss')</script>\"}}"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("updateBio")))
+                .thenReturn(ok("{\"data\":{\"updateBio\":\"<script>alert('xss')</script>\"}}"));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertEquals(2, findings.size(), "Both vulnerable mutations should be reported, not just the first");
+    }
+
+    @Test
+    @DisplayName("Detects injection in a QUERY field, not just mutations (regression, #100)")
+    void testResolverInjectionCoversQueryFields() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String noMutations = """
+                { "data": { "__schema": { "mutationType": { "fields": [] } } } }
+                """;
+        String queryIntrospection = """
+                {
+                  "data": { "__schema": { "queryType": { "fields": [
+                    { "name": "pastes", "args": [
+                        { "name": "filter", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("mutationType")))
+                .thenReturn(ok(noMutations));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(ok(queryIntrospection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("pastes")))
+                .thenReturn(ok("{\"data\":{\"pastes\":\"sql syntax error near ''\"}}"));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect injection in a query field");
+        assertEquals("GraphQL Resolver Injection Vulnerability", findings.get(0).getTitle());
+        assertTrue(findings.get(0).getRequestDetails().contains("query"),
+                "Evidence should reflect this was found via a query field, not a mutation");
+    }
+
+    @Test
+    @DisplayName("Detects GraphQL resolver SSRF when a URL-shaped argument reflects cloud metadata (regression, #100)")
+    void testResolverInjectionDetectsSsrf() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        String introspection = """
+                {
+                  "data": { "__schema": { "mutationType": { "fields": [
+                    { "name": "importImage", "args": [
+                        { "name": "url", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                  ] } } }
+                }
+                """;
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("mutationType")))
+                .thenReturn(ok(introspection));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(new HttpResponse(200, "{\"errors\":[{\"message\":\"no query fields\"}]}", Map.of()));
+        // Benign/XSS-style payloads are rejected or unreflected; only the SSRF metadata URL succeeds.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("importImage")))
+                .thenReturn(ok("{\"data\":{\"importImage\":\"upload failed\"}}"));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                contains("169.254.169.254")))
+                .thenReturn(ok("{\"data\":{\"importImage\":\"ami-id: ami-0abcdef1234567890\"}}"));
+
+        List<Finding> findings = testCase.testResolverInjection(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect SSRF via the URL-shaped argument");
+        assertEquals("GraphQL Resolver SSRF Vulnerability", findings.get(0).getTitle());
     }
 
     @Test
