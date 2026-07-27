@@ -25,7 +25,7 @@ Download the latest pre-built JAR directly from the [GitHub Releases page](https
 
 ```bash
 # Download the latest stable release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.0.jar
+curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
 ```
 
 Or build from source:
@@ -34,14 +34,14 @@ Or build from source:
 git clone https://github.com/OWASP/www-project-api-security-testing-framework.git
 cd www-project-api-security-testing-framework
 mvn clean package -DskipTests
-# JAR is at: target/api-security-testing-framework-2.0.0.jar
+# JAR is at: target/api-security-testing-framework-2.0.1.jar
 ```
 
 ### 3. Run your first scan (copy-paste ready)
 
 **Option A — Inline flags** (quickest):
 ```bash
-java -jar astf-v2.0.0.jar \
+java -jar astf-v2.0.1.jar \
   -u https://api.example.com \
   --token "YOUR_BEARER_TOKEN" \
   -f HTML -o results.html -v
@@ -49,12 +49,12 @@ java -jar astf-v2.0.0.jar \
 
 **Option B — Config file** (recommended for repeatable scans):
 ```bash
-java -jar astf-v2.0.0.jar -c docs/examples/scan-config.yaml
+java -jar astf-v2.0.1.jar -c docs/examples/scan-config.yaml
 ```
 
 **Option C — Against OWASP crAPI** (zero-config proof of concept):
 ```bash
-java -jar astf-v2.0.0.jar \
+java -jar astf-v2.0.1.jar \
   -u http://crapi.apisec.ai \
   -f HTML -o crapi-report.html --timeout 3
 # Auto-discovers 832 endpoints, detects 11 vulnerability types
@@ -77,13 +77,13 @@ Releases are published automatically when a version tag is pushed. The workflow 
 
 | Tag format | Release type | Example |
 |---|---|---|
-| `v*-beta` | Pre-release | `v2.0.0-beta` |
-| `v*-rc*` | Release candidate | `v2.0.0-rc1` |
-| `v*` (no suffix) | Stable release | `v2.0.0` ← current |
+| `v*-beta` | Pre-release | `v2.0.1-beta` |
+| `v*-rc*` | Release candidate | `v2.0.1-rc1` |
+| `v*` (no suffix) | Stable release | `v2.0.1` ← current |
 
 **[→ View all releases](https://github.com/OWASP/www-project-api-security-testing-framework/releases)**
 
-The JAR asset on each release is named `astf-<tag>.jar`, e.g. `astf-v2.0.0.jar`. Use this name in your CI pipelines to pin a specific version.
+The JAR asset on each release is named `astf-<tag>.jar`, e.g. `astf-v2.0.1.jar`. Use this name in your CI pipelines to pin a specific version.
 
 ---
 
@@ -190,7 +190,7 @@ When multiple endpoint sources are configured, ASTF uses this order (highest win
 
 ```bash
 # Scan only specific endpoints from a file
-java -jar astf-v2.0.0.jar -u https://api.example.com \
+java -jar astf-v2.0.1.jar -u https://api.example.com \
   --endpoints-file my-endpoints.txt --token "TOKEN"
 
 # my-endpoints.txt format:
@@ -235,10 +235,10 @@ java -jar astf-v2.0.0.jar -u https://api.example.com \
 
 Run only specific test cases:
 ```bash
-java -jar astf-v2.0.0.jar -u https://api.example.com \
+java -jar astf-v2.0.1.jar -u https://api.example.com \
   --test-cases ASTF-API1-2023,ASTF-API2-2023
 
-java -jar astf-v2.0.0.jar -u https://api.example.com \
+java -jar astf-v2.0.1.jar -u https://api.example.com \
   --exclude-tests ASTF-GRAPHQL-2023,ASTF-GRPC-2023
 ```
 
@@ -305,11 +305,11 @@ jobs:
 
       - name: Download ASTF
         run: |
-          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.0.jar
+          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
 
       - name: Run ASTF scan
         run: |
-          java -jar astf-v2.0.0.jar \
+          java -jar astf-v2.0.1.jar \
             -u ${{ secrets.API_URL }} \
             --token ${{ secrets.API_TOKEN }} \
             -f SARIF -o results.sarif \
@@ -332,7 +332,7 @@ jobs:
 ### Gate on HIGH/CRITICAL only (not every finding)
 
 ```bash
-java -jar astf-v2.0.0.jar \
+java -jar astf-v2.0.1.jar \
   -u $API_URL --token $TOKEN -f JSON -o results.json
 
 HIGH_CRIT=$(jq '[.findings[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' results.json)
@@ -407,11 +407,11 @@ To add a new test case, see [Adding New Test Cases](docs/ARCHITECTURE.md#adding-
 ```bash
 # 1. Ensure main is green (all CI checks pass)
 # 2. Tag and push — the release workflow does everything else
-git tag v2.0.0
-git push origin v2.0.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
-The `release.yml` workflow will run all 350 tests, build `astf-v2.0.0.jar`, and create a
+The `release.yml` workflow will run all 350 tests, build `astf-v2.0.1.jar`, and create a
 GitHub Release with the JAR attached as a downloadable asset. A plain `vX.Y.Z` tag (no
 `alpha`/`beta`/`rc` suffix) is published as a **stable** release; only tags matching one of
 those suffixes are marked as a pre-release — see the [tag format table](#releases) above.
