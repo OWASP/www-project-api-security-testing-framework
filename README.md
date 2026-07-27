@@ -362,6 +362,7 @@ www-project-api-security-testing-framework/
 ├── docs/
 │   ├── TESTING_GUIDELINES.md  # Methodology: how to test, interpret results, reduce false positives
 │   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 16 test cases, live-verification results
+│   ├── TRACEABILITY.md        # Documented vulnerabilities vs. actual detections, per target
 │   ├── ARCHITECTURE.md        # Component design, data flow, extension guide
 │   ├── TROUBLESHOOTING.md     # Logging, common errors, issue templates
 │   └── examples/
@@ -383,6 +384,7 @@ www-project-api-security-testing-framework/
 |---|---|
 | [Testing Guidelines](docs/TESTING_GUIDELINES.md) | **Start here for methodology** — testing approaches, auth/authz/data-validation/rate-limiting strategies, result interpretation, false-positive reduction, remediation guidance |
 | [Framework Overview](docs/FRAMEWORK_OVERVIEW.md) | All 16 test cases, live-verification results against real vulnerable targets, use cases |
+| [Traceability Matrix](docs/TRACEABILITY.md) | Every documented vulnerability in VAmPI, crAPI, DVGA, and gRPC Goat, traced against what ASTF actually detects — published misses included, not just hits |
 | [Architecture](docs/ARCHITECTURE.md) | Component design, data flow, how to add a test case |
 | [Troubleshooting](docs/TROUBLESHOOTING.md) | Logging config, common errors, issue templates |
 | [Full Config Reference](docs/examples/scan-config.yaml) | Every config option with inline comments |

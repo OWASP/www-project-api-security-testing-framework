@@ -28,7 +28,7 @@ ASTF has been validated against real, intentionally-vulnerable API targets — [
 - **Four output formats** — HTML (human review), JSON (processing), SARIF (GitHub Code Scanning), XML
 - **CI/CD ready** — GitHub Actions workflow included; exits with code `1` when findings detected for pipeline gating
 - **350 passing unit tests** — fully test-covered implementation
-- **Proven on real targets, with an honest scorecard** — validated against OWASP crAPI, VAmPI, and DVGA, with a public traceability matrix showing exactly what is and isn't detected against each target's own documented vulnerability list, not just an unqualified "100% coverage" claim
+- **Proven on real targets, with an honest scorecard** — validated against OWASP crAPI, VAmPI, and DVGA, with a public [traceability matrix](https://github.com/OWASP/www-project-api-security-testing-framework/blob/main/docs/TRACEABILITY.md) showing exactly what is and isn't detected against each target's own documented vulnerability list, not just an unqualified "100% coverage" claim
 
 ## Test Case Coverage
 
@@ -121,7 +121,7 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
 - LLM/chatbot prompt injection testing
 - General-purpose SQL/NoSQL injection and Regular Expression Denial of Service (ReDoS) test cases
 - GraphQL depth: resolver injection across every mutation/query field (not just the first few), 3 additional denial-of-service variants, GraphiQL/IDE exposure, deny-list bypass, argument-based auth bypass, login brute-force, stack-trace disclosure
-- Live verification against real running vulnerable applications (crAPI, VAmPI, DVGA) with a published traceability matrix tracing every finding back to each target's own documented vulnerability list
+- Live verification against real running vulnerable applications (crAPI, VAmPI, DVGA) with a published [traceability matrix](https://github.com/OWASP/www-project-api-security-testing-framework/blob/main/docs/TRACEABILITY.md) tracing every finding back to each target's own documented vulnerability list
 - Comprehensive [Testing Guidelines](https://github.com/OWASP/www-project-api-security-testing-framework/blob/main/docs/TESTING_GUIDELINES.md) covering methodology, result interpretation, and false-positive reduction
 
 ### ✅ Phase 5 — v2.0.0 Stable Release (Completed)
