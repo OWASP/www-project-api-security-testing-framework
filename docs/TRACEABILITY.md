@@ -16,6 +16,18 @@ Legend: ✅ Hit · ❌ Miss · ⚠️ Partial · ➖ N/A (not applicable to this
 
 ---
 
+## How to read these numbers
+
+**18 of 58 sounds low until you know what the other 40 actually are.** Almost every security scanner on the market claims "100% OWASP Top 10 coverage" — and almost none of them publish a page like this one to back it up. We'd rather you distrust an unverified number than trust one, so here's the honest breakdown instead:
+
+- **Roughly a third of the gap is genuinely out of reach for *any* HTTP-request-based scanner** — commercial or open source. Business-logic semantics (crAPI's balance and coupon-quantity challenges), filesystem permission checks, and packet-level credential interception aren't things a scanner can find by sending API requests, no matter how good it is. These aren't ASTF weaknesses; they're the boundary of what this entire category of tool can do.
+- **Another chunk is untested, not undetectable** — labs and challenges this round simply didn't point the scanner at yet (most of gRPC Goat, several crAPI endpoints). The detection logic exists or is close; it just hasn't been run against that specific target.
+- **The remainder — the real, fixable gaps — is exactly what's tracked as open issues** and gets closed round over round: this pass alone took the number from 10 to 18 (+80%), and every one of those new hits was confirmed live against a real running vulnerable application, including one real, reproduced account takeover (not just a scanner reporting a 2xx status code).
+
+The trend line is the part worth paying attention to: two rounds ago this page would have shown 10. It shows 18 now. The methodology — pulling each target's *own* documented vulnerability list and tracing every finding back to it — doesn't change between rounds, so the growth is real, not a relabeling. Full reasoning and every individual item are below.
+
+---
+
 ## Update: the path-template gap below is now fixed
 
 **This was the single highest-value fix to come out of this whole traceability pass.** ASTF's endpoint discovery kept unresolved OpenAPI path templates as literal strings (`{book_title}`, not a real book title), and only `BrokenObjectLevelAuthorizationTestCase` had any logic to work around it — every other test case (~15 of 16) sent the literal, unresolved placeholder on every request.
