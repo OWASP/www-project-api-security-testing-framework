@@ -139,6 +139,13 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
   BOLA, only discoverable through a link embedded in a prior response)
 - **Plugin system for custom test cases** — let the community publish and share their own
   checks without needing a core-repo review cycle for every addition
+- **Testable subset of the OWASP Top 10 for LLM Applications** — sensitive information
+  disclosure via LLM output (system-prompt leakage, cross-session data leakage), insecure
+  output handling (unsanitized LLM output reflected downstream), and LLM-specific resource
+  exhaustion, extending the existing prompt-injection check into the vulnerability classes
+  an HTTP-request-based scanner can actually reach. Deliberately excluded: training data
+  poisoning, supply-chain/SBOM analysis, and model theft — none are testable by sending API
+  requests, regardless of how good the scanner is
 - OpenAPI/Swagger and GraphQL SDL spec import for precise, guess-free endpoint/schema
   targeting instead of pattern-guessed discovery
 - Automated login-flow support — configure a credential-submission sequence once instead of
