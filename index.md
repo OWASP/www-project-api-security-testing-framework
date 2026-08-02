@@ -178,3 +178,8 @@ This project is licensed under the [Apache 2.0 License](https://www.apache.org/l
 
 - [Govindarajan Lakshmikanthan](mailto:govindarajan.lakshmikanthan@owasp.org) — Project Leader
   - GitHub: [@GovindarajanL](https://github.com/GovindarajanL)
+
+## Maintainers
+
+- Vivek Dhaduvai — Project Maintainer
+  - GitHub: [@dhaduvaivivek](https://github.com/dhaduvaivivek)
