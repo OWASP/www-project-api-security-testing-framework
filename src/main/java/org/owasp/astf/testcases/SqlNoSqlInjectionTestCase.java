@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -264,11 +265,19 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     private List<Finding> testSqlInjection(EndpointInfo endpoint, HttpClient httpClient, List<String> fields) {
         List<Finding> findings = new ArrayList<>();
 
+        // Records each field's response to the bare single-quote payload (SQL_PAYLOADS.get(0)) as
+        // it's sent below, so the behavioral fallback can reuse it instead of resending the exact
+        // same request — avoids doubling live HTTP calls (and any side effects) per field.
+        Map<String, HttpResponse> quoteResponseByField = new HashMap<>();
+
         for (String field : fields) {
             for (String payload : SQL_PAYLOADS) {
                 try {
                     String body = buildJsonBody(fields, field, "\"" + escapeJson(payload) + "\"");
                     HttpResponse response = sendRequest(endpoint, httpClient, body);
+                    if (payload.equals(SQL_PAYLOADS.get(0))) {
+                        quoteResponseByField.put(field, response);
+                    }
                     String responseBody = response != null ? response.getBody() : null;
 
                     if (responseBody != null) {
@@ -300,6 +309,73 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                 } catch (Exception e) {
                     logger.debug("Error testing SQL injection on {} field {}: {}", endpoint, field, e.getMessage());
                 }
+            }
+        }
+
+        if (findings.isEmpty()) {
+            findings.addAll(testSqlInjectionBehavioral(endpoint, httpClient, fields, quoteResponseByField));
+        }
+
+        return findings;
+    }
+
+    /**
+     * Fallback for when a SQL error is real but never reaches the response body — e.g. an API
+     * whose own exception handler crashes a second time trying to serialize the raw driver
+     * error, so the client only ever sees a generic 500 page with no database-specific text
+     * (observed live against crAPI's {@code apply_coupon} endpoint: a bare single quote in
+     * {@code coupon_code} produces a confirmed {@code psycopg2.errors.ProgrammingError} server-side,
+     * but the response body is a content-free Django error page). Compares a bare single-quote
+     * payload's status against a clean-value baseline on the same field: an unprompted 500 where
+     * the identical request with an ordinary value succeeds is a weaker, but real, signal that
+     * unescaped input reached the query layer.
+     * <p>
+     * Reuses each field's response to the bare single-quote payload from {@code quoteResponseByField}
+     * (already sent once by {@link #testSqlInjection}'s own payload loop) instead of resending an
+     * identical request — avoids doubling live HTTP calls, and any side effects, per field.
+     */
+    private List<Finding> testSqlInjectionBehavioral(EndpointInfo endpoint, HttpClient httpClient,
+                                                       List<String> fields,
+                                                       Map<String, HttpResponse> quoteResponseByField) {
+        List<Finding> findings = new ArrayList<>();
+
+        for (String field : fields) {
+            try {
+                String baselineBody = buildJsonBody(fields, field, "\"astf-baseline-value\"");
+                HttpResponse baseline = sendRequest(endpoint, httpClient, baselineBody);
+                if (baseline == null || baseline.getStatusCode() == 500) {
+                    continue; // baseline itself errors — can't attribute a later 500 to the payload
+                }
+
+                HttpResponse response = quoteResponseByField.get(field);
+                if (response != null && response.getStatusCode() == 500) {
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "Possible SQL Injection (Behavioral)",
+                            String.format("Submitting a single quote in the '%s' field caused an HTTP 500 " +
+                                    "error, while an ordinary value on the same field succeeded (HTTP %d). " +
+                                    "This is consistent with unescaped input reaching a database query, even " +
+                                    "though no database-specific error text appeared in the response body.",
+                                    field, baseline.getStatusCode()),
+                            Severity.MEDIUM,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            "Use parameterized queries or an ORM with proper escaping for all database " +
+                            "access. Also review server-side exception handling — an unhandled error " +
+                            "surfacing as a generic 500 page (rather than a validation-level 4xx) with no " +
+                            "body evidence often means a real vulnerability just isn't visible to a " +
+                            "black-box scanner yet."
+                    );
+                    finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
+                            "\nField: " + field + "\nPayload: '\nBaseline status: " + baseline.getStatusCode());
+                    finding.setEvidence("HTTP 500 on a single-quote payload vs HTTP " + baseline.getStatusCode() +
+                            " on a clean baseline value for the same field");
+                    findings.add(finding);
+                    return findings;
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing behavioral SQL injection on {} field {}: {}",
+                        endpoint, field, e.getMessage());
             }
         }
 

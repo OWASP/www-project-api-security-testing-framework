@@ -183,6 +183,57 @@ class SqlNoSqlInjectionTestCaseTest {
     }
 
     @Test
+    @DisplayName("Detects SQL injection behaviorally when a 500 appears with no DB-error text in the body " +
+            "(regression: crAPI's apply_coupon, whose own exception handler crashes into a content-free page)")
+    void testDetectsSqlInjectionBehaviorallyWhenNoErrorTextLeaks() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/workshop/api/shop/apply_coupon", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\",\"amount\":10}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Clean/baseline values succeed; a bare single quote produces a content-free 500.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && body.contains("'"))))
+                .thenReturn(new HttpResponse(500, "<html><body>Server Error (500)</body></html>", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && !body.contains("'"))))
+                .thenReturn(new HttpResponse(400, "{\"message\":\"Coupon not found\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should detect SQL injection via the behavioral 500-vs-baseline signal");
+        assertEquals("Possible SQL Injection (Behavioral)", findings.get(0).getTitle());
+        assertEquals(Severity.MEDIUM, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Does not flag behavioral SQL injection when the baseline itself already errors")
+    void testNoBehavioralSqlInjectionWhenBaselineAlsoErrors() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/broken", "POST", "application/json",
+                "{\"field\":\"value\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(500, "<html>always broken</html>", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "A 500 baseline can't attribute the later 500 to the injected payload");
+    }
+
+    @Test
+    @DisplayName("Does not flag behavioral SQL injection when both baseline and payload succeed")
+    void testNoBehavioralSqlInjectionWhenBothSucceed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fine", "POST", "application/json",
+                "{\"field\":\"value\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"ok\":true}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
     @DisplayName("Uses common field names when the endpoint has no discovered request body")
     void testFallsBackToCommonFieldNamesWhenNoBody() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/comments", "POST", "application/json", null, true);
