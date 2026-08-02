@@ -12,7 +12,7 @@ Four research passes pulled the **official, documented** vulnerability catalog s
 | gRPC Goat | **1** | 9 | Per-lab `Readme.md` ([rootxjs/grpc-goat](https://github.com/rootxjs/grpc-goat)) |
 | **Total** | **18** | **58** | — |
 
-Legend: ✅ Hit · ❌ Miss · ⚠️ Partial · ➖ N/A (not applicable to this run) · `structural` (a generic scanner plausibly could catch this) · `business logic` (requires domain knowledge no generic scanner has)
+Legend: ✅ Hit · ❌ Miss · ⚠️ Partial · ➖ N/A (not applicable to this run) · 🚫 Not in Scope (a different discipline entirely, not an API-request-testable concern) · `structural` (a generic scanner plausibly could catch this) · `business logic` (requires domain knowledge no generic scanner has, but is still conceptually an API security concern)
 
 ---
 
@@ -77,7 +77,7 @@ Source: crAPI's own `docs/challenges.md` + `docs/challengeSolutions.md` — the 
 | 13 | Redeem claimed coupon via SQL injection `structural` | workshop | ❌ Miss | Endpoint not in this session's tested set. |
 | 14 | Endpoint with no auth check `structural` | unspecified | ✅ Hit | "Missing Authentication Controls" fired in the authenticated scan. |
 | 15 | JWT forgery — 4 sub-attacks (alg confusion, unsigned, JKU, kid path traversal) `structural` | identity | ⚠️ Partial | ASTF's JWT-none check covers only the "unsigned/none" variant, and it didn't fire against crAPI (suggesting crAPI blocks that one specifically) — the other 3, more sophisticated attacks (RS256→HS256 confusion, JKU header abuse, kid path traversal) have no equivalent test at all. |
-| 16-18 | Chatbot prompt injection (3 challenges) `business logic` | chatbot | ⚠️ Partial | #90 correctly identified the real LangGraph chatbot endpoint and failed gracefully without a live OpenAI key — mechanics verified, actual compliance never exercised (no API credits spent). |
+| 16-18 | Chatbot prompt injection (3 challenges) `business logic` | chatbot | ⚠️ Partial | #90 correctly identified the real LangGraph chatbot endpoint and failed gracefully without a live OpenAI key — mechanics verified, actual compliance never exercised (no API credits spent). **Scope note:** this challenge is really two separable things — (a) *reaching* the chatbot endpoint and sending a crafted prompt, which is squarely in scope and is what ASTF's check does, and (b) *judging whether the model semantically complied* with the injected instruction, which is LLM behavioral/safety evaluation, arguably a different discipline from structural API vulnerability testing even though it happens to run over an API. We count (a) as in scope; (b) is closer to the LLM Top 10 boundary discussed in the roadmap than to a typical API security gap. |
 
 crAPI's own docs also mention 2-3 undocumented "secret" challenges with no published details — excluded from this count since nothing is knowable about them.
 
@@ -121,11 +121,11 @@ Correction from the earlier evidence report: the real repo is [rootxjs/grpc-goat
 | Lab | Documented vulnerability | Tested this session? | Status | Notes |
 |---|---|---|---|---|
 | 001 | gRPC Reflection Enabled | Yes | ✅ Hit | "gRPC Server Reflection Enabled" — the #72 h2c fix made this reachable at all. |
-| 002 | Plaintext gRPC (credential interception) | Yes (detection only) | ❌ Miss | ASTF has no packet-capture/credential-interception capability — structurally out of reach for an HTTP-client-based tool. |
+| 002 | Plaintext gRPC (credential interception) | Yes (detection only) | 🚫 Not in Scope | **Why not in scope:** confirming this vulnerability requires capturing and reading raw network traffic (packet-level interception, e.g. tcpdump/Wireshark-style capture), not sending and analyzing HTTP/gRPC requests. That's a network traffic analysis capability, a different tool category entirely — no amount of improving ASTF's request logic gets you there. ASTF can flag the absence of TLS as a misconfiguration signal, but actually demonstrating credential interception is out of reach for any request-based scanner, commercial or open source. |
 | 003 | Insecure TLS (self-signed, MITM-able) | No | ➖ N/A | Not built/run this session. |
 | 004 | Arbitrary mTLS (any client cert accepted) | No | ➖ N/A | #88's `MutualTlsValidationTestCase` is built for exactly this — never live-tested against it. |
 | 005 | mTLS subject/CN validation bypass | No | ➖ N/A | Same test case as 004 would need a second run with a forged-CN cert. |
-| 006 | Unix socket world-writable | No | ➖ N/A | #89 — intentionally out of scope, filesystem-level check. |
+| 006 | Unix socket world-writable | No | 🚫 Not in Scope | **Why not in scope:** this is a filesystem permission check (whether a Unix socket file on the host has world-writable perms) — it has nothing to do with how the API is called or structured, and isn't reachable by sending any HTTP/gRPC request. That's host/OS hardening territory, a different discipline from API security testing. Explicitly closed as out of scope in [issue #89](https://github.com/OWASP/www-project-api-security-testing-framework/issues/89). |
 | 007 | SQL Injection | No | ➖ N/A | Even if tested, ASTF's gRPC test case is detection/enumeration-only by design — no injection capability. |
 | 008 | Command Injection | No | ➖ N/A | Same structural limitation as 007. |
 | 009 | SSRF | No | ➖ N/A | ASTF's SSRF test case is REST-oriented; gRPC has no equivalent. |
@@ -134,11 +134,12 @@ Correction from the earlier evidence report: the real repo is [rootxjs/grpc-goat
 
 ## 5 · Why the numbers look like this
 
-Three different reasons collapse into one low number per target, and they call for different responses:
+Four different reasons collapse into one low number per target, and they call for different responses — the first three are all, in one way or another, still ASTF's job; the fourth deliberately isn't:
 
 - **Structural gaps in ASTF** — real, fixable misses on vulnerability classes a generic scanner plausibly could catch: GraphQL SSRF/injection on argument-level fields beyond the one tested per run, NoSQL injection, operation-name abuse, brute-force/enumeration, ReDoS, response-timing DoS. Each of these is a legitimate "file an issue" gap.
 - **Untested, not undetectable** — labs/endpoints/challenges this session simply didn't reach (gRPC Goat 003-009, several crAPI challenges, DVGA's later solution pages). The capability may already exist or be close; it just wasn't pointed at these specific targets yet.
-- **Genuinely out of reach for a request-based scanner** — business-logic semantics (crAPI's balance/coupon/quantity challenges, LLM compliance without spending real API credits), filesystem-level checks (gRPC Goat 006), and packet-level interception (gRPC Goat 002's plaintext-credential capture). No amount of fixing ASTF's HTTP-request logic closes these; they need a fundamentally different tool or a human.
+- **Technically unreachable by any automated tool, but still conceptually in scope** — crAPI's business-logic challenges (balance/coupon/quantity manipulation, undocumented-field leaks). These *are* real API vulnerabilities in the OWASP sense — they need semantic domain knowledge ("what does a correct balance look like") that no generic scanner, ours or anyone else's, has. The limitation is technical, not a scope decision; if a future version adds domain-aware business-logic testing, these belong on the "fixable" list.
+- **🚫 Not in scope — a different discipline entirely** — filesystem permission checks (gRPC Goat 006, Unix socket world-writable) and packet-level credential interception (gRPC Goat 002, plaintext-credential capture). Neither of these is reachable by sending and analyzing API requests, no matter how good the scanner is — one is host/OS hardening, the other is network traffic analysis. These aren't "hard for ASTF"; they're categorically outside what an API-request-based testing tool does. Tagged explicitly as 🚫 Not in Scope in the tables above rather than lumped in with genuine misses.
 
 The one number worth treating as a real defect rather than a scoping choice: **VAmPI's non-numeric path IDs make its own two headline vulnerabilities invisible** to a test case that's supposed to exist specifically to catch them. That's not "we didn't get to it" — it's "the check runs, on the right target class, and still can't see it."
 
