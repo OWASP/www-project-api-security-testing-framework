@@ -371,7 +371,6 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                     finding.setEvidence("HTTP 500 on a single-quote payload vs HTTP " + baseline.getStatusCode() +
                             " on a clean baseline value for the same field");
                     findings.add(finding);
-                    return findings;
                 }
             } catch (Exception e) {
                 logger.debug("Error testing behavioral SQL injection on {} field {}: {}",
