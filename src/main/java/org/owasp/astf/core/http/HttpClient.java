@@ -218,6 +218,16 @@ public class HttpClient {
     }
 
     /**
+     * @return the bearer token configured for this scan (via {@code --token}), or {@code null}
+     * if none was provided. Lets JWT-forgery test cases reuse the real, already-valid token's
+     * own claims (e.g. its {@code sub}) instead of a generic placeholder identity that may not
+     * resolve to any real account on the target.
+     */
+    public String getConfiguredBearerToken() {
+        return config.getBearerToken();
+    }
+
+    /**
      * Sends a GET request presenting the client certificate from the given PKCS12 keystore,
      * for mTLS testing (e.g. confirming whether a server actually validates client certificates
      * rather than accepting any presented certificate, or validates the certificate's subject).

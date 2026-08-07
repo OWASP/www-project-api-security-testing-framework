@@ -263,6 +263,41 @@ class BrokenAuthenticationTestCaseTest {
     }
 
     @Test
+    @DisplayName("JWT-none forgery reuses the real configured token's payload claims instead of a placeholder identity " +
+            "(regression: live-confirmed against crAPI, which keys sessions by the real 'sub' and never resolves " +
+            "the generic placeholder subject)")
+    void testJwtNoneAlgorithmReusesRealTokenClaims() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/vehicles", "GET", "application/json", null, true);
+
+        // A real, already-valid token with a distinctive payload the forged token should reuse.
+        String realHeader = "eyJhbGciOiJSUzI1NiJ9"; // {"alg":"RS256"}
+        String realPayload = "eyJzdWIiOiJhc3RmdGVzdGVyQGV4YW1wbGUuY29tIn0"; // {"sub":"astftester@example.com"}
+        String realToken = realHeader + "." + realPayload + ".realSignatureBytes";
+        when(httpClient.getConfiguredBearerToken()).thenReturn(realToken);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    String auth = hdrs.getOrDefault("Authorization", "");
+                    // Only accept a none-alg token that carries the REAL payload segment —
+                    // proves the forged token was built from the real claims, not the
+                    // hardcoded generic placeholder ("sub":"1234567890").
+                    if (auth.equals("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." + realPayload + ".")) {
+                        return new HttpResponse(200, "[]", Map.of());
+                    }
+                    if (auth.isEmpty()) {
+                        return new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of());
+                    }
+                    return new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("JWT") && f.getTitle().contains("none")),
+                "Should detect the none-algorithm bypass using the real token's own claims");
+    }
+
+    @Test
     @DisplayName("Should NOT flag weak credentials when HTTP 200 body indicates the login actually failed (VAmPI-style false positive)")
     void testWeakCredentialsNoFalsePositiveOn200WithFailureBody() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json", "{}", true);
