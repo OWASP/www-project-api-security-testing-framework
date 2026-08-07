@@ -45,9 +45,17 @@ public class BrokenAuthenticationTestCase implements TestCase {
             "mfa", "otp", "totp", "2fa", "two-factor", "multifactor", "verify", "code"
     );
 
-    // JWT with "none" algorithm - known attack payload
+    // Base64url encoding of {"alg":"none","typ":"JWT"} — the forged header shared by every
+    // none-algorithm JWT below, real-claims or placeholder.
+    private static final String NONE_ALG_HEADER = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
+
+    // JWT with "none" algorithm - known attack payload. Placeholder identity ("sub":"1234567890")
+    // used only as a fallback when no real authenticated token is available to build a
+    // none-algorithm forgery from (see buildNoneAlgJwt) — an identity-aware backend that keys
+    // sessions by a real subject (email, username, ...) won't resolve this to any account, so
+    // the signature-bypass can be structurally correct while still not authenticating as anyone.
     private static final String NONE_ALG_JWT =
-            "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" +  // {"alg":"none","typ":"JWT"}
+            NONE_ALG_HEADER +
             ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ" + // {"sub":"1234567890","name":"Admin","iat":1516239022}
             ".";  // empty signature
 
@@ -411,6 +419,26 @@ public class BrokenAuthenticationTestCase implements TestCase {
         );
     }
 
+    /**
+     * Builds a forged "none"-algorithm JWT, reusing the real configured token's own payload
+     * claims when one is available instead of a generic placeholder identity. Confirmed live
+     * against crAPI: its identity service keys sessions by the real {@code sub} (the user's
+     * email), so the hardcoded placeholder ({@code "sub":"1234567890"}) never resolves to any
+     * account — the signature-bypass is structurally correct but the response still isn't a
+     * success, producing a false negative on any backend that identifies users this way. Falls
+     * back to the placeholder for unauthenticated scans, where there's no real token to reuse.
+     */
+    private String buildNoneAlgJwt(HttpClient httpClient) {
+        String realToken = httpClient.getConfiguredBearerToken();
+        if (realToken != null && !realToken.isBlank()) {
+            String[] parts = realToken.split("\\.");
+            if (parts.length >= 2) {
+                return NONE_ALG_HEADER + "." + parts[1] + ".";
+            }
+        }
+        return NONE_ALG_JWT;
+    }
+
     private List<Finding> testJwtNoneAlgorithm(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
@@ -442,7 +470,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
             // Step 2 — send the JWT-none token.  A 2xx response NOW means the unsigned
             // token bypassed authentication on an endpoint that normally requires it.
-            Map<String, String> noneAlgHeaders = Map.of("Authorization", "Bearer " + NONE_ALG_JWT);
+            Map<String, String> noneAlgHeaders = Map.of("Authorization", "Bearer " + buildNoneAlgJwt(httpClient));
             HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
                 case "POST"   -> httpClient.postWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
                 case "PUT"    -> httpClient.putWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
