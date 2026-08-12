@@ -32,6 +32,12 @@ import static org.mockito.Mockito.when;
 @DisplayName("Broken Authentication Test Case Tests")
 class BrokenAuthenticationTestCaseTest {
 
+    // Shared fixture for a real, already-valid configured bearer token with a distinctive
+    // payload — used by every test that exercises the real-claims JWT-none candidate.
+    private static final String REAL_TOKEN_HEADER = "eyJhbGciOiJSUzI1NiJ9"; // {"alg":"RS256"}
+    private static final String REAL_TOKEN_PAYLOAD = "eyJzdWIiOiJhc3RmdGVzdGVyQGV4YW1wbGUuY29tIn0"; // {"sub":"astftester@example.com"}
+    private static final String REAL_TOKEN = REAL_TOKEN_HEADER + "." + REAL_TOKEN_PAYLOAD + ".realSignatureBytes";
+
     @Mock
     private HttpClient httpClient;
 
@@ -269,11 +275,7 @@ class BrokenAuthenticationTestCaseTest {
     void testJwtNoneAlgorithmReusesRealTokenClaims() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/vehicles", "GET", "application/json", null, true);
 
-        // A real, already-valid token with a distinctive payload the forged token should reuse.
-        String realHeader = "eyJhbGciOiJSUzI1NiJ9"; // {"alg":"RS256"}
-        String realPayload = "eyJzdWIiOiJhc3RmdGVzdGVyQGV4YW1wbGUuY29tIn0"; // {"sub":"astftester@example.com"}
-        String realToken = realHeader + "." + realPayload + ".realSignatureBytes";
-        when(httpClient.getConfiguredBearerToken()).thenReturn(realToken);
+        when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
 
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
@@ -282,7 +284,7 @@ class BrokenAuthenticationTestCaseTest {
                     // Only accept a none-alg token that carries the REAL payload segment —
                     // proves the forged token was built from the real claims, not the
                     // hardcoded generic placeholder ("sub":"1234567890").
-                    if (auth.equals("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." + realPayload + ".")) {
+                    if (auth.equals("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." + REAL_TOKEN_PAYLOAD + ".")) {
                         return new HttpResponse(200, "[]", Map.of());
                     }
                     if (auth.isEmpty()) {
@@ -295,6 +297,67 @@ class BrokenAuthenticationTestCaseTest {
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("JWT") && f.getTitle().contains("none")),
                 "Should detect the none-algorithm bypass using the real token's own claims");
+    }
+
+    @Test
+    @DisplayName("JWT-none forgery tries the placeholder identity ALONGSIDE the real-claims candidate " +
+            "when a token is configured, not instead of it (regression: a target with a demo/seed account " +
+            "matching the placeholder subject would otherwise never be tested for that bypass)")
+    void testJwtNoneAlgorithmTriesPlaceholderEvenWhenRealTokenConfigured() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/vehicles", "GET", "application/json", null, true);
+
+        when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
+
+        // Backend only bypasses on the PLACEHOLDER candidate (e.g. a demo/seed account with
+        // sub=1234567890) and rejects the real-claims candidate — the inverse of the crAPI case.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    String auth = hdrs.getOrDefault("Authorization", "");
+                    if (auth.equals("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0" +
+                            ".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkFkbWluIiwiaWF0IjoxNTE2MjM5MDIyfQ.")) {
+                        return new HttpResponse(200, "[]", Map.of());
+                    }
+                    if (auth.isEmpty()) {
+                        return new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of());
+                    }
+                    return new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("JWT") && f.getTitle().contains("none")
+                        && f.getEvidence() != null && f.getEvidence().contains("placeholder identity")),
+                "Should still detect the none-algorithm bypass via the placeholder candidate " +
+                "even though a real token was configured");
+    }
+
+    @Test
+    @DisplayName("JWT-none forgery reports a finding per candidate when both the real-claims and " +
+            "placeholder tokens independently bypass authentication")
+    void testJwtNoneAlgorithmAccumulatesFindingsAcrossCandidates() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/vehicles", "GET", "application/json", null, true);
+
+        when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
+
+        // Backend accepts ANY none-alg token regardless of claims — both candidates bypass.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    String auth = hdrs.getOrDefault("Authorization", "");
+                    if (auth.startsWith("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0")) {
+                        return new HttpResponse(200, "[]", Map.of());
+                    }
+                    return new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        long jwtNoneFindings = findings.stream()
+                .filter(f -> f.getTitle().contains("JWT") && f.getTitle().contains("none"))
+                .count();
+        assertEquals(2, jwtNoneFindings,
+                "Should report one finding per bypassing candidate (real-claims AND placeholder), not just the first");
     }
 
     @Test
