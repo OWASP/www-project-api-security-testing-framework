@@ -10,3 +10,4 @@ crapi-results.*
 crapi-scan.yaml
 astf-scan.log
 .idea/
+.firecrawl/
