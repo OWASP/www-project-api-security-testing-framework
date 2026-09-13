@@ -170,7 +170,7 @@ Distinct from every table above: these are vulnerabilities *in ASTF's own depend
 | 5 | [GHSA-5jmj-h7xm-6q6v](https://github.com/advisories/GHSA-5jmj-h7xm-6q6v) — case-insensitive deserialization bypasses per-property `@JsonIgnoreProperties` | Moderate | `jackson-databind` | ✅ Fixed | Same version bump; this one had the highest floor of the five (`2.18.9`/`2.21.5`) — `2.22.2` clears it. |
 | 6 | [GHSA-qv9r-c865-cp47](https://github.com/advisories/GHSA-qv9r-c865-cp47) — improper encoding of non-finite floating-point values during `MapMessage` JSON serialization | Moderate | `log4j-api` | ✅ Fixed | `log4j.version` bumped `2.25.4` → `2.25.5` (applies to `log4j-api`/`log4j-core`/`log4j-slf4j2-impl` together, all pinned to one property). At the time this was fixed, `2.25.5` had just been published to Maven Central — worth double-checking artifact availability before pinning a Dependabot-suggested version, since alert data can be ahead of what's actually resolvable. |
 
-**Verification for all six:** `mvn clean test` — 368/368 green, no behavioral changes. Smoke-tested the shaded jar post-bump: CLI `--help`, a live scan against a running crAPI instance, and both JSON and SARIF report generation (the two Jackson-heavy output paths) — all produced valid, well-formed output. No PR filed yet for this change as of this note; see repo for current state.
+**Verification for all six:** `mvn clean test` — 358/358 green, no behavioral changes. Smoke-tested the shaded jar post-bump: CLI `--help`, a live scan against a running crAPI instance, and both JSON and SARIF report generation (the two Jackson-heavy output paths) — all produced valid, well-formed output. No PR filed yet for this change as of this note; see repo for current state.
 
 ---
 
