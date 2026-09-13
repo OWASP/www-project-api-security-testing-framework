@@ -348,6 +348,56 @@ class HttpClientTest {
     }
 
     @Test
+    @DisplayName("getWithStatusNoAuth must not let a configured Basic Auth authenticator silently reattach credentials on 401")
+    void testGetWithStatusNoAuthNotReauthenticatedByBasicAuthAuthenticator() throws Exception {
+        // Regression for a bug found reviewing this same fix: suppressing the default
+        // Authorization header when BUILDING the request isn't enough on its own — OkHttp's
+        // Authenticator (registered whenever --username/--password is configured) fires
+        // automatically on ANY 401 response, regardless of which headers the original request
+        // carried, and transparently retries with "Authorization: Basic ..." attached. A client
+        // that only strips the header at request-build time but still uses the same
+        // authenticator-bearing OkHttpClient to execute it would see this second, authenticated
+        // request's response instead of the genuine unauthenticated 401 — silently reintroducing
+        // the exact false-positive/false-negative bug this class's *NoAuth methods exist to fix.
+        config.setBasicAuthUsername("admin");
+        config.setBasicAuthPassword("hunter2");
+        client = new HttpClient(config);
+
+        // First response: 401 with a challenge, which is what triggers OkHttp's Authenticator.
+        server.enqueue(new MockResponse().setResponseCode(401)
+                .addHeader("WWW-Authenticate", "Basic realm=\"test\""));
+        // If the authenticator fires and retries, this second, authenticated-looking response
+        // would be served instead — the assertion below must NOT see this 200.
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("[]"));
+
+        HttpResponse response = client.getWithStatusNoAuth(server.url("/api/secure").toString());
+
+        assertEquals(401, response.getStatusCode(),
+                "getWithStatusNoAuth must return the genuine 401 baseline, not a response from " +
+                "an automatic Basic-Auth retry");
+        assertEquals(1, server.getRequestCount(),
+                "Only one request should have been sent — the authenticator must not have retried");
+    }
+
+    @Test
+    @DisplayName("Non-NoAuth requests still get Basic Auth's automatic 401-retry behavior (existing behavior unchanged)")
+    void testGetWithStatusStillReauthenticatedByBasicAuthAuthenticatorWhenNotUsingNoAuthVariant() throws Exception {
+        config.setBasicAuthUsername("admin");
+        config.setBasicAuthPassword("hunter2");
+        client = new HttpClient(config);
+
+        server.enqueue(new MockResponse().setResponseCode(401)
+                .addHeader("WWW-Authenticate", "Basic realm=\"test\""));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("[]"));
+
+        HttpResponse response = client.getWithStatus(server.url("/api/secure").toString(), Map.of());
+
+        assertEquals(200, response.getStatusCode(),
+                "Regular (non-NoAuth) requests should still benefit from automatic Basic Auth retry");
+        assertEquals(2, server.getRequestCount(), "The authenticator should have retried once");
+    }
+
+    @Test
     @DisplayName("getWithStatusNoAuth should still send non-credential default headers")
     void testGetWithStatusNoAuthKeepsNonCredentialDefaultHeaders() throws Exception {
         config.setBearerToken("secret-token");
