@@ -73,6 +73,7 @@ class BrokenAuthenticationExtendedTest {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
         // Realistic mock: 401 without auth (baseline), 200 with any Authorization header
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(unauthorized());
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
                     Map<String, String> hdrs = inv.getArgument(1);
@@ -98,6 +99,7 @@ class BrokenAuthenticationExtendedTest {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
         // Server rejects everything — both baseline probe and expired-JWT probe return 401
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(unauthorized());
         when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(unauthorized());
 
         List<Finding> findings = testCase.testJwtAnalysis(endpoint, httpClient);
@@ -115,6 +117,7 @@ class BrokenAuthenticationExtendedTest {
         EndpointInfo endpoint = new EndpointInfo("/api/info", "GET", "application/json", null, true);
 
         // Public endpoint — always returns 200 regardless of auth header
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(ok());
         when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok());
 
         List<Finding> findings = testCase.testJwtAnalysis(endpoint, httpClient);

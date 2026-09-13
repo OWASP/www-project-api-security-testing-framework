@@ -60,14 +60,17 @@ public class HttpClient {
     private static final Logger logger = LogManager.getLogger(HttpClient.class);
 
     private final OkHttpClient client;
-    // Same client, minus any configured Basic Auth authenticator — used only by the *NoAuth
-    // request variants. Without this, a scan configured with --username/--password would still
-    // leak credentials into a supposedly-unauthenticated request: OkHttp's Authenticator fires
-    // automatically on any 401 response regardless of which headers the original request carried
-    // (RetryAndFollowUpInterceptor invokes it transparently), transparently retrying with
-    // "Authorization: Basic ..." attached — the same header-pollution bug this class's
-    // suppressCredentialHeaders path exists to prevent, just via a different credential mechanism
-    // that a header-stripping fix alone can't reach.
+    // Same client, minus any configured Basic Auth authenticator and minus cookies — used only
+    // by the *NoAuth request variants. Without the authenticator override, a scan configured with
+    // --username/--password would still leak credentials into a supposedly-unauthenticated
+    // request: OkHttp's Authenticator fires automatically on any 401 response regardless of which
+    // headers the original request carried (RetryAndFollowUpInterceptor invokes it transparently),
+    // retrying with "Authorization: Basic ..." attached. Without the CookieJar override, any
+    // session cookie captured earlier in the scan (e.g. from a login test case, via the shared
+    // cookieStore backing InMemoryCookieJar) would still ride along on a "no-auth" request even
+    // with Authorization/API-key headers correctly stripped — the same class of implicit-
+    // credential leak, just through a different channel. A genuine no-auth baseline must carry
+    // zero ambient credentials of any kind.
     private final OkHttpClient noAuthClient;
     private final ScanConfig config;
     private final Map<String, String> defaultHeaders;
@@ -108,7 +111,10 @@ public class HttpClient {
         }
 
         this.client = builder.build();
-        this.noAuthClient = this.client.newBuilder().authenticator(Authenticator.NONE).build();
+        this.noAuthClient = this.client.newBuilder()
+                .authenticator(Authenticator.NONE)
+                .cookieJar(CookieJar.NO_COOKIES)
+                .build();
     }
 
     /**

@@ -398,6 +398,25 @@ class HttpClientTest {
     }
 
     @Test
+    @DisplayName("getWithStatusNoAuth must not send a session cookie captured earlier in the scan")
+    void testGetWithStatusNoAuthDoesNotSendEarlierSessionCookie() throws Exception {
+        // Regression: noAuthClient must not share the authenticated client's CookieJar. A cookie
+        // captured from an earlier authenticated request (e.g. a login test case) is an implicit
+        // credential just like a bearer token — a genuine no-auth baseline must not carry it.
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .addHeader("Set-Cookie", "session=abc123; Path=/"));
+        client.getWithStatus(server.url("/login").toString(), Map.of());
+        server.takeRequest(); // drain the login request
+
+        server.enqueue(new MockResponse().setResponseCode(401));
+        client.getWithStatusNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Cookie"),
+                "getWithStatusNoAuth must not send a session cookie captured by an earlier request");
+    }
+
+    @Test
     @DisplayName("getWithStatusNoAuth should still send non-credential default headers")
     void testGetWithStatusNoAuthKeepsNonCredentialDefaultHeaders() throws Exception {
         config.setBearerToken("secret-token");

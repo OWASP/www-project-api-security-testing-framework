@@ -581,12 +581,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
             // Step 1 — baseline probe with no auth.  If the endpoint is public (returns 2xx
             // without credentials) an expired-JWT "bypass" is meaningless — skip it.
-            HttpResponse baseline = switch (endpoint.getMethod().toUpperCase()) {
-                case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
-                default       -> httpClient.getWithStatus(fullUrl, Map.of());
-            };
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
 
             if (baseline == null || baseline.isSuccess()) {
                 logger.debug("Skipping expired-JWT test for {} {} — endpoint is publicly accessible (baseline HTTP {})",
