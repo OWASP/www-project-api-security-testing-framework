@@ -242,6 +242,128 @@ class HttpClientTest {
     }
 
     // -------------------------------------------------------------------------
+    // *NoAuth variants — must actually suppress the configured bearer token / API key,
+    // not just skip adding extra headers. Regression coverage for the bug where a plain
+    // Map.of() additional-headers map still carried the configured default Authorization
+    // header, breaking every "endpoint actually requires auth" baseline probe.
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("getWithStatusNoAuth should omit the configured bearer token")
+    void testGetWithStatusNoAuthOmitsBearerToken() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.getWithStatusNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"),
+                "getWithStatusNoAuth must not send the configured Authorization header");
+    }
+
+    @Test
+    @DisplayName("getWithStatus (non-NoAuth) still sends the configured bearer token with an empty headers map")
+    void testGetWithStatusStillSendsBearerTokenByDefault() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        client.getWithStatus(server.url("/api/secure").toString(), Map.of());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertEquals("Bearer secret-token", recorded.getHeader("Authorization"),
+                "existing behavior for non-NoAuth calls must be unchanged");
+    }
+
+    @Test
+    @DisplayName("postWithStatusNoAuth should omit the configured bearer token")
+    void testPostWithStatusNoAuthOmitsBearerToken() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.postWithStatusNoAuth(server.url("/api/secure").toString(), "application/json", "{}");
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"));
+        assertEquals("POST", recorded.getMethod());
+    }
+
+    @Test
+    @DisplayName("putWithStatusNoAuth should omit the configured bearer token")
+    void testPutWithStatusNoAuthOmitsBearerToken() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.putWithStatusNoAuth(server.url("/api/secure").toString(), "application/json", "{}");
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"));
+        assertEquals("PUT", recorded.getMethod());
+    }
+
+    @Test
+    @DisplayName("deleteWithStatusNoAuth should omit the configured bearer token")
+    void testDeleteWithStatusNoAuthOmitsBearerToken() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.deleteWithStatusNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"));
+        assertEquals("DELETE", recorded.getMethod());
+    }
+
+    @Test
+    @DisplayName("getNoAuth should omit the configured bearer token")
+    void testGetNoAuthOmitsBearerToken() throws Exception {
+        config.setBearerToken("secret-token");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401).setBody("nope"));
+
+        client.getNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"));
+    }
+
+    @Test
+    @DisplayName("getWithStatusNoAuth should also omit a configured API key header")
+    void testGetWithStatusNoAuthOmitsApiKeyHeader() throws Exception {
+        config.setApiKey("secret-api-key");
+        config.setApiKeyHeader("X-API-Key");
+        config.addHeader("X-API-Key", "secret-api-key");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.getWithStatusNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("X-API-Key"),
+                "getWithStatusNoAuth must not send the configured API key header either");
+    }
+
+    @Test
+    @DisplayName("getWithStatusNoAuth should still send non-credential default headers")
+    void testGetWithStatusNoAuthKeepsNonCredentialDefaultHeaders() throws Exception {
+        config.setBearerToken("secret-token");
+        config.addHeader("X-Custom-Static-Header", "keep-me");
+        client = new HttpClient(config);
+        server.enqueue(new MockResponse().setResponseCode(401));
+
+        client.getWithStatusNoAuth(server.url("/api/secure").toString());
+
+        RecordedRequest recorded = server.takeRequest();
+        assertNull(recorded.getHeader("Authorization"));
+        assertEquals("keep-me", recorded.getHeader("X-Custom-Static-Header"),
+                "non-credential default headers should still be sent on a NoAuth request");
+    }
+
+    // -------------------------------------------------------------------------
     // Miscellaneous
     // -------------------------------------------------------------------------
 

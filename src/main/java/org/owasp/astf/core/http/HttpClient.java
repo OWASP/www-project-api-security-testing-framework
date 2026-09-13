@@ -517,6 +517,21 @@ public class HttpClient {
      */
     private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
                                   MediaType mediaType, RequestBody body) {
+        return createRequest(url, method, additionalHeaders, mediaType, body, false);
+    }
+
+    /**
+     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header
+     *     and the configured API-key header (see {@link #credentialHeaderNames()}) that would
+     *     otherwise always be attached from {@link #defaultHeaders}. Needed by any caller that
+     *     deliberately wants to send a request with zero credentials — e.g. an "endpoint actually
+     *     requires auth" baseline probe. Passing an empty {@code additionalHeaders} map is NOT
+     *     enough to achieve that on its own: {@link #defaultHeaders} is always applied first
+     *     regardless of what {@code additionalHeaders} contains, so the configured token or API
+     *     key would otherwise ride along on every "no-auth" request for the life of the scan.
+     */
+    private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
+                                  MediaType mediaType, RequestBody body, boolean suppressCredentialHeaders) {
         Request.Builder requestBuilder = new Request.Builder()
                 .url(url);
 
@@ -537,8 +552,13 @@ public class HttpClient {
             }
         }
 
-        // Add default headers from config
+        // Add default headers from config, skipping credential headers when the caller
+        // explicitly asked for an unauthenticated request.
+        Map<String, String> credentialHeaderNames = suppressCredentialHeaders ? credentialHeaderNames() : Map.of();
         for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
+            if (credentialHeaderNames.containsKey(entry.getKey().toLowerCase())) {
+                continue;
+            }
             requestBuilder.header(entry.getKey(), entry.getValue());
         }
 
@@ -550,6 +570,55 @@ public class HttpClient {
         }
 
         return requestBuilder.build();
+    }
+
+    /**
+     * @return the header names (lowercased, for case-insensitive matching) that carry credentials
+     *     and should be omitted from a deliberately unauthenticated request: {@code Authorization}
+     *     always, plus the configured API-key header (default {@code X-API-Key}) when an API key
+     *     is set.
+     */
+    private Map<String, String> credentialHeaderNames() {
+        Map<String, String> names = new HashMap<>();
+        names.put("authorization", "authorization");
+        if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
+            String apiKeyHeader = config.getApiKeyHeader() != null ? config.getApiKeyHeader() : "X-API-Key";
+            names.put(apiKeyHeader.toLowerCase(), apiKeyHeader.toLowerCase());
+        }
+        return names;
+    }
+
+    /**
+     * Makes a GET request with no credentials attached — not even the configured bearer token or
+     * API key — for use as an "endpoint actually requires auth" baseline probe. See
+     * {@link #createRequest(String, String, Map, MediaType, RequestBody, boolean)}.
+     */
+    public HttpResponse getWithStatusNoAuth(String url) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "GET", Map.of(), null, null, true));
+    }
+
+    /** POST variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse postWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "POST", Map.of(), mediaType, requestBody, true));
+    }
+
+    /** PUT variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse putWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "PUT", Map.of(), mediaType, requestBody, true));
+    }
+
+    /** DELETE variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse deleteWithStatusNoAuth(String url) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "DELETE", Map.of(), null, null, true));
+    }
+
+    /** String-body GET variant of {@link #getWithStatusNoAuth(String)}, for callers that only need the response body. */
+    public String getNoAuth(String url) throws IOException {
+        return executeRequest(createRequest(url, "GET", Map.of(), null, null, true));
     }
 
     /**

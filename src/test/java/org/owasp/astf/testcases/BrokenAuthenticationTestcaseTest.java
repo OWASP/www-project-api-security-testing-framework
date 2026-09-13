@@ -1,5 +1,10 @@
 package org.owasp.astf.testcases;
 
+import okhttp3.mockwebserver.Dispatcher;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -9,6 +14,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
+import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
@@ -105,7 +111,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
         // Server returns 200 without auth — indicates missing authentication controls
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(200, "{\"users\":[{\"id\":1,\"name\":\"Admin\"}]}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -121,7 +127,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
         // Server correctly returns 401 when no auth header is present
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\",\"message\":\"Authentication required\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -134,7 +140,7 @@ class BrokenAuthenticationTestCaseTest {
     void testMissingAuthenticationException() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET", "application/json", null, true);
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenThrow(new IOException("Connection refused"));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -151,10 +157,10 @@ class BrokenAuthenticationTestCaseTest {
         HttpResponse successResponse = new HttpResponse(200, "{\"data\":\"success\"}", Map.of());
 
         switch (method) {
-            case "GET"    -> when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(successResponse);
-            case "POST"   -> when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenReturn(successResponse);
-            case "PUT"    -> when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString())).thenReturn(successResponse);
-            case "DELETE" -> when(httpClient.deleteWithStatus(anyString(), anyMap())).thenReturn(successResponse);
+            case "GET"    -> when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(successResponse);
+            case "POST"   -> when(httpClient.postWithStatusNoAuth(anyString(), anyString(), anyString())).thenReturn(successResponse);
+            case "PUT"    -> when(httpClient.putWithStatusNoAuth(anyString(), anyString(), anyString())).thenReturn(successResponse);
+            case "DELETE" -> when(httpClient.deleteWithStatusNoAuth(anyString())).thenReturn(successResponse);
         }
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -189,7 +195,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
         // Server correctly rejects all requests including none-alg JWT attempts
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -202,12 +208,15 @@ class BrokenAuthenticationTestCaseTest {
     void testJwtNoneAlgorithmDetection() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
 
+        // Baseline (no auth at all) is correctly rejected
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         // Server accepts requests with JWT none-algorithm (vulnerability!)
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
                     Map<String, String> hdrs = inv.getArgument(1);
                     String auth = hdrs.getOrDefault("Authorization", "");
-                    // Accept the none-alg token but reject un-authenticated requests
+                    // Accept the none-alg token but reject anything else
                     if (auth.startsWith("Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0")) {
                         return new HttpResponse(200, "{\"data\":\"secret\"}", Map.of());
                     }
@@ -229,6 +238,8 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/info", "GET", "application/json", null, true);
 
         // Public endpoint — always returns 200 regardless of auth header (or lack thereof)
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(200, "{\"version\":\"8.5\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(200, "{\"version\":\"8.5\"}", Map.of()));
 
@@ -249,6 +260,8 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/secret", "GET", "application/json", null, true);
 
         // Auth-required endpoint: rejects no-auth (401), accepts JWT-none (200)
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
                     Map<String, String> hdrs = inv.getArgument(1);
@@ -277,6 +290,8 @@ class BrokenAuthenticationTestCaseTest {
 
         when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
 
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
                     Map<String, String> hdrs = inv.getArgument(1);
@@ -308,6 +323,8 @@ class BrokenAuthenticationTestCaseTest {
 
         when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
 
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of()));
         // Backend only bypasses on the PLACEHOLDER candidate (e.g. a demo/seed account with
         // sub=1234567890) and rejects the real-claims candidate — the inverse of the crAPI case.
         when(httpClient.getWithStatus(anyString(), anyMap()))
@@ -340,6 +357,8 @@ class BrokenAuthenticationTestCaseTest {
 
         when(httpClient.getConfiguredBearerToken()).thenReturn(REAL_TOKEN);
 
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{\"message\":\"Invalid Token\"}", Map.of()));
         // Backend accepts ANY none-alg token regardless of claims — both candidates bypass.
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenAnswer(inv -> {
@@ -411,8 +430,12 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo postEndpoint = new EndpointInfo("/api/resources", "POST", "application/json", "{}", true);
 
         // GET returns 200 (vulnerability), POST always returns 401 (correctly protected)
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"success\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(200, "{\"data\":\"success\"}", Map.of()));
+        when(httpClient.postWithStatusNoAuth(anyString(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
 
@@ -501,7 +524,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/profile", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), argThat(h -> h != null && h.containsKey("Authorization"))))
                 .thenReturn(new HttpResponse(200, "{\"data\":\"secret\"}", Map.of()));
@@ -518,7 +541,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/profile", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
 
         List<Finding> findings = testCase.testJwtKidPathTraversal(endpoint, httpClient);
@@ -531,7 +554,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/profile", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(200, "{\"data\":\"public\"}", Map.of()));
 
         List<Finding> findings = testCase.testJwtKidPathTraversal(endpoint, httpClient);
@@ -556,7 +579,7 @@ class BrokenAuthenticationTestCaseTest {
 
         when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("jwks")), anyMap()))
                 .thenReturn(new HttpResponse(200, jwks, Map.of()));
-        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("jwks")), eq(Map.of())))
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && !url.contains("jwks"))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("jwks")),
                 argThat(h -> h != null && h.containsKey("Authorization"))))
@@ -589,7 +612,7 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/profile", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
         when(httpClient.getWithStatus(anyString(), argThat(h -> h != null && h.containsKey("Authorization"))))
                 .thenThrow(new IOException("Read timed out"));
@@ -606,10 +629,107 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/profile", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"unauthorized\"}", Map.of()));
 
         List<Finding> findings = testCase.testJwtJkuProcessing(endpoint, httpClient);
         assertTrue(findings.isEmpty());
+    }
+
+    // ── end-to-end regression: default-header pollution (live-verified against crAPI) ──────────
+    //
+    // Every test above uses a Mockito-mocked HttpClient, which can't reproduce the actual bug:
+    // the REAL HttpClient always attached the configured bearer token as a default header, even
+    // to requests a test case built specifically to have zero credentials (an empty additional-
+    // headers map). That caused testMissingAuthentication to false-positive on any endpoint that
+    // was actually properly protected (the "unauthenticated" probe was secretly authenticated),
+    // and caused testJwtNoneAlgorithm's own baseline probe to have the identical problem, making
+    // it wrongly conclude the endpoint was public and skip the forged-token attempt entirely —
+    // which silently prevented the real-claims JWT-none finding (the whole point of the fix for
+    // row 15 in docs/TRACEABILITY.md) from ever firing through the CLI. These two tests use a
+    // real HttpClient against a real MockWebServer to prove the fix holds end-to-end, not just
+    // that the mocks in the tests above are internally consistent.
+
+    private MockWebServer server;
+
+    @AfterEach
+    void tearDownServer() throws IOException {
+        if (server != null) {
+            server.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("[e2e] With a real HttpClient and a configured token, a properly-protected endpoint " +
+            "must NOT be flagged as missing authentication")
+    void testMissingAuthenticationNoFalsePositiveWithRealHttpClient() throws Exception {
+        server = new MockWebServer();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String auth = request.getHeader("Authorization");
+                if (auth != null && auth.equals("Bearer real-token")) {
+                    return new MockResponse().setResponseCode(200).setBody("[]");
+                }
+                return new MockResponse().setResponseCode(401).setBody("{\"message\":\"Invalid Token\"}");
+            }
+        });
+        server.start();
+
+        ScanConfig config = new ScanConfig();
+        config.setTargetUrl(server.url("/").toString());
+        config.setBearerToken("real-token");
+        HttpClient realHttpClient = new HttpClient(config);
+
+        EndpointInfo endpoint = new EndpointInfo(
+                "/identity/api/v2/vehicle/vehicles", "GET", "application/json", null, true);
+        endpoint.setBaseUrl(server.url("/").toString());
+
+        List<Finding> findings = testCase.execute(endpoint, realHttpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> "Missing Authentication Controls".equals(f.getTitle())),
+                "A properly-protected endpoint (401 with no credentials) must not false-positive " +
+                "as missing authentication just because a bearer token happens to be configured for the scan");
+    }
+
+    @Test
+    @DisplayName("[e2e] With a real HttpClient and a configured token, the JWT-none real-claims " +
+            "bypass must actually fire (regression for docs/TRACEABILITY.md row 15)")
+    void testJwtNoneRealClaimsFiresEndToEndWithRealHttpClient() throws Exception {
+        String realToken = REAL_TOKEN_HEADER + "." + REAL_TOKEN_PAYLOAD + ".realSignatureBytes";
+        String expectedForgedToken = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0." + REAL_TOKEN_PAYLOAD + ".";
+
+        server = new MockWebServer();
+        server.setDispatcher(new Dispatcher() {
+            @Override
+            public MockResponse dispatch(RecordedRequest request) {
+                String auth = request.getHeader("Authorization");
+                if (auth != null && auth.equals("Bearer " + expectedForgedToken)) {
+                    // Forged none-alg token carrying the real sub — server (incorrectly) accepts it
+                    return new MockResponse().setResponseCode(200).setBody("[]");
+                }
+                // No credentials, or the real (still-valid) token — both correctly rejected/irrelevant
+                // for this probe; what matters is the baseline (no auth) genuinely sees a 401.
+                return new MockResponse().setResponseCode(401).setBody("{\"message\":\"Invalid Token\"}");
+            }
+        });
+        server.start();
+
+        ScanConfig config = new ScanConfig();
+        config.setTargetUrl(server.url("/").toString());
+        config.setBearerToken(realToken);
+        HttpClient realHttpClient = new HttpClient(config);
+
+        EndpointInfo endpoint = new EndpointInfo(
+                "/identity/api/v2/vehicle/vehicles", "GET", "application/json", null, true);
+        endpoint.setBaseUrl(server.url("/").toString());
+
+        List<Finding> findings = testCase.execute(endpoint, realHttpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().equals("JWT 'none' Algorithm Accepted (real-claims token)")),
+                "The real-claims JWT-none bypass must fire end-to-end: the baseline probe must see " +
+                "the genuine 401 (not a secretly-authenticated 200) so the forged-token attempt is " +
+                "actually made, and the forged token itself must be accepted by the mock server");
     }
 }
