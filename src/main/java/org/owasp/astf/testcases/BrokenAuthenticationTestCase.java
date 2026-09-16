@@ -379,16 +379,18 @@ public class BrokenAuthenticationTestCase implements TestCase {
             String fullUrl = endpoint.getFullUrl();
             HttpResponse response = null;
 
-            // Send request without any authentication headers
-            Map<String, String> noAuthHeaders = Map.of();
+            // Send request without any authentication headers — using the *NoAuth variants is
+            // required here, not just an empty headers map: HttpClient always attaches the
+            // configured bearer token/API key as a default header regardless of what's passed as
+            // additional headers, so a plain Map.of() would silently still be authenticated.
             switch (endpoint.getMethod().toUpperCase()) {
-                case "GET"    -> response = httpClient.getWithStatus(fullUrl, noAuthHeaders);
-                case "POST"   -> response = httpClient.postWithStatus(fullUrl, noAuthHeaders, "application/json", "{}");
-                case "PUT"    -> response = httpClient.putWithStatus(fullUrl, noAuthHeaders, "application/json", "{}");
-                case "DELETE" -> response = httpClient.deleteWithStatus(fullUrl, noAuthHeaders);
+                case "GET"    -> response = httpClient.getWithStatusNoAuth(fullUrl);
+                case "POST"   -> response = httpClient.postWithStatusNoAuth(fullUrl, "application/json", "{}");
+                case "PUT"    -> response = httpClient.putWithStatusNoAuth(fullUrl, "application/json", "{}");
+                case "DELETE" -> response = httpClient.deleteWithStatusNoAuth(fullUrl);
                 default -> {
                     // Fall back to string-based check for unsupported methods
-                    String body = httpClient.get(fullUrl, noAuthHeaders);
+                    String body = httpClient.getNoAuth(fullUrl);
                     if (body != null && !body.isEmpty()
                             && !body.contains("unauthorized")
                             && !body.contains("authentication")) {
@@ -458,12 +460,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
             // If the server returns 2xx without any credentials the endpoint is public;
             // a subsequent 2xx with a JWT-none token tells us nothing (it would have
             // returned 2xx anyway).  Only proceed when the baseline is 4xx/5xx.
-            HttpResponse baseline = switch (endpoint.getMethod().toUpperCase()) {
-                case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
-                default       -> httpClient.getWithStatus(fullUrl, Map.of());
-            };
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
 
             if (baseline == null || baseline.isSuccess()) {
                 // Endpoint is publicly accessible — JWT-none test would be a false positive.
@@ -584,12 +581,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
             // Step 1 — baseline probe with no auth.  If the endpoint is public (returns 2xx
             // without credentials) an expired-JWT "bypass" is meaningless — skip it.
-            HttpResponse baseline = switch (endpoint.getMethod().toUpperCase()) {
-                case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
-                default       -> httpClient.getWithStatus(fullUrl, Map.of());
-            };
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
 
             if (baseline == null || baseline.isSuccess()) {
                 logger.debug("Skipping expired-JWT test for {} {} — endpoint is publicly accessible (baseline HTTP {})",
@@ -828,13 +820,19 @@ public class BrokenAuthenticationTestCase implements TestCase {
         return findings;
     }
 
-    /** Sends a request with no auth header, used as the "endpoint actually requires auth" baseline. */
+    /**
+     * Sends a request with no auth header, used as the "endpoint actually requires auth" baseline.
+     * Must use the {@code *NoAuth} variants, not a plain {@code Map.of()} additional-headers map —
+     * {@link HttpClient} always attaches the configured bearer token/API key as a default header
+     * regardless of what's passed as additional headers, so an empty map alone doesn't produce an
+     * unauthenticated request.
+     */
     private HttpResponse probeWithoutAuth(EndpointInfo endpoint, HttpClient httpClient, String fullUrl) throws IOException {
         return switch (endpoint.getMethod().toUpperCase()) {
-            case "POST"   -> httpClient.postWithStatus(fullUrl, Map.of(), "application/json", "{}");
-            case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
-            case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
-            default       -> httpClient.getWithStatus(fullUrl, Map.of());
+            case "POST"   -> httpClient.postWithStatusNoAuth(fullUrl, "application/json", "{}");
+            case "PUT"    -> httpClient.putWithStatusNoAuth(fullUrl, "application/json", "{}");
+            case "DELETE" -> httpClient.deleteWithStatusNoAuth(fullUrl);
+            default       -> httpClient.getWithStatusNoAuth(fullUrl);
         };
     }
 

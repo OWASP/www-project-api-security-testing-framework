@@ -10,8 +10,10 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -58,6 +60,18 @@ public class HttpClient {
     private static final Logger logger = LogManager.getLogger(HttpClient.class);
 
     private final OkHttpClient client;
+    // Same client, minus any configured Basic Auth authenticator and minus cookies — used only
+    // by the *NoAuth request variants. Without the authenticator override, a scan configured with
+    // --username/--password would still leak credentials into a supposedly-unauthenticated
+    // request: OkHttp's Authenticator fires automatically on any 401 response regardless of which
+    // headers the original request carried (RetryAndFollowUpInterceptor invokes it transparently),
+    // retrying with "Authorization: Basic ..." attached. Without the CookieJar override, any
+    // session cookie captured earlier in the scan (e.g. from a login test case, via the shared
+    // cookieStore backing InMemoryCookieJar) would still ride along on a "no-auth" request even
+    // with Authorization/API-key headers correctly stripped — the same class of implicit-
+    // credential leak, just through a different channel. A genuine no-auth baseline must carry
+    // zero ambient credentials of any kind.
+    private final OkHttpClient noAuthClient;
     private final ScanConfig config;
     private final Map<String, String> defaultHeaders;
     private final Map<String, List<Cookie>> cookieStore = new HashMap<>();
@@ -97,6 +111,10 @@ public class HttpClient {
         }
 
         this.client = builder.build();
+        this.noAuthClient = this.client.newBuilder()
+                .authenticator(Authenticator.NONE)
+                .cookieJar(CookieJar.NO_COOKIES)
+                .build();
     }
 
     /**
@@ -517,6 +535,21 @@ public class HttpClient {
      */
     private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
                                   MediaType mediaType, RequestBody body) {
+        return createRequest(url, method, additionalHeaders, mediaType, body, false);
+    }
+
+    /**
+     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header
+     *     and the configured API-key header (see {@link #credentialHeaderNames()}) that would
+     *     otherwise always be attached from {@link #defaultHeaders}. Needed by any caller that
+     *     deliberately wants to send a request with zero credentials — e.g. an "endpoint actually
+     *     requires auth" baseline probe. Passing an empty {@code additionalHeaders} map is NOT
+     *     enough to achieve that on its own: {@link #defaultHeaders} is always applied first
+     *     regardless of what {@code additionalHeaders} contains, so the configured token or API
+     *     key would otherwise ride along on every "no-auth" request for the life of the scan.
+     */
+    private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
+                                  MediaType mediaType, RequestBody body, boolean suppressCredentialHeaders) {
         Request.Builder requestBuilder = new Request.Builder()
                 .url(url);
 
@@ -537,8 +570,13 @@ public class HttpClient {
             }
         }
 
-        // Add default headers from config
+        // Add default headers from config, skipping credential headers when the caller
+        // explicitly asked for an unauthenticated request.
+        Set<String> credentialHeaderNames = suppressCredentialHeaders ? credentialHeaderNames() : Set.of();
         for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
+            if (credentialHeaderNames.stream().anyMatch(entry.getKey()::equalsIgnoreCase)) {
+                continue;
+            }
             requestBuilder.header(entry.getKey(), entry.getValue());
         }
 
@@ -553,6 +591,56 @@ public class HttpClient {
     }
 
     /**
+     * @return the header names that carry credentials and should be omitted from a deliberately
+     *     unauthenticated request: {@code Authorization} always, plus the configured API-key
+     *     header (default {@code X-API-Key}) when an API key is set. Matching against this set
+     *     must use {@link String#equalsIgnoreCase}, not {@code toLowerCase()} comparison — the
+     *     latter is locale-sensitive (e.g. "I".toLowerCase() under a Turkish default locale
+     *     produces "ı", not "i", which would silently fail to match "Authorization").
+     */
+    private Set<String> credentialHeaderNames() {
+        Set<String> names = new HashSet<>();
+        names.add("Authorization");
+        if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
+            names.add(config.getApiKeyHeader() != null ? config.getApiKeyHeader() : "X-API-Key");
+        }
+        return names;
+    }
+
+    /**
+     * Makes a GET request with no credentials attached — not even the configured bearer token or
+     * API key — for use as an "endpoint actually requires auth" baseline probe. See
+     * {@link #createRequest(String, String, Map, MediaType, RequestBody, boolean)}.
+     */
+    public HttpResponse getWithStatusNoAuth(String url) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "GET", Map.of(), null, null, true), noAuthClient);
+    }
+
+    /** POST variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse postWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "POST", Map.of(), mediaType, requestBody, true), noAuthClient);
+    }
+
+    /** PUT variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse putWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        MediaType mediaType = MediaType.parse(contentType);
+        RequestBody requestBody = RequestBody.create(body, mediaType);
+        return executeRequestWithStatus(createRequest(url, "PUT", Map.of(), mediaType, requestBody, true), noAuthClient);
+    }
+
+    /** DELETE variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse deleteWithStatusNoAuth(String url) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "DELETE", Map.of(), null, null, true), noAuthClient);
+    }
+
+    /** String-body GET variant of {@link #getWithStatusNoAuth(String)}, for callers that only need the response body. */
+    public String getNoAuth(String url) throws IOException {
+        return executeRequest(createRequest(url, "GET", Map.of(), null, null, true), noAuthClient);
+    }
+
+    /**
      * Executes a request and returns the response body as a string.
      *
      * @param request The HTTP request to execute
@@ -560,7 +648,11 @@ public class HttpClient {
      * @throws IOException If the request fails
      */
     private String executeRequest(Request request) throws IOException {
-        try (Response response = client.newCall(request).execute()) {
+        return executeRequest(request, client);
+    }
+
+    private String executeRequest(Request request, OkHttpClient callClient) throws IOException {
+        try (Response response = callClient.newCall(request).execute()) {
             if (response.body() != null) {
                 return response.body().string();
             }
@@ -576,7 +668,11 @@ public class HttpClient {
      * @throws IOException If the request fails
      */
     private HttpResponse executeRequestWithStatus(Request request) throws IOException {
-        try (Response response = client.newCall(request).execute()) {
+        return executeRequestWithStatus(request, client);
+    }
+
+    private HttpResponse executeRequestWithStatus(Request request, OkHttpClient callClient) throws IOException {
+        try (Response response = callClient.newCall(request).execute()) {
             String body = response.body() != null ? response.body().string() : "";
             Map<String, List<String>> headers = extractHeaders(response);
             return new HttpResponse(response.code(), body, headers);
