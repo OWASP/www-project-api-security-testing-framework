@@ -157,6 +157,21 @@ This round's robustness pass closed several gaps found by asking "how confident 
 
 The remaining largest gap: crAPI and DVGA's business-logic and multi-step challenges ([issue #103](https://github.com/OWASP/www-project-api-security-testing-framework/issues/103), deliberately deferred) — including crAPI's mechanic-report BOLA, whose vulnerable endpoint only exists as a URL returned in a live response field, requiring the same multi-step-flow capability.
 
+## 7 · ASTF's own dependency security (supply chain, not target-detection)
+
+Distinct from every table above: these are vulnerabilities *in ASTF's own dependencies* (GitHub Dependabot alerts against `pom.xml`), not gaps in what ASTF detects on a target. Tracked here anyway since a vulnerable scanner is itself a finding worth a paper trail.
+
+| # | Advisory | Severity | Package | Status | Notes |
+|---|---|---|---|---|---|
+| 1 | [GHSA-rmj7-2vxq-3g9f](https://github.com/advisories/GHSA-rmj7-2vxq-3g9f) — `BasicPolymorphicTypeValidator` array-subtype allowlist bypass (`allowIfSubTypeIsArray`) | High | `jackson-databind` | ✅ Fixed | `jackson.version` bumped `2.15.3` → `2.22.2`. Confirmed the codebase never calls `activateDefaultTyping`/uses `PolymorphicTypeValidator` at all (`ObjectMapper()` used plain, in `JsonReportGenerator`, `SarifReportGenerator`, `ConfigLoader`) — never actually exploitable here, patched anyway since Dependabot flags the library version regardless of usage. |
+| 2 | [GHSA-j3rv-43j4-c7qm](https://github.com/advisories/GHSA-j3rv-43j4-c7qm) — `PolymorphicTypeValidator` bypass via generic type parameters | High | `jackson-databind` | ✅ Fixed | Same version bump as #1; same "not actually exploitable here" note applies. |
+| 3 | [GHSA-hgj6-7826-r7m5](https://github.com/advisories/GHSA-hgj6-7826-r7m5) — `InetSocketAddress` deserialization triggers eager DNS resolution (SSRF) | Moderate | `jackson-databind` | ✅ Fixed | Same version bump; first patched at `2.18.8`/`2.21.4`, well below `2.22.2`. |
+| 4 | [GHSA-3pjw-73gf-8qr5](https://github.com/advisories/GHSA-3pjw-73gf-8qr5) — `@JsonIgnore` on a Record property bypassed via `PropertyNamingStrategy` | Moderate | `jackson-databind` | ✅ Fixed | Same version bump; first patched at `2.18.8`/`2.21.4`. |
+| 5 | [GHSA-5jmj-h7xm-6q6v](https://github.com/advisories/GHSA-5jmj-h7xm-6q6v) — case-insensitive deserialization bypasses per-property `@JsonIgnoreProperties` | Moderate | `jackson-databind` | ✅ Fixed | Same version bump; this one had the highest floor of the five (`2.18.9`/`2.21.5`) — `2.22.2` clears it. |
+| 6 | [GHSA-qv9r-c865-cp47](https://github.com/advisories/GHSA-qv9r-c865-cp47) — improper encoding of non-finite floating-point values during `MapMessage` JSON serialization | Moderate | `log4j-api` | ✅ Fixed | `log4j.version` bumped `2.25.4` → `2.25.5` (applies to `log4j-api`/`log4j-core`/`log4j-slf4j2-impl` together, all pinned to one property). At the time this was fixed, `2.25.5` had just been published to Maven Central — worth double-checking artifact availability before pinning a Dependabot-suggested version, since alert data can be ahead of what's actually resolvable. |
+
+**Verification for all six:** `mvn clean test` — 358/358 green, no behavioral changes. Smoke-tested the shaded jar post-bump: CLI `--help`, a live scan against a running crAPI instance, and both JSON and SARIF report generation (the two Jackson-heavy output paths) — all produced valid, well-formed output. No PR filed yet for this change as of this note; see repo for current state.
+
 ---
 
-Sources: VAmPI README + author blog post; [crAPI docs/challenges.md](https://github.com/OWASP/crAPI/blob/main/docs/challenges.md) + `challengeSolutions.md`; DVGA's 22 in-app solution templates; [rootxjs/grpc-goat](https://github.com/rootxjs/grpc-goat) per-lab READMEs. Local evidence: saved JSON scan reports from both test rounds, cross-checked against test-case source where a finding's absence needed root-causing.
+Sources: VAmPI README + author blog post; [crAPI docs/challenges.md](https://github.com/OWASP/crAPI/blob/main/docs/challenges.md) + `challengeSolutions.md`; DVGA's 22 in-app solution templates; [rootxjs/grpc-goat](https://github.com/rootxjs/grpc-goat) per-lab READMEs. Local evidence: saved JSON scan reports from both test rounds, cross-checked against test-case source where a finding's absence needed root-causing. Section 7 sourced from GitHub Dependabot alerts on this repository (`gh api repos/OWASP/www-project-api-security-testing-framework/dependabot/alerts`).
