@@ -273,7 +273,9 @@ public class ConfigLoader {
                     requiresAuth = node.get("requiresAuthentication").asBoolean(true);
                 }
 
-                inlineEndpoints.add(new EndpointInfo(path, method, "application/json", null, requiresAuth));
+                String requestBody = parseInlineRequestBody(node, path);
+
+                inlineEndpoints.add(new EndpointInfo(path, method, "application/json", requestBody, requiresAuth));
             });
             if (!inlineEndpoints.isEmpty()) {
                 if (!config.getEndpoints().isEmpty()) {
@@ -299,6 +301,39 @@ public class ConfigLoader {
             disableTests.forEach(node -> disabledTestCaseIds.add(node.asText()));
             config.setDisabledTestCaseIds(disabledTestCaseIds);
         }
+    }
+
+    /**
+     * Reads the optional {@code requestBody} field of an inline endpoint entry.
+     * <p>
+     * A string value is used as-is. An object or array value is serialized to a JSON string,
+     * so a YAML mapping and a JSON object produce the same body. A missing or null field
+     * yields {@code null}, which keeps the previous behavior.
+     * </p>
+     *
+     * @param node The inline endpoint node
+     * @param path The endpoint path, used for logging
+     * @return The request body, or null if none was given
+     */
+    private String parseInlineRequestBody(JsonNode node, String path) {
+        JsonNode body = node.get("requestBody");
+        if (body == null || body.isNull()) {
+            return null;
+        }
+        if (body.isTextual()) {
+            return body.asText();
+        }
+        if (body.isContainerNode()) {
+            try {
+                return jsonMapper.writeValueAsString(body);
+            } catch (IOException e) {
+                logger.warn("Could not serialize requestBody for inline endpoint {}: {}", path, e.getMessage());
+                return null;
+            }
+        }
+        logger.warn("Ignoring requestBody for inline endpoint {}: expected a string or object, got {}",
+                path, body.getNodeType());
+        return null;
     }
 
     /**
