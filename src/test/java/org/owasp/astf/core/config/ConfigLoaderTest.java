@@ -418,6 +418,170 @@ class ConfigLoaderTest {
     }
 
     // -------------------------------------------------------------------------
+    // requestBody on inline endpoints (#125)
+    // -------------------------------------------------------------------------
+
+    @Test
+    @DisplayName("requestBody string on a YAML inline endpoint is passed to EndpointInfo")
+    void testInlineEndpointRequestBodyStringYaml(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /community/api/v2/coupon/validate-coupon
+                    method: POST
+                    requestBody: '{"coupon_code": "TRAC075", "amount": 75}'
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        EndpointInfo endpoint = config.getEndpoints().get(0);
+        assertEquals("POST", endpoint.getMethod());
+        assertEquals("{\"coupon_code\": \"TRAC075\", \"amount\": 75}", endpoint.getRequestBody());
+    }
+
+    @Test
+    @DisplayName("requestBody mapping on a YAML inline endpoint is serialized to a JSON string")
+    void testInlineEndpointRequestBodyObjectYaml(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /community/api/v2/coupon/validate-coupon
+                    method: POST
+                    requestBody:
+                      coupon_code: TRAC075
+                      amount: 75
+                      conversion_params:
+                        - source
+                        - target
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertEquals("{\"coupon_code\":\"TRAC075\",\"amount\":75,\"conversion_params\":[\"source\",\"target\"]}",
+                config.getEndpoints().get(0).getRequestBody());
+    }
+
+    @Test
+    @DisplayName("requestBody string on a JSON inline endpoint is passed to EndpointInfo")
+    void testInlineEndpointRequestBodyStringJson(@TempDir Path tempDir) throws IOException {
+        String json = """
+                {
+                  "targetUrl": "https://api.example.com",
+                  "endpoints": [
+                    {"path": "/api/v1/users", "method": "POST",
+                     "requestBody": "{\\"username\\": \\"alice\\"}"}
+                  ]
+                }
+                """;
+        Path configFile = tempDir.resolve("config.json");
+        Files.writeString(configFile, json);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertEquals("{\"username\": \"alice\"}", config.getEndpoints().get(0).getRequestBody());
+    }
+
+    @Test
+    @DisplayName("requestBody object on a JSON inline endpoint is serialized to a JSON string")
+    void testInlineEndpointRequestBodyObjectJson(@TempDir Path tempDir) throws IOException {
+        String json = """
+                {
+                  "targetUrl": "https://api.example.com",
+                  "endpoints": [
+                    {"path": "/api/v1/users", "method": "POST",
+                     "requestBody": {"username": "alice", "age": 30, "admin": false}}
+                  ]
+                }
+                """;
+        Path configFile = tempDir.resolve("config.json");
+        Files.writeString(configFile, json);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertEquals("{\"username\":\"alice\",\"age\":30,\"admin\":false}",
+                config.getEndpoints().get(0).getRequestBody());
+    }
+
+    @Test
+    @DisplayName("Inline endpoint without requestBody keeps a null body")
+    void testInlineEndpointWithoutRequestBody(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /api/v1/users
+                    method: POST
+                  - path: /api/v1/orders
+                    method: POST
+                    requestBody: null
+                """;
+        Path yamlFile = tempDir.resolve("config.yaml");
+        Files.writeString(yamlFile, yaml);
+        String json = """
+                {
+                  "targetUrl": "https://api.example.com",
+                  "endpoints": [{"path": "/api/v1/users", "method": "POST"}]
+                }
+                """;
+        Path jsonFile = tempDir.resolve("config.json");
+        Files.writeString(jsonFile, json);
+
+        ScanConfig yamlConfig = loader.loadFromFile(yamlFile.toString());
+        ScanConfig jsonConfig = loader.loadFromFile(jsonFile.toString());
+
+        assertEquals(2, yamlConfig.getEndpoints().size());
+        assertNull(yamlConfig.getEndpoints().get(0).getRequestBody());
+        assertNull(yamlConfig.getEndpoints().get(1).getRequestBody());
+        assertEquals("application/json", yamlConfig.getEndpoints().get(0).getContentType());
+        assertTrue(yamlConfig.getEndpoints().get(0).isRequiresAuthentication());
+        assertEquals(1, jsonConfig.getEndpoints().size());
+        assertNull(jsonConfig.getEndpoints().get(0).getRequestBody());
+    }
+
+    @Test
+    @DisplayName("requestBody of an unsupported type is ignored without dropping the endpoint")
+    void testInlineEndpointRequestBodyUnsupportedType(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                endpoints:
+                  - path: /api/v1/users
+                    method: POST
+                    requestBody: 42
+                """;
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertNull(config.getEndpoints().get(0).getRequestBody());
+    }
+
+    @Test
+    @DisplayName("endpointsFile entries still have no request body")
+    void testEndpointsFileHasNoRequestBody(@TempDir Path tempDir) throws IOException {
+        Path endpointsFile = tempDir.resolve("endpoints.txt");
+        Files.writeString(endpointsFile, "POST /api/v1/users\n");
+
+        String yaml = "targetUrl: https://api.example.com\n" +
+                      "endpointsFile: " + endpointsFile.toString().replace("\\", "/") + "\n";
+        Path configFile = tempDir.resolve("config.yaml");
+        Files.writeString(configFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(configFile.toString());
+
+        assertEquals(1, config.getEndpoints().size());
+        assertNull(config.getEndpoints().get(0).getRequestBody());
+    }
+
+    // -------------------------------------------------------------------------
     // System properties
     // -------------------------------------------------------------------------
 
