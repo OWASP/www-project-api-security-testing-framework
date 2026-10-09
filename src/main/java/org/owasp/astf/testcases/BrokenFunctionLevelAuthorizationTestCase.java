@@ -11,6 +11,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.http.SoftNotFoundDetector;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
@@ -49,6 +50,13 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
     private static final List<String> HIGH_PRIVILEGE_SEGMENT_REPLACEMENTS = List.of(
             "admin", "administrator", "internal", "staff", "management", "superuser"
     );
+
+    /**
+     * Guards the admin-path probing below against targets that answer 2xx for every unknown path.
+     * Held per instance so the baseline probe runs once per target for the whole scan rather than
+     * once per endpoint.
+     */
+    private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
 
     @Override
     public String getId() {
@@ -193,10 +201,13 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
             try {
                 HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
 
-                if (response != null && response.isSuccess() && isApiResponse(response)) {
-                    // Only flag when the response looks like a real API/admin response (JSON/XML).
-                    // SPAs and web frameworks return HTTP 200 with text/html for every unknown
-                    // path (client-side routing fallback) — those are false positives.
+                if (response != null && response.isSuccess() && isApiResponse(response)
+                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
+                    // Only flag when the response looks like a real API/admin response (JSON/XML)
+                    // AND it differs from what this target returns for a path that doesn't exist.
+                    // The content-type check alone only screens out HTML catch-alls; an API
+                    // gateway whose default route answers 200 with a JSON body passes it, and
+                    // would otherwise yield one CRITICAL finding per admin path probed below.
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             "Administrative Endpoint Accessible Without Authorization",
@@ -225,46 +236,18 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
     }
 
     /**
-     * Returns true when the response looks like a real API/service response rather than
-     * an HTML page.  SPAs and reverse proxies typically return HTTP 200 with text/html
-     * for every unknown path (client-side routing fallback), which would otherwise
-     * produce false positives for admin-path probing and method-escalation checks.
+     * Returns true when the response looks like a real API/service response rather than an HTML
+     * page. SPAs and reverse proxies typically return HTTP 200 with text/html for every unknown
+     * path (client-side routing fallback), which would otherwise produce false positives for
+     * admin-path probing and method-escalation checks.
      *
-     * <p>A response is considered an API response when:
-     * <ul>
-     *   <li>the Content-Type header contains "json", "xml", or "plain" (structured data), OR</li>
-     *   <li>no Content-Type header is present (raw API response), OR</li>
-     *   <li>the body starts with '{' or '[' (JSON) regardless of Content-Type</li>
-     * </ul>
+     * <p>Delegates to {@link SoftNotFoundDetector#isApiResponse(HttpResponse)}, which is the
+     * single shared copy of a check this class and
+     * {@link ImproperInventoryManagementTestCase} previously each carried verbatim. Behaviour is
+     * unchanged.</p>
      */
     private boolean isApiResponse(HttpResponse response) {
-        // Check Content-Type header first
-        String contentType = response.getHeaders().entrySet().stream()
-                .filter(e -> e.getKey() != null && e.getKey().equalsIgnoreCase("Content-Type"))
-                .flatMap(e -> e.getValue().stream())
-                .findFirst()
-                .orElse("")
-                .toLowerCase();
-
-        if (!contentType.isEmpty()) {
-            // Explicit HTML → SPA fallback, skip
-            if (contentType.contains("text/html")) {
-                return false;
-            }
-            // JSON, XML, plain text → real API response
-            if (contentType.contains("json") || contentType.contains("xml") || contentType.contains("text/plain")) {
-                return true;
-            }
-        }
-
-        // No Content-Type or unrecognised type — fall back to body sniffing
-        String body = response.getBody();
-        if (body != null) {
-            String trimmed = body.stripLeading();
-            return trimmed.startsWith("{") || trimmed.startsWith("[");
-        }
-
-        return false;
+        return SoftNotFoundDetector.isApiResponse(response);
     }
 
     private List<Finding> testHttpMethodEscalation(EndpointInfo endpoint, HttpClient httpClient) {

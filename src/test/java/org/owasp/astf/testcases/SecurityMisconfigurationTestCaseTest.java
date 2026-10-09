@@ -193,6 +193,71 @@ class SecurityMisconfigurationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT report any debug endpoint when the target serves an SPA catch-all for every path (regression)")
+    void testNoDebugEndpointFindingsOnHtmlCatchAll() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A single-page app / reverse proxy answers 200 text/html with the same app shell for
+        // every unmatched route. All 30 probed debug paths hit it, and every one of them would
+        // otherwise be reported — most at HIGH severity.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "<html><body><div id=\"root\"></div></body></html>",
+                        Map.of("Content-Type", List.of("text/html"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Debug")),
+                "An SPA catch-all page must not be reported as an exposed debug endpoint");
+    }
+
+    @Test
+    @DisplayName("Should NOT report any debug endpoint when a gateway answers 200 with a JSON not-found envelope (regression)")
+    void testNoDebugEndpointFindingsOnJsonCatchAll() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // An API gateway default route that reports absence with a success status. The body is
+        // JSON, so a content-type check alone would not screen it out.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"Not Found\"}",
+                        Map.of("Content-Type", List.of("application/json"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Debug")),
+                "A 200 response whose body says 'Not Found' must not be reported as an exposed endpoint");
+    }
+
+    @Test
+    @DisplayName("Should still report a genuinely exposed debug endpoint on a catch-all target (no false negative)")
+    void testRealDebugEndpointStillDetectedOnCatchAllTarget() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        HttpResponse catchAll = new HttpResponse(200, "<html><body><div id=\"root\"></div></body></html>",
+                Map.of("Content-Type", List.of("text/html")));
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.endsWith("/actuator/env")) {
+                        return new HttpResponse(200,
+                                "{\"activeProfiles\":[\"prod\"],\"propertySources\":[{\"name\":\"systemEnvironment\"}]}",
+                                Map.of("Content-Type", List.of("application/json")));
+                    }
+                    return catchAll;
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("Debug") && f.getEndpoint() != null
+                                && f.getEndpoint().contains("/actuator/env")),
+                "A real actuator env dump differs from the catch-all page and must still be reported");
+    }
+
+    @Test
     @DisplayName("Should handle exceptions during testing")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");

@@ -191,15 +191,18 @@ Rate limiting is tested in two places, both using the same core technique — bu
 
 ASTF's test cases already filter out several common false-positive classes — worth knowing so you don't second-guess a correct result:
 
-- **SPA/reverse-proxy HTML fallback**: a single-page app or catch-all reverse proxy that returns HTTP 200 + `text/html` for every unknown path would otherwise look like every "shadow endpoint" or "admin path" guess succeeded. Checks that would be fooled by this compare Content-Type and body shape (JSON/XML expected) before flagging.
+- **Catch-all / soft-404 targets**: some targets answer HTTP 200 for paths that don't exist — a single-page app or reverse proxy serving the app shell for every unmatched route, or an API gateway whose default route reports absence in the body (`{"message":"Not Found"}`) rather than in the status code. Gating on the status code alone, every guessed admin path, debug path and common resource name looks like it succeeded. Before trusting a guessed path's 2xx, ASTF asks the target what an unknown path looks like (two deliberately-nonexistent paths, one root-level and one nested), and discards probe hits that are indistinguishable from that answer. Targets that return a real 404 are unaffected — no baseline is recorded and nothing is suppressed. Endpoint discovery applies the same screen, so a catch-all target no longer produces hundreds of endpoints that don't exist.
+- **SPA/reverse-proxy HTML fallback**: on top of the baseline above, checks that expect structured data also compare Content-Type and body shape (JSON/XML expected) before flagging, so an HTML fallback page is never read as an API response.
 - **"Success" that's actually a body-level failure message**: some APIs return HTTP 200 on both successful and failed operations, signaling failure only in the JSON body (`"status":"fail"`, `"success":false`, "invalid credentials", ...). Auth-bypass and injection checks that rely on "did this succeed" check for these markers before counting a 2xx as real success.
 - **Documentation endpoints that are legitimately HTML**: `/docs`, `/redoc`, `/swagger-ui.html` are supposed to return HTML — the exposed-documentation check fetches a deliberately nonexistent path first as a baseline, so it can tell "this is real Swagger UI" apart from "this is just the same fallback page every path returns."
+- **A 2xx that announces its own absence**: a success status whose body carries an error envelope (`{"status":404}`, `{"message":"Not Found"}`, `Cannot GET /path`) is treated as a non-existent path regardless of what the rest of the target does, since no real endpoint reports that it isn't there. A health payload's quoted `"status":"UP"` is deliberately not matched by this.
 
 ### What you should still verify yourself
 
 - **Anything CRITICAL or HIGH**, before it goes in a report to a development team — see [Planning an Engagement](#planning-an-engagement), step 5.
 - **A "no finding" on a check that matters to your assessment.** Absence of a finding can mean "genuinely not vulnerable" or "ASTF never got a real value to test against" (unresolved endpoint, missing auth, field name it didn't guess). If a category is business-critical, don't take silence as clearance without at least one manual spot-check.
 - **Timing-based findings** (ReDoS, GraphQL DoS variants) — re-run once manually; a slow network hop produces the identical signal as a real vulnerability.
+- **A scan of a catch-all target that falls back to the hardcoded endpoint list.** When the log says `Using fallback common endpoints for testing`, none of the generic path guesses resolved to a real endpoint, and the endpoints being tested are guesses rather than the target's actual routes. Findings on them describe how the catch-all responds, not a real endpoint's behaviour — supply the real routes with `--endpoints-file` or `--config` and re-run before reporting anything from such a scan.
 
 ---
 

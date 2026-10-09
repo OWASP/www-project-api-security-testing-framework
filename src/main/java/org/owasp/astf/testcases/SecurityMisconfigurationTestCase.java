@@ -12,6 +12,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.http.SoftNotFoundDetector;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
@@ -69,6 +70,13 @@ public class SecurityMisconfigurationTestCase implements TestCase {
             "org.springframework", "hibernate", "datasource",
             "internal server error at", "caused by:"
     );
+
+    /**
+     * Guards the debug-endpoint probing below against targets that answer 2xx for every unknown
+     * path. Held per instance so the baseline probe runs once per target for the whole scan
+     * rather than once per endpoint.
+     */
+    private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
 
     @Override
     public String getId() {
@@ -206,8 +214,14 @@ public class SecurityMisconfigurationTestCase implements TestCase {
             try {
                 HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
 
+                // A 2xx here only means the path is exposed if this target actually
+                // distinguishes real paths from unknown ones. An SPA/reverse-proxy catch-all
+                // answers 200 with the same app shell for all 30 of the paths probed below, and
+                // an API gateway default route answers 200 with a JSON "not found" envelope —
+                // either way every single probe would otherwise be reported, most of them HIGH.
                 if (response != null && response.isSuccess()
-                        && !response.getBody().isEmpty()) {
+                        && !response.getBody().isEmpty()
+                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
                     boolean conventionallyPublic = CONVENTIONALLY_PUBLIC_ENDPOINTS.contains(debugPath);
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),

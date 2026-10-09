@@ -16,6 +16,7 @@ import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.config.ScanConfig;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.http.SoftNotFoundDetector;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +39,14 @@ public class EndpointDiscoveryService {
     private final ScanConfig config;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
+
+    /**
+     * Screens the generic path guesses below against targets that answer 2xx for every unknown
+     * path. Without it, one catch-all target turns 8 root guesses x 19 resource guesses into
+     * hundreds of endpoints that don't exist — each of which is then re-tested by all 16 test
+     * cases, multiplying scan time and crowding real endpoints out of the scan's timeout budget.
+     */
+    private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
 
     // Paths where API specifications are commonly found
     private static final List<String> SPEC_PATHS = List.of(
@@ -346,7 +355,8 @@ public class EndpointDiscoveryService {
                 HttpResponse httpResponse = httpClient.getWithStatus(url, Map.of());
                 String response = httpResponse != null ? httpResponse.getBody() : null;
 
-                if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()) {
+                if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()
+                        && !isGenericUnknownPathResponse(httpResponse)) {
                     logger.info("Found potential API root at: {}", url);
 
                     // If we get a valid response, add the root path
@@ -405,7 +415,8 @@ public class EndpointDiscoveryService {
                     HttpResponse httpResponse = httpClient.getWithStatus(url, Map.of());
                     String response = httpResponse != null ? httpResponse.getBody() : null;
 
-                    if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()) {
+                    if (httpResponse != null && httpResponse.isSuccess() && response != null && !response.isEmpty()
+                            && !isGenericUnknownPathResponse(httpResponse)) {
                         logger.info("Found potential resource endpoint: {}", url);
 
                         // Add the base resource endpoint
@@ -436,6 +447,23 @@ public class EndpointDiscoveryService {
         }
 
         return endpoints;
+    }
+
+    /**
+     * Reports whether a 2xx response to a guessed path is just what this target returns for any
+     * path that doesn't exist.
+     *
+     * <p>Gating on the status code alone (the previous behaviour) is correct for a target that
+     * answers 404 for unknown paths, and this method leaves that case untouched. It only has an
+     * effect on a target that answers 2xx for unknown paths, where a status-code check cannot
+     * tell a real endpoint from the catch-all and every guess below would otherwise be recorded
+     * as a discovery.</p>
+     *
+     * @param response the response to a guessed path
+     * @return true when the response is indistinguishable from the target's unknown-path answer
+     */
+    private boolean isGenericUnknownPathResponse(HttpResponse response) {
+        return softNotFoundDetector.looksLikeUnknownPath(config.getTargetUrl(), httpClient, response);
     }
 
     /**

@@ -41,6 +41,10 @@ The OWASP API Security Testing Framework is designed with a modular architecture
     - Handles authentication
     - Processes requests and responses
     - Supports various HTTP methods and content types
+    - `SoftNotFoundDetector` — establishes what a target returns for a path that doesn't exist,
+      so that checks which infer a path's existence from a 2xx status aren't fooled by a
+      catch-all (SPA shell, gateway default route). Shared by endpoint discovery and by the
+      test cases that probe guessed paths; see [Soft-404 baselining](#soft-404-baselining)
 
 4. **Test Cases** (`org.owasp.astf.testcases`)
     - Individual security test implementations
@@ -57,6 +61,33 @@ The OWASP API Security Testing Framework is designed with a modular architecture
     - CI/CD integration components
     - External tool connectors
     - Notification systems
+
+### Soft-404 baselining
+
+Several checks decide whether a guessed path exists by looking at its status code: endpoint
+discovery's common-path probing, the admin-path scan in `ASTF-API5-2023`, and the debug/diagnostic
+path scan in `ASTF-API8-2023`. On a target that answers 2xx for unknown paths, a status code
+cannot distinguish a real endpoint from the catch-all, and every guess is read as a hit.
+
+`SoftNotFoundDetector` (in `org.owasp.astf.core.http`) requests two deliberately-nonexistent
+paths per target — one root-level, one nested with a file extension, since a catch-all is often
+scoped to only one shape — and records what came back. A later probe hit whose response is
+indistinguishable from that recording is the catch-all answering again, not a discovery.
+
+- **Inert by default.** If both probes return 4xx/5xx, no baseline is recorded and nothing is
+  ever suppressed, so behaviour against a target that 404s correctly is unchanged.
+- **Conservative matching.** Comparison is near-exact equality of a normalised body (volatile
+  tokens, digits and whitespace masked) within one content-type family. Anything that isn't
+  clearly the catch-all is still reported — suppressing a real finding is a worse failure mode
+  than leaving a false positive in.
+- **Cheap.** Baselines are cached per base URL on the detector instance, which each consumer
+  holds for the lifetime of the scan.
+
+It also hosts the shared `isApiResponse(HttpResponse)` used by the test cases that require a
+structured-data response before flagging.
+
+When adding a test case that guesses at paths, route the "did this path exist?" decision through
+this class rather than reading the status code directly.
 
 ## Data Flow
 

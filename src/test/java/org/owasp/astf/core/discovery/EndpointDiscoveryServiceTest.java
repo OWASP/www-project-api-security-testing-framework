@@ -175,6 +175,63 @@ class EndpointDiscoveryServiceTest {
     }
 
     @Test
+    @DisplayName("Should not fabricate endpoints when every guessed path hits an SPA catch-all (regression)")
+    void testDoesNotFabricateEndpointsFromHtmlCatchAll() throws IOException {
+        // A reverse proxy / SPA answers 200 text/html with the app shell for every path. Gating
+        // on the status code alone reads all 8 root guesses and all 8x19 resource guesses as
+        // real, fabricating hundreds of endpoints that every test case then re-tests.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "<html><body><div id=\"root\"></div></body></html>",
+                        Map.of("Content-Type", List.of("text/html"))));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertTrue(endpoints.stream().noneMatch(e -> "/api".equals(e.getPath())),
+                "An app shell served for /api is not a discovered API root");
+        assertTrue(endpoints.stream().noneMatch(e -> "/rest".equals(e.getPath())),
+                "An app shell served for /rest is not a discovered API root");
+        assertTrue(endpoints.stream().noneMatch(e -> e.getPath().startsWith("/rest/")),
+                "No /rest/<resource> endpoint should be fabricated from a catch-all response");
+        assertFalse(endpoints.isEmpty(), "Should still fall back to the honest hardcoded list");
+    }
+
+    @Test
+    @DisplayName("Should not fabricate endpoints when a gateway answers 200 with a JSON not-found envelope (regression)")
+    void testDoesNotFabricateEndpointsFromJsonCatchAll() throws IOException {
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"Not Found\"}",
+                        Map.of("Content-Type", List.of("application/json"))));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertTrue(endpoints.stream().noneMatch(e -> "/api".equals(e.getPath())),
+                "A 200 'Not Found' envelope is not a discovered API root");
+        assertTrue(endpoints.stream().noneMatch(e -> e.getPath().startsWith("/service/")),
+                "No /service/<resource> endpoint should be fabricated from a catch-all response");
+        assertFalse(endpoints.isEmpty(), "Should still fall back to the honest hardcoded list");
+    }
+
+    @Test
+    @DisplayName("Should still discover a real API root on a catch-all target (no false negative)")
+    void testStillDiscoversRealRootOnCatchAllTarget() throws IOException {
+        // Everything is the catch-all except /api, which serves a genuinely different payload.
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            String url = inv.getArgument(0);
+            if (url.endsWith("/api")) {
+                return new HttpResponse(200, "{\"links\":[{\"rel\":\"users\",\"href\":\"/api/users\"}]}",
+                        Map.of("Content-Type", List.of("application/json")));
+            }
+            return new HttpResponse(200, "{\"success\":false,\"data\":null}",
+                    Map.of("Content-Type", List.of("application/json")));
+        });
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertTrue(endpoints.stream().anyMatch(e -> "/api".equals(e.getPath())),
+                "A root whose response differs from the catch-all must still be discovered");
+    }
+
+    @Test
     @DisplayName("Should exclude non-HTTP-method fields from OpenAPI paths")
     void testExcludesNonMethodFieldsFromSpec() throws IOException {
         String openApi = """

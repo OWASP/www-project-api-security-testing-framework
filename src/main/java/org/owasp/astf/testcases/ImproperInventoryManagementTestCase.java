@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.http.SoftNotFoundDetector;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
@@ -241,30 +242,13 @@ public class ImproperInventoryManagementTestCase implements TestCase {
      * path (client-side routing fallback), which would otherwise produce false positives for
      * deprecated-version and shadow-endpoint probing (documentation endpoints are handled
      * separately in {@link #testExposedDocumentation}, since some of them are legitimately HTML).
+     *
+     * <p>Delegates to {@link SoftNotFoundDetector#isApiResponse(HttpResponse)}, which is the
+     * single shared copy of a check this class and
+     * {@link BrokenFunctionLevelAuthorizationTestCase} previously each carried verbatim.
+     * Behaviour is unchanged.</p>
      */
     private boolean isApiResponse(HttpResponse response) {
-        String contentType = response.getHeaders().entrySet().stream()
-                .filter(e -> e.getKey() != null && e.getKey().equalsIgnoreCase("Content-Type"))
-                .flatMap(e -> e.getValue().stream())
-                .findFirst()
-                .orElse("")
-                .toLowerCase();
-
-        if (!contentType.isEmpty()) {
-            if (contentType.contains("text/html")) {
-                return false;
-            }
-            if (contentType.contains("json") || contentType.contains("xml") || contentType.contains("text/plain")) {
-                return true;
-            }
-        }
-
-        String body = response.getBody();
-        if (body != null) {
-            String trimmed = body.stripLeading();
-            return trimmed.startsWith("{") || trimmed.startsWith("[");
-        }
-
-        return false;
+        return SoftNotFoundDetector.isApiResponse(response);
     }
 }

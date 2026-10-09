@@ -184,6 +184,61 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT report admin endpoints when a gateway answers 200 JSON for every unknown path (regression)")
+    void testNoAdminFindingsOnJsonCatchAll() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        // An API gateway default route answering 200 with a JSON envelope. The existing
+        // content-type guard only screens out HTML catch-alls, so without an unknown-path
+        // baseline all 21 probed admin paths would be reported as CRITICAL.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"success\":false,\"data\":null}",
+                        Map.of("Content-Type", List.of("application/json"))));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+        when(httpClient.deleteWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+        when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Administrative")),
+                "A JSON catch-all must not be reported as 21 accessible administrative endpoints");
+    }
+
+    @Test
+    @DisplayName("Should still report a real admin endpoint on a catch-all target (no false negative)")
+    void testRealAdminEndpointStillDetectedOnCatchAllTarget() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.endsWith("/admin")) {
+                        return new HttpResponse(200,
+                                "{\"users\":[{\"id\":1,\"role\":\"admin\"}],\"canImpersonate\":true}",
+                                Map.of("Content-Type", List.of("application/json")));
+                    }
+                    return new HttpResponse(200, "{\"success\":false,\"data\":null}",
+                            Map.of("Content-Type", List.of("application/json")));
+                });
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+        when(httpClient.deleteWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+        when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(405, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Administrative")),
+                "A real admin payload differs from the catch-all envelope and must still be reported");
+    }
+
+    @Test
     @DisplayName("Should handle exceptions gracefully")
     void testExceptionHandling() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
