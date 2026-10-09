@@ -3,7 +3,7 @@
 [![OWASP Incubator](https://img.shields.io/badge/owasp-incubator-blue.svg)](https://owasp.org/www-project-api-security-testing-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-350%20passing-brightgreen.svg)](#)
+[![Tests](https://img.shields.io/badge/tests-371%20passing-brightgreen.svg)](#)
 [![Release](https://img.shields.io/github/v/release/OWASP/www-project-api-security-testing-framework?include_prereleases&label=latest)](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)
 
 A comprehensive automated testing framework for detecting API security vulnerabilities based on the **OWASP API Security Top 10 2023**.
@@ -73,7 +73,7 @@ start crapi-report.html
 
 ## Releases
 
-Releases are published automatically when a version tag is pushed. The workflow runs all 350 tests, builds the fat JAR, and attaches it to the GitHub Release.
+Releases are published automatically when a version tag is pushed. The workflow runs all 371 tests, builds the fat JAR, and attaches it to the GitHub Release.
 
 | Tag format | Release type | Example |
 |---|---|---|
@@ -358,7 +358,7 @@ www-project-api-security-testing-framework/
 │   │   │   └── integrations/  # GitHub Actions result processor
 │   │   └── resources/
 │   │       └── log4j2.xml     # Logging configuration
-│   └── test/                  # 350 unit tests
+│   └── test/                  # 371 unit tests
 ├── docs/
 │   ├── TESTING_GUIDELINES.md  # Methodology: how to test, interpret results, reduce false positives
 │   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 16 test cases, live-verification results
@@ -413,7 +413,7 @@ git tag v2.0.1
 git push origin v2.0.1
 ```
 
-The `release.yml` workflow will run all 350 tests, build `astf-v2.0.1.jar`, and create a
+The `release.yml` workflow will run all 371 tests, build `astf-v2.0.1.jar`, and create a
 GitHub Release with the JAR attached as a downloadable asset. A plain `vX.Y.Z` tag (no
 `alpha`/`beta`/`rc` suffix) is published as a **stable** release; only tags matching one of
 those suffixes are marked as a pre-release — see the [tag format table](#releases) above.

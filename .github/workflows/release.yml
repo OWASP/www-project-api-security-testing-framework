@@ -73,7 +73,7 @@ jobs:
             - Cross-user authorization testing (`--secondary-token`) for BOLA, mutual TLS client-certificate validation
             - Output formats: JSON, HTML, SARIF, XML
             - Auto endpoint discovery
-            - 350 passing unit tests
+            - 371 passing unit tests
 
             See the [README](https://github.com/OWASP/www-project-api-security-testing-framework#readme)
             and [docs/](https://github.com/OWASP/www-project-api-security-testing-framework/tree/main/docs)
