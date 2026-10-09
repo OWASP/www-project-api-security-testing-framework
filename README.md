@@ -200,6 +200,8 @@ java -jar astf-v2.0.1.jar -u https://api.example.com \
 # DELETE /api/v1/users/{id}
 ```
 
+Inline `endpoints:` entries in a config file can also carry an optional `requestBody`, either a string or a YAML/JSON object (serialized to JSON). Injection test cases read its field names instead of guessing common ones. Entries from `--endpoints-file` or `endpointsFile:` have no body.
+
 ### Exit Codes
 
 | Code | Meaning | CI usage |

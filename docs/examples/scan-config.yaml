@@ -25,6 +25,11 @@ target:
 #     method: "GET"
 #   - path: "/api/v1/users"
 #     method: "POST"
+#     # Optional sample body. A string is sent as-is; a mapping is serialized to JSON.
+#     # Injection test cases use these real field names instead of guessed ones.
+#     requestBody:
+#       username: "alice"
+#       email: "alice@example.com"
 #   - path: "/api/v1/users/{id}"
 #     method: "DELETE"
 #
