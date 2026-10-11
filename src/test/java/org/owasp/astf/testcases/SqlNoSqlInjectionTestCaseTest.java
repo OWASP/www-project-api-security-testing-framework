@@ -169,7 +169,7 @@ class SqlNoSqlInjectionTestCaseTest {
                 .thenReturn(new HttpResponse(200, "{\"token\":\"abc123\",\"message\":\"Login successful\"}", Map.of()));
         // Baseline (obviously-invalid password value) must fail for the bypass check to fire.
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
-                argThat(body -> body != null && body.contains("\"password\":\"astf-nosql-baseline-zq7x9k\""))))
+                argThat(body -> body != null && body.contains("\"password\":\"astf-nosql-baseline-value\""))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"invalid credentials\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -211,7 +211,7 @@ class SqlNoSqlInjectionTestCaseTest {
         // Baseline (obviously-invalid coupon code) fails.
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-value\""))))
                 .thenReturn(new HttpResponse(400, "{\"message\":\"Coupon not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -258,7 +258,7 @@ class SqlNoSqlInjectionTestCaseTest {
                         "\"related_note\":\"invalid coupons expire after 30 days\"}", Map.of()));
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-value\""))))
                 .thenReturn(new HttpResponse(400, "{\"message\":\"Coupon not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -288,7 +288,7 @@ class SqlNoSqlInjectionTestCaseTest {
                         "\"related_note\":\"invalid coupons expire after 30 days\"}]", Map.of()));
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-value\""))))
                 .thenReturn(new HttpResponse(200, "[{\"message\":\"Coupon not found\"}]", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -316,7 +316,7 @@ class SqlNoSqlInjectionTestCaseTest {
         testCase.execute(endpoint, httpClient);
 
         verify(httpClient, times(1)).postWithStatus(anyString(), anyMap(), anyString(),
-                argThat(body -> body != null && body.contains("astf-nosql-baseline-zq7x9k")));
+                argThat(body -> body != null && body.contains("astf-nosql-baseline-value")));
     }
 
     @Test

@@ -66,7 +66,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // endpoint that simply echoes the submitted value back would otherwise make the baseline look
     // "failed" purely because of our own sentinel — and turn any successful payload on that
     // permissive endpoint into a false-positive CRITICAL bypass.
-    private static final String NOSQL_BASELINE_INVALID_VALUE = "astf-nosql-baseline-zq7x9k";
+    private static final String NOSQL_BASELINE_INVALID_VALUE = "astf-nosql-baseline-value";
 
     // Matches an unresolved OpenAPI path template placeholder, e.g. "/{username}" — the literal
     // placeholder text, injected into directly rather than resolved to a real value first (unlike
