@@ -60,7 +60,13 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // A deliberately bogus value used to establish a "this should fail" baseline for the
     // generalized bypass check below — works for any field shape (credential, coupon code,
     // discount token, ...), not just login-style username/password pairs.
-    private static final String NOSQL_BASELINE_INVALID_VALUE = "astf-nosql-invalid-baseline-000";
+    //
+    // Must not contain any TEXT_FAILURE_MARKERS word (e.g. "invalid"): containsFailureMarker
+    // falls back to a whole-body scan for responses without a recognised message field, so an
+    // endpoint that simply echoes the submitted value back would otherwise make the baseline look
+    // "failed" purely because of our own sentinel — and turn any successful payload on that
+    // permissive endpoint into a false-positive CRITICAL bypass.
+    private static final String NOSQL_BASELINE_INVALID_VALUE = "astf-nosql-baseline-zq7x9k";
 
     // Matches an unresolved OpenAPI path template placeholder, e.g. "/{username}" — the literal
     // placeholder text, injected into directly rather than resolved to a real value first (unlike
@@ -138,7 +144,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // some unrelated part of the JSON happened to contain one of these words. TEXT_FAILURE_MARKERS
     // is instead only checked against text pulled from fields that actually carry human-readable
     // status text (see MESSAGE_FIELD_NAMES / containsFailureMarker), falling back to a whole-body
-    // scan only when the response isn't parseable JSON at all.
+    // scan when there is no such text — non-JSON, or JSON with no recognised message field.
     private static final List<String> STRUCTURED_FAILURE_MARKERS = List.of(
             "\"status\":\"fail\"", "\"success\":false"
     );
@@ -462,6 +468,11 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
         // that happens to succeed would multiply real side effects against the target needlessly.
         Map<String, HttpResponse> baselineResponseByField = new HashMap<>();
 
+        // A confirmed finding only ends testing of the current field — every remaining field is
+        // still probed, so one hit (even a MEDIUM error disclosure) can't mask a separate bypass
+        // on a sibling field. Same breadth fix as the GraphQL resolver check (#100) and the SQLi
+        // behavioral check (#124).
+        nextField:
         for (String field : fields) {
             for (String payload : allPayloads) {
                 try {
@@ -478,7 +489,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             findings.add(buildNoSqlFinding(endpoint, field, payload,
                                     "NoSQL error pattern found: " + indicator, Severity.MEDIUM,
                                     "NoSQL Injection — Database Error Disclosed"));
-                            return findings;
+                            continue nextField;
                         }
                     }
 
@@ -523,7 +534,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                                     "ordinary invalid value on the same field failed (HTTP " +
                                     (baseline != null ? baseline.getStatusCode() : "?") + ")", Severity.CRITICAL,
                                     title));
-                            return findings;
+                            continue nextField;
                         }
                     }
                 } catch (Exception e) {
@@ -578,6 +589,9 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             if (field.equals(targetField)) {
                 sb.append(rawValueJson);
             } else {
+                // null covers both "key absent" and the COMMON_BODY_FIELDS fallback's "type
+                // unknown" entry — same benign default either way. A real JSON null in the
+                // discovered body is a NullNode (non-null here), so it's preserved as null.
                 JsonNode original = originalValues.get(field);
                 sb.append(original != null ? original.toString() : "\"test\"");
             }
@@ -595,8 +609,10 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      * is checked only against text pulled from fields conventionally used for human-readable
      * status/error messages ({@link #MESSAGE_FIELD_NAMES}) — scanning the whole body for words
      * that common would risk a false negative if they happened to appear in unrelated content
-     * (e.g. a field simply echoing the submitted value back). Falls back to a whole-body scan only
-     * when the response isn't parseable JSON, so plain-text error responses are still covered.
+     * (e.g. a field simply echoing the submitted value back). Falls back to a whole-body scan when
+     * there is no message text to check — the response isn't parseable JSON, or it is JSON but has
+     * no conventionally-named message field (e.g. failure reported via {@code "errorMsg"}) — so
+     * neither case silently loses text-marker coverage.
      */
     private boolean containsFailureMarker(String responseBody) {
         String lower = responseBody.toLowerCase();
@@ -613,16 +629,17 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
 
     /** Concatenates the text of every field named like {@link #MESSAGE_FIELD_NAMES}, anywhere in
      *  the (possibly nested) JSON body — object- or array-rooted, e.g. a batch-style response
-     *  like {@code [{"error": "..."}]} — or {@code null} if the body isn't parseable JSON at all. */
+     *  like {@code [{"error": "..."}]} — or {@code null} if the body isn't parseable JSON or has no
+     *  such field, telling {@link #containsFailureMarker} to fall back to a whole-body scan. */
     private String extractMessageText(String responseBody) {
         try {
             JsonNode root = objectMapper.readTree(responseBody);
-            if (!root.isObject() && !root.isArray()) {
+            if (root == null || (!root.isObject() && !root.isArray())) {
                 return null;
             }
             StringBuilder sb = new StringBuilder();
             collectMessageText(root, sb);
-            return sb.length() > 0 ? sb.toString() : "";
+            return sb.length() > 0 ? sb.toString() : null;
         } catch (Exception e) {
             return null;
         }

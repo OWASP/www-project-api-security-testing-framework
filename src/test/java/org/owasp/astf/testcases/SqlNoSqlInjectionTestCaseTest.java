@@ -169,7 +169,7 @@ class SqlNoSqlInjectionTestCaseTest {
                 .thenReturn(new HttpResponse(200, "{\"token\":\"abc123\",\"message\":\"Login successful\"}", Map.of()));
         // Baseline (obviously-invalid password value) must fail for the bypass check to fire.
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
-                argThat(body -> body != null && body.contains("\"password\":\"astf-nosql-invalid-baseline-000\""))))
+                argThat(body -> body != null && body.contains("\"password\":\"astf-nosql-baseline-zq7x9k\""))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"invalid credentials\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -211,7 +211,7 @@ class SqlNoSqlInjectionTestCaseTest {
         // Baseline (obviously-invalid coupon code) fails.
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-invalid-baseline-000\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
                 .thenReturn(new HttpResponse(400, "{\"message\":\"Coupon not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -258,7 +258,7 @@ class SqlNoSqlInjectionTestCaseTest {
                         "\"related_note\":\"invalid coupons expire after 30 days\"}", Map.of()));
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-invalid-baseline-000\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
                 .thenReturn(new HttpResponse(400, "{\"message\":\"Coupon not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -288,7 +288,7 @@ class SqlNoSqlInjectionTestCaseTest {
                         "\"related_note\":\"invalid coupons expire after 30 days\"}]", Map.of()));
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null &&
-                        body.contains("\"coupon_code\":\"astf-nosql-invalid-baseline-000\""))))
+                        body.contains("\"coupon_code\":\"astf-nosql-baseline-zq7x9k\""))))
                 .thenReturn(new HttpResponse(200, "[{\"message\":\"Coupon not found\"}]", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -316,7 +316,7 @@ class SqlNoSqlInjectionTestCaseTest {
         testCase.execute(endpoint, httpClient);
 
         verify(httpClient, times(1)).postWithStatus(anyString(), anyMap(), anyString(),
-                argThat(body -> body != null && body.contains("astf-nosql-invalid-baseline-000")));
+                argThat(body -> body != null && body.contains("astf-nosql-baseline-zq7x9k")));
     }
 
     @Test
@@ -394,5 +394,92 @@ class SqlNoSqlInjectionTestCaseTest {
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
         assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Keeps testing remaining fields after a confirmed NoSQL bypass on one field " +
+            "(regression: an early return previously stopped at the first vulnerable field)")
+    void testNoSqlBypassReportedForEveryVulnerableField() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\",\"voucher\":\"GIFT5\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of()));
+        // Both fields independently accept a string-shaped operator payload.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && (body.contains("\"coupon_code\":\"$ne\"") ||
+                        body.contains("\"voucher\":\"$ne\"")))))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"Applied\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(2, findings.size(), "Each vulnerable field should produce its own finding");
+        assertTrue(findings.stream().anyMatch(f -> f.getRequestDetails().contains("Field: coupon_code")));
+        assertTrue(findings.stream().anyMatch(f -> f.getRequestDetails().contains("Field: voucher")));
+    }
+
+    @Test
+    @DisplayName("A NoSQL error disclosure on one field does not mask a bypass on a sibling field")
+    void testNoSqlErrorOnOneFieldDoesNotMaskBypassOnAnother() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"query\":\"alice\",\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && body.contains("\"query\":{\"$ne\": null}"))))
+                .thenReturn(new HttpResponse(500, "{\"message\":\"MongoError: bad query\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && body.contains("\"coupon_code\":\"$ne\""))))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"Applied\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Database Error Disclosed")));
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Authorization/Logic Bypass")
+                && f.getSeverity() == Severity.CRITICAL));
+    }
+
+    @Test
+    @DisplayName("Recognises a failure reported via a non-standard message field (e.g. errorMsg) " +
+            "by falling back to a whole-body scan (regression: valid JSON with no recognised " +
+            "message field previously got no text-marker coverage at all)")
+    void testFailureInNonStandardMessageFieldDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/workshop/api/shop/apply_coupon", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\",\"amount\":10}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Every response is HTTP 200; the only failure signal is an "errorMsg" field.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"errorMsg\":\"Coupon invalid\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(),
+                argThat(body -> body != null && body.contains("\"coupon_code\":\"$ne\""))))
+                .thenReturn(new HttpResponse(200, "{\"applied\":true}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Authorization/Logic Bypass")),
+                "The errorMsg baseline should be read as a failure, confirming the bypass");
+        // Payloads whose own response carries the errorMsg failure must not be reported.
+        assertTrue(findings.stream().allMatch(f -> f.getRequestDetails().contains("Payload: \"$ne\"")));
+    }
+
+    @Test
+    @DisplayName("Does not flag a bypass on a permissive endpoint that echoes the submitted value back " +
+            "(regression guard: the baseline sentinel must not itself contain a failure-marker word, or " +
+            "the whole-body fallback would read our own echoed sentinel as a failed baseline)")
+    void testNoNoSqlBypassWhenEndpointEchoesInput() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/notes", "POST", "application/json",
+                "{\"title\":\"hello\",\"amount\":10}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Accepts anything and echoes the request body back — no message field, no failure signal.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> new HttpResponse(200, inv.getArgument(3), Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "An endpoint that accepts every value has no bypass to report");
     }
 }
