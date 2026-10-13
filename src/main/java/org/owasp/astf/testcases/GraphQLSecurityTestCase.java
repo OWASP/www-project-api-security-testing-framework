@@ -2,9 +2,13 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -126,7 +130,10 @@ public class GraphQLSecurityTestCase implements TestCase {
     private static final List<String> STACK_TRACE_INDICATORS = List.of(
             "traceback (most recent call last)", "file \"", ", line ", "raise ",
             "stack trace", "stacktrace", "at org.", "at java.", "at com.",
-            "nullpointerexception", "sqlexception", "internal server error at", "caused by:"
+            "nullpointerexception", "sqlexception", "internal server error at", "caused by:",
+            // raw database driver errors that echo the failing statement
+            "sqlite3.operationalerror", "[sql:", "psycopg2.errors", "you have an error in your sql syntax",
+            "unclosed quotation mark"
     );
 
     // Standard introspection query — smallest form that reveals the full schema
@@ -211,7 +218,10 @@ public class GraphQLSecurityTestCase implements TestCase {
     );
 
     private static final List<String> RESOLVER_INJECTION_INDICATORS = List.of(
-            "<script>alert('xss')</script>", "root:x:0:0", "sql syntax", "syntax error near"
+            "<script>alert('xss')</script>", "root:x:0:0", "sql syntax", "syntax error near",
+            // raw database driver errors (DVGA's SQLAlchemy/sqlite backend leaks these)
+            "sqlite3.operationalerror", "[sql:", "psycopg2.errors", "you have an error in your sql syntax",
+            "unclosed quotation mark"
     );
 
     // Argument names suggesting the value is used to make an outbound request — the same GraphQL
@@ -237,6 +247,18 @@ public class GraphQLSecurityTestCase implements TestCase {
     public String getId() {
         return TEST_CASE_ID;
     }
+
+    // The suite runs once per GraphQL URL per scan, not once per scanned endpoint: the scanner
+    // calls execute() for every discovered endpoint, and every non-GraphQL endpoint resolves to
+    // the same discovered GraphQL URL, which used to repeat every probe and duplicate every
+    // finding. Keyed by HttpClient so a new scan (new client) always starts fresh.
+    private final Map<HttpClient, Set<String>> testedGraphQLUrls =
+            Collections.synchronizedMap(new WeakHashMap<>());
+
+    // After a denial-of-service probe breaks the target, wait for it to answer a trivial query
+    // again before the next check runs, so later checks are not silently run against a dead server.
+    int recoveryAttempts = 20;
+    long recoveryPollMillis = 1000;
 
     @Override
     public String getName() {
@@ -266,6 +288,12 @@ public class GraphQLSecurityTestCase implements TestCase {
             logger.info("Discovered GraphQL endpoint: {}", endpoint.getFullUrl());
         }
 
+        Set<String> testedUrls = testedGraphQLUrls.computeIfAbsent(httpClient, k -> ConcurrentHashMap.newKeySet());
+        if (!testedUrls.add(endpoint.getFullUrl())) {
+            logger.debug("GraphQL endpoint {} already covered by an earlier endpoint in this scan", endpoint.getFullUrl());
+            return findings;
+        }
+
         findings.addAll(testIntrospectionEnabled(endpoint, httpClient));
         findings.addAll(testFieldSuggestionLeakage(endpoint, httpClient));
         findings.addAll(testQueryDepthAttack(endpoint, httpClient));
@@ -273,12 +301,14 @@ public class GraphQLSecurityTestCase implements TestCase {
         findings.addAll(testResolverInjection(endpoint, httpClient));
         findings.addAll(testFieldDuplicationAttack(endpoint, httpClient));
         findings.addAll(testAliasBasedAttack(endpoint, httpClient));
-        findings.addAll(testCircularFragmentAttack(endpoint, httpClient));
         findings.addAll(testGraphiQLExposure(endpoint, httpClient));
         findings.addAll(testOperationDenyListBypass(endpoint, httpClient));
         findings.addAll(testArgumentBasedAuthBypass(endpoint, httpClient));
         findings.addAll(testStackTraceDisclosure(endpoint, httpClient));
         findings.addAll(testLoginMutationBruteForce(endpoint, httpClient));
+        // Runs last: this probe can crash the target (DVGA exits), which would otherwise leave
+        // every later check running against a dead server.
+        findings.addAll(testCircularFragmentAttack(endpoint, httpClient));
 
         return findings;
     }
@@ -636,6 +666,29 @@ public class GraphQLSecurityTestCase implements TestCase {
      * requires servers to detect and reject fragment cycles at validation time, before
      * execution — a server that instead tries to resolve the cycle can hang or crash.
      */
+    /** Polls a trivial query until the target answers it; returns elapsed ms, or -1 if it never does. */
+    private long waitForRecovery(EndpointInfo endpoint, HttpClient httpClient) {
+        long start = System.currentTimeMillis();
+        for (int i = 0; i < recoveryAttempts; i++) {
+            try {
+                HttpResponse r = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, "{\"query\":\"{__typename}\"}");
+                if (r != null && r.getBody() != null && r.getBody().contains("__typename")) {
+                    return System.currentTimeMillis() - start;
+                }
+            } catch (Exception e) {
+                logger.debug("Target not yet answering after DoS probe: {}", e.getMessage());
+            }
+            try {
+                Thread.sleep(recoveryPollMillis);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return -1;
+            }
+        }
+        return -1;
+    }
+
     List<Finding> testCircularFragmentAttack(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
         try {
@@ -666,7 +719,12 @@ public class GraphQLSecurityTestCase implements TestCase {
                         "part of the GraphQL specification and enabled by default in virtually every " +
                         "compliant implementation — verify no custom validation rules have disabled it)."
                 );
-                f.setEvidence(timedOut ? "Request timed out" : "Response took " + elapsed + "ms");
+                long recoveredAfterMs = waitForRecovery(endpoint, httpClient);
+                String outcome = recoveredAfterMs < 0
+                        ? "\nThe target did not answer a trivial query for " + (recoveryAttempts * recoveryPollMillis / 1000)
+                          + "s afterwards and may have crashed; results for other checks on this target may be unreliable."
+                        : "\nThe target answered a trivial query again after " + recoveredAfterMs + "ms.";
+                f.setEvidence((timedOut ? "Request timed out" : "Response took " + elapsed + "ms") + outcome);
                 findings.add(f);
             } else if (response != null) {
                 logger.debug("GraphQL server correctly rejected the circular fragment query on {} (HTTP {})",
@@ -940,6 +998,66 @@ public class GraphQLSecurityTestCase implements TestCase {
             }
         }
 
+        return findings.isEmpty() ? testResolverErrorDisclosure(endpoint, httpClient) : findings;
+    }
+
+    /**
+     * The static probes above are rejected by schema validation before any resolver runs, so
+     * they cannot surface errors raised inside a resolver (DVGA leaks the full SQL statement
+     * only when a quote reaches its filter argument). This sends a lone quote into every query
+     * field's string argument, found through introspection, and looks for the same
+     * disclosure indicators. Query fields only: mutations are left to the resolver-injection
+     * check so this probe never writes data.
+     */
+    private List<Finding> testResolverErrorDisclosure(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse introspectionResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, QUERY_INTROSPECTION_QUERY);
+            if (!isAcceptedGraphQLQuery(introspectionResponse)) {
+                return findings;
+            }
+            for (MutationCandidate candidate : extractStringArgFields(introspectionResponse.getBody(), "queryType")) {
+                String selectionSet = resolveSelectionSet(candidate.returnTypeName(), endpoint, httpClient, 0);
+                String fieldCall = String.format("query{%s(%s)%s}",
+                        candidate.name(), buildArgumentList(candidate, "x'"), selectionSet);
+                String requestBody = "{\"query\":\"" + fieldCall + "\"}";
+                HttpResponse response = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, requestBody);
+                String body = response != null ? response.getBody() : null;
+                if (body == null) {
+                    continue;
+                }
+                String lowerBody = body.toLowerCase();
+                List<String> found = new ArrayList<>();
+                for (String indicator : STACK_TRACE_INDICATORS) {
+                    if (lowerBody.contains(indicator)) {
+                        found.add(indicator);
+                    }
+                }
+                if (!found.isEmpty()) {
+                    Finding f = new Finding(
+                            UUID.randomUUID().toString(),
+                            "GraphQL Stack Trace / Debug Error Disclosure",
+                            "A single quote sent to the '" + candidate.name() + "' query's '" +
+                            candidate.targetArgName() + "' argument produced a response containing raw " +
+                            "implementation details (" + String.join(", ", found) + "), revealing the " +
+                            "database engine and the failing statement.",
+                            Severity.MEDIUM,
+                            getId(),
+                            "POST " + endpoint.getPath() + " (query " + candidate.name() + ")",
+                            "Catch resolver-level exceptions and return a generic error message to the " +
+                            "client. Log the full exception server-side only, and disable any GraphQL " +
+                            "server debug/development mode in production."
+                    );
+                    f.setEvidence("Query: " + requestBody + "\nIndicators found: " + String.join(", ", found));
+                    findings.add(f);
+                    return findings;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL resolver error disclosure on {}: {}", endpoint, e.getMessage());
+        }
         return findings;
     }
 
