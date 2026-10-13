@@ -8,7 +8,7 @@ This plan covers three releases. It is built from the v2.1.0 milestone (#127, #1
 
 ASTF is a command line tool. A user gives it a target, optional credentials and an optional endpoint list. It sends requests and writes report files (JSON, HTML, SARIF, XML). It ships as a jar and, from 2.1.0, also as a container image and a GitHub Action.
 
-It has no database, no server, no hosted component, no accounts, and no state between runs other than files the user asks for. Nothing in this plan changes that.
+The core is local and file-based: no database, no accounts, no hosted component, and no state between runs other than files the user asks for. A local report viewer that reads those files is acceptable if users need one (see 2.2). What the project does not take on is anything that has to keep running for other people, or needs a database behind it. Nothing in this plan changes that.
 
 One rule from `CLAUDE.md` applies to every item: a change must never cause an endpoint or test case to be skipped. When a safety control holds a check back, the report lists what did not run and why.
 
@@ -18,7 +18,7 @@ The goal is a scanner a security engineer can stand behind in a report, so corre
 
 1. Does it make a result ASTF prints more true, or stop ASTF leaking something it was given? If yes, it is a fix and goes first.
 2. Does a real user or reviewer ask for it (an issue, a review comment, a failure seen in live testing)? If not, it waits.
-3. Can it be built and tested without a running service or a new subsystem? If not, it is out of scope.
+3. Can it be built and tested locally, without a hosted service or a database? If not, it is out of scope.
 
 ## Decision record: what we keep, what we defer, what we refuse
 
@@ -45,10 +45,11 @@ The goal is a scanner a security engineer can stand behind in a report, so corre
 | Plugin interface for custom checks | Defer to 2.2, after prerequisites | The `TestCase` contract exposes mutable internals and there are 64 hand-written finding constructors. A stable context object and a finding builder have to exist first. |
 | Aggregated reporting | Keep, presentation only | Group findings with one root cause and list every endpoint. Nothing is skipped. |
 | Baseline and suppression file | Defer to 2.2 | Needs the 2.1.0 fingerprint first. |
+| Local dashboard or report viewer | Could, 2.2 | Start by improving the existing HTML report (filter, group, sort). If a separate viewer is still needed, it binds to 127.0.0.1 only, reads the existing JSON or SARIF files, has no database and no write endpoints, and is optional. Scan results contain secrets, so a local web server needs the same care as any other attack surface (DNS rebinding, CSRF). |
 
 ### Refused: not part of this project
 
-A web interface, a findings database, a scheduler, a hosted service, distributed workers, a plugin marketplace, automatic remediation, AI-based triage of findings, a built-in intercepting proxy, a scoring engine that replaces the OWASP categories, and any feature that needs a service to be running. Each needs a running service or a larger team, and none is needed to be the reference scanner for this problem. Thin output files for other tools (for example JUnit XML or a DefectDojo import file) are acceptable. Calling Jira or DefectDojo APIs is acceptable only as a small optional module.
+A hosted or multi-user web service, a shared findings database, accounts, a scheduler, distributed workers, a plugin marketplace, automatic remediation, AI-based triage of findings, a built-in intercepting proxy, and a scoring engine that replaces the OWASP categories. Each needs something running for other people or a larger team, and none is needed to be the reference scanner for this problem. A local, optional report viewer is not on this list. Thin output files for other tools (for example JUnit XML or a DefectDojo import file) are acceptable. Calling Jira or DefectDojo APIs is acceptable only as a small optional module.
 
 ## 2.0.2: correctness and credential handling (patch, no new features)
 
@@ -127,6 +128,7 @@ DVGA rows 19 and 21 describe gaps for which code exists (`testLoginMutationBrute
 - Login-flow support so a user configures a credential sequence once.
 - Multi-step flows (#103), starting with chained requests where a value from one response feeds the next.
 - A plugin interface for custom checks, after a stable context object and a finding builder exist.
+- A local report viewer, only if the improved HTML report is not enough (guardrails in the decision record).
 - The testable subset of the OWASP LLM Top 10 from the roadmap.
 - The remaining DVGA and crAPI enhancement issues (#115, #116, #119, #121) as each is scoped.
 
