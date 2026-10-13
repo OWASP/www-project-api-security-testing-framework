@@ -2,107 +2,146 @@
 
 Status: draft for maintainer review. Date: TBD.
 
-This plan covers three releases. It is built from three sources: the v2.1.0 milestone (#127, #129, #120), the Phase 6 roadmap in `index.md` plus `docs/OPEN_ITEMS.md`, and a code audit of the current `main` branch where each finding was checked by reading the code and, where noted, by running it. Items that were not verified are marked as such.
+This plan covers three releases. It is built from the v2.1.0 milestone (#127, #129, #120), the Phase 6 roadmap in `index.md`, `docs/OPEN_ITEMS.md`, the open issues and PR review comments, and a code audit of `main` at commit 172f701. Each audit finding was checked by reading the code and, where noted, by running it. None of the fixes below have been implemented yet, and the effort sizes are estimates. Items that could not be verified are marked.
 
 ## What ASTF is and is not
 
-ASTF is a command line tool. A user gives it a target, optional credentials and an optional endpoint list. It sends requests and writes report files (JSON, HTML, SARIF, XML). It is distributed as a jar, and from 2.1.0 also as a container image and a GitHub Action.
+ASTF is a command line tool. A user gives it a target, optional credentials and an optional endpoint list. It sends requests and writes report files (JSON, HTML, SARIF, XML). It ships as a jar and, from 2.1.0, also as a container image and a GitHub Action.
 
-It has no database, no server, no hosted component, no accounts and no stored state between runs other than files the user asks for. Nothing in this plan changes that. Anything that would need a service to run (a findings store, a dashboard, a scheduler, distributed workers) is out of scope for this project.
+It has no database, no server, no hosted component, no accounts, and no state between runs other than files the user asks for. Nothing in this plan changes that.
 
-One rule from `CLAUDE.md` applies to every item below: a change must never cause an endpoint or test case to be skipped. Where a safety control stops a check from running, the report must list what was not run and why.
+One rule from `CLAUDE.md` applies to every item: a change must never cause an endpoint or test case to be skipped. When a safety control holds a check back, the report lists what did not run and why.
 
-## The theme: results a security engineer can stand behind
+## How we decided what goes in
 
-The audit found cases where ASTF reports something that is not true. That matters more than any missing feature, because a scanner that overstates findings gets ignored and one that understates them gets trusted when it should not be. The order of work follows from that: fix wrong results first, then add features on top of results that can be trusted.
+The goal is a scanner a security engineer can stand behind in a report, so correctness comes before features. Every candidate item had to pass three questions:
+
+1. Does it make a result ASTF prints more true, or stop ASTF leaking something it was given? If yes, it is a fix and goes first.
+2. Does a real user or reviewer ask for it (an issue, a review comment, a failure seen in live testing)? If not, it waits.
+3. Can it be built and tested without a running service or a new subsystem? If not, it is out of scope.
+
+## Decision record: what we keep, what we defer, what we refuse
+
+### Good for us, keep
+
+- Fixing wrong results before adding anything (all of 2.0.2).
+- Honest scan status: a timed-out or errored scan says so, lists what did not run, and exits with its own code.
+- Unauthenticated probes that are actually unauthenticated.
+- Evidence logging with redaction on by default (#127) and the GitHub Action with a container image (#129).
+- Stable finding fingerprints and deterministic report order. These are small, and they unlock diffing two scans and a later suppression file.
+- The scope allowlist. It is small and prevents credentials going to hosts outside the target.
+- Refusing unknown config keys with a clear error. It is cheap and stops users trusting settings that do nothing.
+- Release hygiene a company will check: a CycloneDX SBOM, published checksums, and a documented vulnerability reporting path.
+
+### Over-engineering for now, deferred or cut down
+
+| Idea | Decision | Reason |
+|---|---|---|
+| Per-check impact tagging and a full `--max-impact` gate | Defer to 2.2 | Classifying all 16 checks is a judgment call, and marking a destructive check as read-only is worse than having no flag. Ship only the scope allowlist now. |
+| Target health circuit breaker | Cut down | Start with a total call timeout and wiring the existing `--max-rps` setting. Add a breaker only if live use shows it is still needed. |
+| A general redaction framework (entropy detection, plugin rules) | Cut down | Redact by header name, cookie, query parameter, JSON key, and the exact values of the configured secrets. Nothing more. |
+| A per-check state machine (queued, running, ran, errored, abandoned) | Cut down | Keep counts and a list of what did not run and why. |
+| Nightly traceability regression in CI | Script first | A compose file and a script that diffs against the matrix, run by hand and before each release. Add the nightly job only if it earns it. |
+| Plugin interface for custom checks | Defer to 2.2, after prerequisites | The `TestCase` contract exposes mutable internals and there are 64 hand-written finding constructors. A stable context object and a finding builder have to exist first. |
+| Aggregated reporting | Keep, presentation only | Group findings with one root cause and list every endpoint. Nothing is skipped. |
+| Baseline and suppression file | Defer to 2.2 | Needs the 2.1.0 fingerprint first. |
+
+### Refused: not part of this project
+
+A web interface, a findings database, a scheduler, a hosted service, distributed workers, a plugin marketplace, automatic remediation, AI-based triage of findings, a built-in intercepting proxy, a scoring engine that replaces the OWASP categories, and any feature that needs a service to be running. Each needs a running service or a larger team, and none is needed to be the reference scanner for this problem. Thin output files for other tools (for example JUnit XML or a DefectDojo import file) are acceptable. Calling Jira or DefectDojo APIs is acceptable only as a small optional module.
 
 ## 2.0.2: correctness and credential handling (patch, no new features)
 
-Each item below was verified against the code on `main`. Items marked "ran" were also reproduced with a scratch program.
+A patch must be small diffs nobody has to think hard about, and it must not change which checks run. Each row has a test that fails before the fix. Rows marked "ran" were reproduced with a scratch program.
 
 | # | Problem | Where | Fix |
 |---|---|---|---|
-| 1 | The soft-404 detector can suppress real endpoints. `(int)(shortest * 0.95)` truncates, so bodies of 2 to 19 characters tolerate one differing character and 1-character bodies always match. The length floor of 8 also lets a baseline with up to 8 inserted characters count as identical (for example `{}` vs `{"a":1}`, `[]` vs `[{"id":1}]`). In discovery a wrong suppression removes the endpoint from the scan. Ran. | `SoftNotFoundDetector.java:379, 397`; call sites `EndpointDiscoveryService.java:359, 419`, `SecurityMisconfigurationTestCase.java:224`, `BrokenFunctionLevelAuthorizationTestCase.java:205` | Drop the floor of 8. Require `longest - shortest <= longest / 50` and `longest - (prefix + suffix) <= longest / 20`. Add tests for 1, 2 and 19 character pairs and for the insertion cases. Log at INFO when a hit is suppressed. |
-| 2 | The Basic Auth authenticator replaces any explicit `Authorization` header on a 401 and retries with no host check and no retry limit. With `--username` set, forged-JWT probes are re-sent as the real user. A target that always answers 401 produced 21 requests. Basic credentials can follow a redirect to another host. Ran. | `HttpClient.java:729-738` | Return null if the request already carries `Authorization`, retry once, and only for the target host and port. |
-| 3 | Credentials can leave the target host. Redirects are always followed and forward the API key header and custom headers. Swagger UI discovery fetches whatever `url:` the HTML names, with credentials attached. Ran. | `HttpClient.java:100-101`; `EndpointDiscoveryService.java:204-212` | Host-pin the client: when the request host differs from the target, strip every credential header. Fetch off-host spec URLs without credentials (still fetched, so discovery is not reduced). Make `followRedirects` read its config value. |
-| 4 | The cross-user BOLA "secondary identity" only swaps `Authorization`. The primary API key, the primary session cookie and the Basic authenticator still apply, so a cross-user finding may be authenticated as the first user. | `HttpClient.java:204-210`; `BrokenObjectLevelAuthorizationTestCase.java:111-138` | Add an as-identity request path built on the no-auth client that applies only the supplied identity. Add MockWebServer tests that assert the headers actually sent. |
-| 5 | SSRF can report CRITICAL on an API that only echoes its input. The indicator `computeMetadata` appears inside the probe payload itself. | `ServerSideRequestForgeryTestCase.java:42, 53, 103, 153, 209-216` | Require a 2xx, remove the payload text from the body before matching, compare against a baseline of the same shape. |
-| 6 | `RegexDosTestCase` turns any `IOException` into a HIGH ReDoS finding. A scan-timeout interrupt or a network blip is reported as a hang. | `RegexDosTestCase.java:97-140` | Treat only `SocketTimeoutException` as the signal, re-probe the baseline after a failure, and return no finding when the thread was interrupted. |
-| 7 | The auth and 2FA path checks match substrings in an else-if chain, so `/tokens`, `/authors` or `/discount-codes` lose the missing-auth and JWT checks. This breaks the never-skip rule. | `BrokenAuthenticationTestCase.java:40-46, 129-160` | Match whole path segments, or run the generic checks for every endpoint and treat auth and 2FA checks as additive. |
-| 8 | OpenAPI 3 parsing ignores root-level `security`, so endpoints of a globally secured API are marked public and several checks skip them. | `EndpointDiscoveryService.java:282-292` | Effective security is the operation value if present (an explicit empty array means public), else the root value, else true. |
-| 9 | Reports contain raw session cookies and `Location` values in evidence and are written world-readable. | `BrokenAuthenticationTestCase.java:944-976`, `UnsafeConsumptionOfApisTestCase.java:219`, all four generators | Pass evidence through one redaction helper and create report files with owner-only permissions. This helper is reused by evidence logging in 2.1.0. |
-| 10 | The cookie store is an unsynchronised `HashMap` used from many virtual threads. | `HttpClient.java:77, 743-781` | `ConcurrentHashMap` with `CopyOnWriteArrayList`. |
-| 11 | 92 calls to `toLowerCase()` or `toUpperCase()` without a locale. Under a Turkish default locale, string matching such as SQL error indicators fails. Ran for the detector cases. | across `src/main` | Use `Locale.ROOT`. Run the unit suite once with `-Duser.language=tr`. |
-| 12 | Discovery builds `http://host//path` URLs, and `EndpointInfo` has no `equals` or `hashCode`, so the "unique" endpoint set removes nothing. | `ScanConfig.java:102-109`, `EndpointDiscoveryService.java:127, 182, 350, 407`, `EndpointInfo.java` | One URL join helper. `equals` and `hashCode` over method, normalised path, content type, body and auth flag. |
-| 13 | `GITHUB_TOKEN` is set as the default `Authorization` header sent to the scan target (dormant until the CI path is wired). A pull request number is cut by one character. Every pull request in an org-owned repo is treated as a fork and its scan scope replaced by two guessed endpoints. | `GitHubActionsConfigAdapter.java:67-89`, `GitHubActionsEnvironment.java:96, 221-230` | Keep the token out of target requests, parse the PR number with a regex, detect forks from the event payload. These sit in code that is not yet reachable, so fix them before 2.1.0 wires it up. |
-| 14 | Dependabot alerts #11 and #12 (jackson-databind, 2.22.2 to 2.22.3). | `pom.xml` | Already open as PR #138. |
+| 1 | The soft-404 detector can suppress real endpoints. `(int)(shortest * 0.95)` truncates, so bodies of 2 to 19 characters tolerate one differing character and 1-character bodies always match. The length floor of 8 lets a baseline with up to 8 inserted characters count as identical (`{}` vs `{"a":1}`, `[]` vs `[{"id":1}]`). In discovery a wrong suppression removes the endpoint from the scan. Ran. | `SoftNotFoundDetector.java:379, 397`; call sites `EndpointDiscoveryService.java:359, 419`, `SecurityMisconfigurationTestCase.java:224`, `BrokenFunctionLevelAuthorizationTestCase.java:205` | Drop the floor of 8. Require `longest - shortest <= longest / 50` and `longest - (prefix + suffix) <= longest / 20`. Tests for 1, 2 and 19 character pairs and the insertion cases. Log at INFO when a hit is suppressed. |
+| 2 | The Basic Auth authenticator replaces an explicit `Authorization` header on a 401 and retries with no host check and no retry limit. With `--username` set, forged-JWT probes are re-sent as the real user. A target that always answers 401 produced 21 requests. Ran. | `HttpClient.java:729-738` | Return null if the request already carries `Authorization`, retry once, and only for the target host and port. |
+| 3 | SSRF can report CRITICAL on an API that only echoes its input. The indicator `computeMetadata` appears inside the probe payload itself. | `ServerSideRequestForgeryTestCase.java:42, 53, 103, 153, 209-216` | Require a 2xx, remove the payload text from the body before matching, compare with a baseline of the same shape. |
+| 4 | `RegexDosTestCase` turns any `IOException` into a HIGH ReDoS finding. A scan-timeout interrupt or a network error is reported as a hang. | `RegexDosTestCase.java:97-140` | Treat only `SocketTimeoutException` as the signal, re-probe the baseline after a failure, return no finding if the thread was interrupted. |
+| 5 | The cookie store is an unsynchronised `HashMap` used from many virtual threads. | `HttpClient.java:77, 743-781` | `ConcurrentHashMap` with `CopyOnWriteArrayList`. |
+| 6 | Reports contain raw session cookies and `Location` values in evidence and are written world-readable. | `BrokenAuthenticationTestCase.java:944-976`, `UnsafeConsumptionOfApisTestCase.java:219`, the four generators | Cheap half only: mask `Cookie` and `Set-Cookie` values in evidence and create report files with owner-only permissions. The full redactor ships with #127. |
+| 7 | Dependabot alerts #11 and #12 (jackson-databind 2.22.2 to 2.22.3). | `pom.xml` | Already open as PR #138. |
+| 8 | README build steps confuse newcomers (discussion #46, "class ASTFCli not found"). | `README.md` | Clarify the build and run steps. |
 
-Also in 2.0.2: correct the explanation in `docs/OPEN_ITEMS.md` for the scan timeout. Every task is a live virtual thread parked in the semaphore, not a queued job, and tasks interrupted mid-request are also counted as completed.
+Also in 2.0.2: correct `docs/OPEN_ITEMS.md` on the scan timeout. Every task is a live virtual thread parked in the semaphore, not a queued job, and tasks interrupted mid-request are also counted as completed.
 
 ## 2.1.0: trustworthy output and the committed features
 
-### Committed on the milestone
+Priority is marked must, should or could. If capacity runs short, cut from the bottom of this list upward and never cut a must.
 
-**#127 Evidence logging.** An opt-in flag that records each request and response. The audit found that `HttpClient` has eight request paths, all built from one base client, so one OkHttp application interceptor and one network interceptor on the base builder cover all of them, including the no-auth client and the Basic Auth retry the issue reporter could not see. Output is JSON Lines as the canonical file, with a HAR export for ZAP and browser tools. Secrets are redacted by default using the shared redaction helper from 2.0.2, including the exact values of the configured tokens and passwords. `--evidence-include-secrets` turns that off. Bodies are capped (start at 64 KB) with a truncation marker, and the file is written owner-only. Each exchange carries the id of the check that produced it, so a finding can point at the requests behind it.
+### Must
 
-**#129 GitHub Action and container image.** A Dockerfile, a published image, an `action.yml` that runs it, and SARIF upload. The audit found that neither integration package is reachable from the shipped jar today (`CICommand` is not registered and `ASTFCli` has no subcommands), so the Action should call the main CLI directly and not depend on that code. Before this ships, add `--fail-on <severity>` (today any finding, including INFO, exits 1) and a documented exit code for an incomplete scan.
+**#127 Evidence logging.** An opt-in flag that records each request and response. `HttpClient` has eight request paths, all built from one base client, so one OkHttp application interceptor and one network interceptor on the base builder cover all of them, including the no-auth client and the Basic Auth retry the issue reporter could not see. Output is JSON Lines as the canonical file with a HAR export for ZAP and browser tools. Secrets are redacted by default using the narrow redactor described above, including the exact configured secret values. `--evidence-include-secrets` turns that off. Bodies are capped (start at 64 KB) with a truncation marker, and files are owner-only. Each exchange carries the id of the check that produced it.
+
+**#129 GitHub Action and container image.** A Dockerfile, a published image, an `action.yml`, and SARIF upload. Neither integration package is reachable from the shipped jar today (`CICommand` is not registered), so the Action calls the main CLI and does not depend on that code. Before this ships, add `--fail-on <severity>`. Today any finding, including INFO, exits 1.
 
 **#120 NoSQL breadth.** Merge PR #136 once the requested changes are confirmed fixed.
 
-### Added because the audit found them
+**Honest scan status.** Add a status and the list of checks that did not run to the result, show both in all four report formats and the console summary, and exit with a distinct code (proposed: 3). Stop printing "N/N tasks completed" when tasks were interrupted. SARIF currently hardcodes success. Because exit codes affect CI users, `--fail-on` defaults to today's behavior and the change is listed under "behavior changes" in the release notes.
 
-**Partial scans must say so.** Add a scan status and the list of checks that did not run to the result, show both in all four report formats and the console summary, and exit with a distinct code (proposed: 3). Stop printing "N/N tasks completed" when tasks were interrupted. SARIF currently hardcodes success.
+**Unauthenticated means unauthenticated.** No-auth variants for the checks that claim "without authorization" but carry credentials: BFLA admin-path and method-escalation probes, "publicly accessible" debug, documentation and shadow-version probes, anonymous-attacker checks (brute force, user enumeration, NoSQL auth bypass), and the mTLS comparison. Findings that cannot be shown to be unauthenticated say "reachable with the configured credentials" at a lower severity. Also the cross-user BOLA identity: a request path that applies only the supplied identity, so the primary API key and cookie do not ride along.
 
-**Unauthenticated means unauthenticated.** Add no-auth variants for the remaining checks that claim "without authorization" but carry credentials: BFLA admin-path and method-escalation probes, "publicly accessible" debug, documentation and shadow-version probes, anonymous-attacker checks (brute force, user enumeration, NoSQL auth bypass), and the mTLS comparison. Findings that cannot be shown to be unauthenticated say "reachable with the configured credentials" at a lower severity.
+**Credentials stay on the target.** Host pinning: when a request goes to a host other than the target (a redirect, a spec URL named in Swagger UI HTML), strip every credential header and still make the request, so discovery is not reduced. Make `followRedirects` read its config value. Add the scope allowlist.
 
-**Silent errors.** 71 of 77 catch blocks in the test cases only log at debug and continue, so a broken check looks like a clean scan. Record each check as ran clean, errored or not applicable, and show the counts in the report.
+**Checks must not disappear.** Match auth and 2FA paths by whole path segment so `/tokens` and `/discount-codes` keep the missing-auth and JWT checks. Resolve OpenAPI effective security as the operation value, else the root value, else true.
 
-**Stable finding identity.** A fingerprint derived from check id, rule, method, normalised path and host, replacing the random UUID, plus a confidence field and deterministic report ordering. This is also what a later baseline or suppression file needs.
+**Configuration that does what it says.** Reject unknown config keys with a clear error. Fix the README and examples to match what the parser reads. Seven documented settings (`requestDelayMs`, `maxRequestsPerSecond`, `followRedirects`, `validateCertificates`, `excludePatterns`, `maxFindings`, `excludeSeverities`) are never read; implement each or remove it from the docs.
 
-**Aggregated reporting.** Group findings that share a root cause (the same missing headers or wildcard CORS on many endpoints) into one entry that lists every affected endpoint. No endpoint or check is dropped, only the presentation changes. The GraphQL suite currently runs once for every non-GraphQL endpoint and repeats its findings, so give it a scan-wide memo instead of an early return. Not measured: an earlier claim of "91 findings from crAPI, mostly repeats" could not be reproduced because the source reports were not available to the audit, so measure it again before citing a number.
+**Release hygiene.** CycloneDX SBOM, checksums, and a vulnerability reporting path in `SECURITY.md`.
 
-**Configuration that does what it says.** The README and example YAML use nested keys the parser does not read, and seven documented settings (`requestDelayMs`, `maxRequestsPerSecond`, `followRedirects`, `validateCertificates`, `excludePatterns`, `maxFindings`, `excludeSeverities`) are never used. Either implement each or reject unknown keys with a clear error. Fix the docs to match the parser.
+### Should
 
-**Safety for state-changing checks.** Tag each check by impact (read-only, state-changing, destructive, can affect availability). Add `--max-impact` and a scope allowlist of hosts and paths. The audit found that BOLA sends real DELETE, PUT and POST requests to ids 1, 2, 100, 999 and 0 with only the primary token. Any check that is held back is listed in the report.
+**Stable finding identity.** A fingerprint from check id, rule, method, normalised path and host, replacing the random UUID, plus a confidence field and deterministic report ordering.
 
-**Target protection.** A per-target health check that pauses when the target stops answering, a total call timeout, and `--max-rps` wired to the existing config field. One hung target consumed the full 30 minute budget three times during live testing.
+**Aggregated reporting.** Group findings that share a root cause (the same missing headers or wildcard CORS on many endpoints) into one entry listing every affected endpoint. The GraphQL suite currently runs once for every non-GraphQL endpoint and repeats its findings; give it a scan-wide memo, not an early return. An earlier claim of "91 findings from crAPI, mostly repeats" could not be reproduced because the source reports were missing, so measure again before citing a number.
 
-**Traceability regression run.** A script and compose file that start the four lab targets, run ASTF, and compare detected rows with `docs/TRACEABILITY.md`. Runnable locally and on a schedule in CI. Generate the test count and matrix totals in docs from the build instead of typing them.
+**Endpoint dedupe and URL joining.** One URL join helper to stop `http://host//path`, and `equals`/`hashCode` on endpoints with tests that prove no real endpoint is removed.
 
-**Quality gates.** Add JaCoCo, a Dependabot configuration for Maven and GitHub Actions, and a test run under a second Java version. Add real-`HttpClient` tests (MockWebServer) for behaviour that lives inside `HttpClient`, since mocked tests could not have caught the credential leak. Add tests for `ASTFCli`, which has none.
+**Silent errors.** 71 of 77 catch blocks in the test cases log at debug and continue, so a broken check looks like a clean scan. Count checks that errored and show the count and the first few causes in the report.
 
-### Existing open items to close in 2.1.0
+**Locale safety.** 92 calls to `toLowerCase()` or `toUpperCase()` without a locale. Use `Locale.ROOT` and run the suite once with `-Duser.language=tr`.
 
-#4 in `OPEN_ITEMS.md` (move the two remaining soft-404 sites to the shared detector and update their tests) and #5 (mark findings from the hardcoded fallback endpoint list with lower confidence). DVGA rows 19 and 21 describe gaps for which code exists (`testLoginMutationBruteForce`, `testStackTraceDisclosure`), but a live check of those two did not complete because the DVGA container crashed during the run. Re-run them against a stable DVGA before closing #117 and #118 or editing the matrix. The crash is itself worth investigating.
+**Remaining soft-404 sites and fallback confidence.** `OPEN_ITEMS.md` #4 and #5.
+
+### Could
+
+**Traceability regression script.** A compose file and a script that start the four lab targets, run ASTF and compare detected rows with `docs/TRACEABILITY.md`. Generate the test count and matrix totals in docs from the build.
+
+**Target protection.** A total call timeout and `--max-rps` wired to the existing field. One hung target used the full 30 minute budget three times during live testing.
+
+**Quality gates.** JaCoCo, a Dependabot configuration for Maven and GitHub Actions, a second Java version in CI, real-`HttpClient` tests for behavior inside `HttpClient`, and tests for `ASTFCli`, which has none.
+
+**GitHub integration code fixes.** `GITHUB_TOKEN` is set as the default `Authorization` header sent to the target, a pull request number is cut by one character, and every pull request in an org repo is treated as a fork. Fix these only when that code is wired up, since it is not reachable today.
+
+### Close with care
+
+DVGA rows 19 and 21 describe gaps for which code exists (`testLoginMutationBruteForce`, `testStackTraceDisclosure`), but a live check of both did not complete because the DVGA container crashed during the run. Re-run them against a stable DVGA before closing #117 and #118 or editing the matrix. The crash is worth its own investigation.
 
 ## 2.2: reach, after the core is trustworthy
 
-- Spec-first discovery: full OpenAPI 3 (parameters, request bodies, security schemes, `$ref`), a `--spec` flag for a local file or any URL, and Postman collection import. Today a spec is only probed at ten fixed paths and only paths and methods are read. crAPI needed its Postman collection converted by hand to get meaningful coverage.
+- Spec-first discovery: full OpenAPI 3 (parameters, request bodies, security schemes, `$ref`), a `--spec` flag for a local file or any URL, and Postman collection import. Today a spec is probed at ten fixed paths and only paths and methods are read. crAPI needed its Postman collection converted by hand.
 - Findings baseline and suppression file, with a reason and an expiry, using the 2.1.0 fingerprint.
-- Login-flow support so a user configures a credential sequence once instead of pasting a token.
+- Per-check impact tagging and `--max-impact`, with held-back checks listed in the report.
+- Login-flow support so a user configures a credential sequence once.
 - Multi-step flows (#103), starting with chained requests where a value from one response feeds the next.
-- A plugin interface for custom checks, but only after a stable context object and a finding builder exist. Today the `TestCase` contract exposes mutable internal classes and there are 64 hand-written finding constructors.
-- The testable subset of the OWASP LLM Top 10 listed in the roadmap.
+- A plugin interface for custom checks, after a stable context object and a finding builder exist.
+- The testable subset of the OWASP LLM Top 10 from the roadmap.
 - The remaining DVGA and crAPI enhancement issues (#115, #116, #119, #121) as each is scoped.
-
-Thin output formats that need no service are fine here, for example JUnit XML or a DefectDojo import file. Pushing to Jira or DefectDojo over their APIs is acceptable only if it stays a small optional module.
-
-## Not planned
-
-A web interface, a findings database, a scheduler, a hosted service, distributed workers, a plugin marketplace. Each needs a running service or a different team size, and none is needed for the tool to be the reference scanner for this problem.
 
 ## Release criteria
 
-- 2.0.2: every row above has a test that fails before the fix, the full suite passes, and the suite passes once under `-Duser.language=tr`.
-- 2.1.0: the traceability regression run matches the matrix, no open Dependabot alerts of high severity, a timed-out scan exits with the incomplete code and lists what did not run, evidence files contain none of the configured secrets in a test that searches for them, and the Action runs end to end in a sample repository.
-- 2.2: each feature is live-verified against a real target before the matrix is updated, as for every change in this project.
+- 2.0.2: every row has a test that fails before the fix, the full suite passes, and the release notes list behavior changes (there should be none beyond the fixed results).
+- 2.1.0: a timed-out scan exits with the incomplete code and lists what did not run, a test that searches evidence files finds none of the configured secrets, the Action runs end to end in a sample repository, no open high-severity Dependabot alerts, and each change is live-verified against a real target before the matrix is updated, as for every change in this project.
+- 2.2: the same live verification for each feature.
 
 ## Open decisions for the maintainers
 
 1. Whether 2.0.2 ships before or together with PRs #136 and #138.
-2. The exit code for an incomplete scan, and whether `--fail-on` defaults to off.
+2. The incomplete-scan exit code, and whether `--fail-on` stays off by default.
 3. Uniform CRITICAL for every confirmed NoSQL bypass (settled in the PR #136 discussion) versus a confidence field in 2.1.0.
-4. How much of the 2.1.0 list two maintainers can carry. If capacity runs short, cut in this order: traceability regression run, target protection, `--max-impact`, then aggregated reporting. Do not cut the 2.0.2 fixes, partial-scan reporting, or the no-auth variants.
+4. How much of 2.1.0 two maintainers can carry. The cut order is stated above, from the bottom of Could upward.
 
 ## Sources
 
