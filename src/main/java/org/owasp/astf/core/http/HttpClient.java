@@ -728,6 +728,23 @@ public class HttpClient {
      */
     private void configureBasicAuth(OkHttpClient.Builder builder) {
         Authenticator authenticator = (route, response) -> {
+            // Never replace an Authorization header the caller set explicitly (e.g. forged-token probes).
+            if (response.request().header("Authorization") != null) {
+                return null;
+            }
+            // Retry at most once: give up if an earlier attempt in this chain already got a 401.
+            for (Response prior = response.priorResponse(); prior != null; prior = prior.priorResponse()) {
+                if (prior.code() == 401) {
+                    return null;
+                }
+            }
+            // Only send the credentials to the configured target host and port, never to a redirect target.
+            HttpUrl target = HttpUrl.parse(config.getTargetUrl());
+            HttpUrl requestUrl = response.request().url();
+            if (target == null || !target.host().equalsIgnoreCase(requestUrl.host())
+                    || target.port() != requestUrl.port()) {
+                return null;
+            }
             String credential = Credentials.basic(config.getBasicAuthUsername(), config.getBasicAuthPassword());
             return response.request().newBuilder()
                     .header("Authorization", credential)

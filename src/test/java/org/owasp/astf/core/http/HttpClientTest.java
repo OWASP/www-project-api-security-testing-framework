@@ -471,4 +471,78 @@ class HttpClientTest {
         assertTrue(successCalled.get());
         assertEquals(200, capturedStatus.get());
     }
+
+    // -------------------------------------------------------------------------
+    // Basic Auth authenticator
+    // -------------------------------------------------------------------------
+
+    private HttpClient basicAuthClient() {
+        ScanConfig c = new ScanConfig();
+        c.setTargetUrl(server.url("/").toString());
+        c.setBasicAuthUsername("user");
+        c.setBasicAuthPassword("pass");
+        return new HttpClient(c);
+    }
+
+    @Test
+    @DisplayName("Basic Auth should not replace an explicit Authorization header on 401")
+    void testBasicAuthDoesNotReplaceExplicitAuthorization() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401));
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(),
+                Map.of("Authorization", "Bearer forged"));
+
+        assertEquals(401, response.getStatusCode());
+        assertEquals(1, server.getRequestCount());
+        assertEquals("Bearer forged", server.takeRequest().getHeader("Authorization"));
+    }
+
+    @Test
+    @DisplayName("Basic Auth should retry at most once against an always-401 server")
+    void testBasicAuthRetriesAtMostOnce() throws Exception {
+        for (int i = 0; i < 30; i++) {
+            server.enqueue(new MockResponse().setResponseCode(401));
+        }
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+        assertEquals(401, response.getStatusCode());
+        assertTrue(server.getRequestCount() <= 2, "requests: " + server.getRequestCount());
+    }
+
+    @Test
+    @DisplayName("Basic Auth credentials should not be sent to a different host after a redirect")
+    void testBasicAuthNotForwardedAfterRedirect() throws Exception {
+        MockWebServer other = new MockWebServer();
+        other.start();
+        try {
+            other.enqueue(new MockResponse().setResponseCode(401));
+            other.enqueue(new MockResponse().setResponseCode(200));
+            server.enqueue(new MockResponse().setResponseCode(302)
+                    .setHeader("Location", other.url("/stolen").toString()));
+
+            HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+            assertEquals(401, response.getStatusCode());
+            assertEquals(1, other.getRequestCount());
+            assertNull(other.takeRequest().getHeader("Authorization"));
+        } finally {
+            other.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("Basic Auth should succeed against a server that challenges once")
+    void testBasicAuthSucceedsAfterChallenge() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401).setHeader("WWW-Authenticate", "Basic realm=\"t\""));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+        assertEquals(200, response.getStatusCode());
+        assertEquals(2, server.getRequestCount());
+        server.takeRequest();
+        assertEquals("Basic dXNlcjpwYXNz", server.takeRequest().getHeader("Authorization"));
+    }
 }
