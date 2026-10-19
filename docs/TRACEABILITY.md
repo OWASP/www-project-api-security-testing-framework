@@ -8,9 +8,9 @@ Four research passes pulled the **official, documented** vulnerability catalog s
 |---|---|---|---|
 | VAmPI | **6** | 9 | README + author's companion blog post |
 | crAPI | **4** | 18 | `docs/challenges.md` + `docs/challengeSolutions.md` |
-| DVGA | **8** | 22 | 22 in-app solution pages (`templates/partials/solutions/`) |
+| DVGA | **9** | 22 | 22 in-app solution pages (`templates/partials/solutions/`) |
 | gRPC Goat | **1** | 9 | Per-lab `Readme.md` ([rootxjs/grpc-goat](https://github.com/rootxjs/grpc-goat)) |
-| **Total** | **19** | **58** | — |
+| **Total** | **20** | **58** | — |
 
 Legend: ✅ Hit · ❌ Miss · ⚠️ Partial · ➖ N/A (not applicable to this run) · 🚫 Not in Scope (a different discipline entirely, not an API-request-testable concern) · `structural` (a generic scanner plausibly could catch this) · `business logic` (requires domain knowledge no generic scanner has, but is still conceptually an API security concern)
 
@@ -18,13 +18,13 @@ Legend: ✅ Hit · ❌ Miss · ⚠️ Partial · ➖ N/A (not applicable to this
 
 ## How to read these numbers
 
-**19 of 58 sounds low until you know what the other 40 actually are.** Almost every security scanner on the market claims "100% OWASP Top 10 coverage" — and almost none of them publish a page like this one to back it up. We'd rather you distrust an unverified number than trust one, so here's the honest breakdown instead:
+**20 of 58 sounds low until you know what the other 38 actually are.** Almost every security scanner on the market claims "100% OWASP Top 10 coverage" — and almost none of them publish a page like this one to back it up. We'd rather you distrust an unverified number than trust one, so here's the honest breakdown instead:
 
 - **Roughly a third of the gap is genuinely out of reach for *any* HTTP-request-based scanner** — commercial or open source. Business-logic semantics (crAPI's balance and coupon-quantity challenges), filesystem permission checks, and packet-level credential interception aren't things a scanner can find by sending API requests, no matter how good it is. These aren't ASTF weaknesses; they're the boundary of what this entire category of tool can do.
 - **Another chunk is untested, not undetectable** — labs and challenges this round simply didn't point the scanner at yet (most of gRPC Goat, several crAPI endpoints). The detection logic exists or is close; it just hasn't been run against that specific target.
 - **The remainder — the real, fixable gaps — is exactly what's tracked as open issues** and gets closed round over round: this pass alone took the number from 10 to 18 (+80%), and every one of those new hits was confirmed live against a real running vulnerable application, including one real, reproduced account takeover (not just a scanner reporting a 2xx status code).
 
-The trend line is the part worth paying attention to: two rounds ago this page would have shown 10. It shows 19 now. The methodology — pulling each target's *own* documented vulnerability list and tracing every finding back to it — doesn't change between rounds, so the growth is real, not a relabeling. Full reasoning and every individual item are below.
+The trend line is the part worth paying attention to: two rounds ago this page would have shown 10. It shows 20 now. The methodology — pulling each target's *own* documented vulnerability list and tracing every finding back to it — doesn't change between rounds, so the growth is real, not a relabeling. Full reasoning and every individual item are below.
 
 ---
 
@@ -83,7 +83,7 @@ crAPI's own docs also mention 2-3 undocumented "secret" challenges with no publi
 
 ---
 
-## 3 · DVGA — 8 of 22 documented vulnerabilities detected *(was 7 of 22)*
+## 3 · DVGA — 9 of 22 documented vulnerabilities detected *(was 7 of 22 in the previous header, which was one behind the table: 8 rows were already marked Hit)*
 
 Source: DVGA's 22 in-app solution pages (`templates/partials/solutions/solution_1.html`–`22`), the authoritative per-vulnerability documentation — more detailed than the README. Updated after live-verifying [PR #104](https://github.com/OWASP/www-project-api-security-testing-framework/pull/104)'s GraphQL fixes.
 
@@ -107,10 +107,10 @@ Source: DVGA's 22 in-app solution pages (`templates/partials/solutions/solution_
 | 16 | GraphiQL Protection Bypass (cookie) | — | ➖ N/A | New cookie-bypass variant of `testGraphiQLExposure` (#102) ran — found nothing, consistent with #7 above (no GraphiQL UI exposed in this config at all, cookie or not). |
 | 17 | Query Deny-List Bypass (operation wrapping) | `systemHealth` | ❌ Miss | New `testOperationDenyListBypass` check (#102) ran but found no sensitive-sounding field name (matching keywords like admin/debug/system) to test a bypass against in this schema — a scope limitation of the keyword heuristic, not necessarily a true negative. |
 | 18 | Arbitrary File Write / Path Traversal | `uploadPaste(filename)` | ✅ Hit | "GraphQL Resolver Injection Vulnerability" on `uploadPaste` — one of the 3 mutations confirmed in the same run that directly demonstrates #100's breadth fix (previously only the first vulnerable mutation found would ever be reported). |
-| 19 | Weak Password (Brute Force) | `systemDiagnostics` | ⚠️ Partial *(was ❌ Miss)* | The old note is out of date: the GraphQL-shaped brute-force check (`testLoginMutationBruteForce`) exists and fires live. On 2026-10-13 a full scan of DVGA on main reported "No Account Lockout or Rate Limiting on GraphQL Login Mutation" for the `login` mutation, and a hand replay of 12 wrong passwords for `admin` returned the same "Authentication Failure" every time with no lockout. Partial because DVGA's documented target here is `systemDiagnostics`, and a weak-password test against that field was not run. |
+| 19 | Weak Password (Brute Force) | `systemDiagnostics` | ⚠️ Partial *(was ❌ Miss)* | The old note is out of date (issue #117): the GraphQL-shaped brute-force check (`testLoginMutationBruteForce`) exists and fires live. On 2026-10-13 a full scan of DVGA on main reported "No Account Lockout or Rate Limiting on GraphQL Login Mutation" for the `login` mutation, and a hand replay of 12 wrong passwords for `admin` returned the same "Authentication Failure" every time with no lockout. Partial because DVGA's documented target here is `systemDiagnostics`, and a weak-password test against that field was not run. |
 | 20 | Circular Fragment Attack (DoS) | fragments | ✅ Hit | "GraphQL Circular Fragment Denial of Service" — new `testCircularFragmentAttack` (#101), confirmed live. |
-| 21 | Stack Trace / Debug Error Disclosure | any malformed query | ⚠️ Partial *(was ❌ Miss)* | The old note is out of date: `testStackTraceDisclosure` is wired into the GraphQL test case. Before this fix it found nothing on DVGA. DVGA's resolver returns a raw `sqlite3.OperationalError` including the full `[SQL: ...]` statement when a quote reaches `pastes(filter)`, and the probes never reached a resolver and the indicator list had no database markers (issue #117). Now a quote is sent into every query field's string argument and database-error markers are matched; a full scan on 2026-10-13 reports "GraphQL Stack Trace / Debug Error Disclosure" on `pastes`, matching a hand replay. Partial because DVGA's classic Python traceback was not observed: on this container, malformed and type-invalid queries return clean validation messages. |
-| 22 | JWT Token Forge | `me(token)` | ✅ Hit *(was ❌ Miss)* | "GraphQL Argument-Based Authentication Bypass" on `query me`, reported in two consecutive full scans on 2026-10-13. Confirmed by hand: `me(token:"<alg none JWT, identity admin>")` returns `{"id":"1","username":"admin"}`, while an empty or garbage token returns a decode error. The check was already in the code; the likely reason earlier scans never reported it is that the circular-fragment probe crashed DVGA before it ran (the probe now runs last), but that cause is inferred, not isolated. |
+| 21 | Stack Trace / Debug Error Disclosure | any malformed query | ⚠️ Partial *(was ❌ Miss)* | The old note is out of date: `testStackTraceDisclosure` is wired into the GraphQL test case. Before this fix it found nothing on DVGA. DVGA's resolver returns a raw `sqlite3.OperationalError` including the full `[SQL: ...]` statement when a quote reaches `pastes(filter)`, and the probes never reached a resolver and the indicator list had no database markers (issue #118). Now a quote is sent into every query field's string argument and database-error markers are matched; a full scan on 2026-10-13 reports "GraphQL Stack Trace / Debug Error Disclosure" on `pastes`, matching a hand replay. Partial because DVGA's classic Python traceback was not observed: on this container, malformed and type-invalid queries return clean validation messages. |
+| 22 | JWT Token Forge | `me(token)` | ✅ Hit *(was ❌ Miss)* | (issue #119) "GraphQL Argument-Based Authentication Bypass" on `query me`, reported in two consecutive full scans on 2026-10-13. Confirmed by hand: `me(token:"<alg none JWT, identity admin>")` returns `{"id":"1","username":"admin"}`, while an empty or garbage token returns a decode error. The check was already in the code; the likely reason earlier scans never reported it is that the circular-fragment probe crashed DVGA before it ran (the probe now runs last), but that cause is inferred, not isolated. |
 
 ---
 
@@ -119,7 +119,7 @@ Source: DVGA's 22 in-app solution pages (`templates/partials/solutions/solution_
 
 - **Duplicate findings:** the scanner calls the GraphQL test case once per discovered endpoint, and every endpoint resolved to the same `/graphql` URL, so each finding appeared once per endpoint (20 findings, 8 of them "Resolver Injection" for 4 real fields). The suite now runs once per GraphQL URL per scan; every endpoint is still covered.
 - **Target crash hiding later checks:** the circular-fragment probe kills DVGA (container exit code 139). It ran before the stack-trace, brute-force and argument-bypass checks, which then hit a dead server, and the report said nothing. That is why finding counts differed between identical runs (20, then 26). The probe now runs last, waits for the target to answer a trivial query again, and records in its evidence whether it recovered.
-- **Database error markers missing (#117):** see row 21.
+- **Database error markers missing (#118):** see row 21.
 
 After the fix, two consecutive full scans reported 16 findings each with identical content, and DVGA restarted once per scan instead of twice. Nothing was removed: every check still runs.
 
@@ -154,7 +154,7 @@ The one number worth treating as a real defect rather than a scoping choice: **V
 
 ## 6 · Bottom line
 
-Across 58 officially documented vulnerabilities/challenges/labs in these four targets, ASTF's current release catches **19** — roughly 1 in 3, up from 10 (1 in 6) two rounds ago. Every hit added since then was live-verified against the real running target, not just unit-tested: VAmPI's cross-user BOLA (including a real password takeover — confirmed by actually logging in with the changed password), SQL injection, and ReDoS findings were reproduced with real curl replays against real error pages; DVGA's alias-based DoS, circular-fragment DoS, and query-field resolver injection were confirmed live; and crAPI's BFLA privilege-tier-substitution finding was confirmed end-to-end against the real public demo (crapi.apisec.ai) with a freshly registered account. This is not a criticism of the work done across earlier rounds; it's a statement about how large the total surface actually is once you trace back to each target's own documentation instead of stopping at "the scan completed and found some things."
+Across 58 officially documented vulnerabilities/challenges/labs in these four targets, ASTF's current release catches **20** — roughly 1 in 3, up from 10 (1 in 6) two rounds ago. Every hit added since then was live-verified against the real running target, not just unit-tested: VAmPI's cross-user BOLA (including a real password takeover — confirmed by actually logging in with the changed password), SQL injection, and ReDoS findings were reproduced with real curl replays against real error pages; DVGA's alias-based DoS, circular-fragment DoS, and query-field resolver injection were confirmed live; and crAPI's BFLA privilege-tier-substitution finding was confirmed end-to-end against the real public demo (crapi.apisec.ai) with a freshly registered account. This is not a criticism of the work done across earlier rounds; it's a statement about how large the total surface actually is once you trace back to each target's own documentation instead of stopping at "the scan completed and found some things."
 
 This round's robustness pass closed several gaps found by asking "how confident are we that ASTF misses nothing structural in scope?" rather than by re-running old scans:
 
