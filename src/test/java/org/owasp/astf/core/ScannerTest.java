@@ -10,7 +10,11 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.owasp.astf.core.config.ScanConfig;
+import org.owasp.astf.core.http.HttpClient;
+import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.ScanResult;
+import org.owasp.astf.testcases.TestCase;
+import org.owasp.astf.testcases.TestCaseRegistry;
 
 import java.io.IOException;
 import java.util.List;
@@ -178,6 +182,98 @@ class ScannerTest {
                         ") should never exceed the configured thread limit (" + maxThreads + ")");
         assertTrue(maxObservedConcurrency.get() > 1,
                 "Test should actually exercise concurrency (not just happen to run serially)");
+    }
+
+    @Test
+    @DisplayName("Should report tasks cut short by the timeout as abandoned, not completed (regression)")
+    void testTimeoutAbandonedTasksAreNotCountedAsCompleted() {
+        AtomicInteger finished = new AtomicInteger(0);
+        TestCaseRegistry custom = new TestCaseRegistry() {
+            @Override
+            public List<TestCase> getEnabledTestCases(ScanConfig cfg) {
+                return List.of(new SleepingTestCase("FAST", 0, finished),
+                        new SleepingTestCase("SLOW", 30_000, finished));
+            }
+        };
+
+        ScanConfig config = buildConfig();
+        config.setThreads(2);
+        for (int i = 0; i < 5; i++) {
+            config.addEndpoint(new EndpointInfo("/api/resource" + i, "GET"));
+        }
+
+        Scanner scanner = new Scanner(config, custom);
+        scanner.setTimeoutMillisForTesting(1500);
+        scanner.scan();
+
+        int total = scanner.getTotalTasks();
+        assertEquals(10, total);
+        assertTrue(scanner.getAbandonedTasks() > 0, "Slow tasks must be reported as abandoned");
+        assertEquals(finished.get(), scanner.getCompletedTasks(),
+                "Completed must equal the tasks that actually finished");
+        assertTrue(scanner.getCompletedTasks() < total, "Completed must not reach the total");
+        assertEquals(total, scanner.getCompletedTasks() + scanner.getAbandonedTasks(),
+                "Every task is either completed or abandoned");
+    }
+
+    @Test
+    @DisplayName("Should report zero abandoned tasks on a clean scan")
+    void testCleanScanHasNoAbandonedTasks() {
+        AtomicInteger finished = new AtomicInteger(0);
+        TestCaseRegistry custom = new TestCaseRegistry() {
+            @Override
+            public List<TestCase> getEnabledTestCases(ScanConfig cfg) {
+                return List.of(new SleepingTestCase("FAST", 0, finished));
+            }
+        };
+        ScanConfig config = buildConfig();
+        config.addEndpoint(new EndpointInfo("/api/a", "GET"));
+        config.addEndpoint(new EndpointInfo("/api/b", "GET"));
+
+        Scanner scanner = new Scanner(config, custom);
+        scanner.scan();
+
+        assertEquals(2, scanner.getCompletedTasks());
+        assertEquals(0, scanner.getAbandonedTasks());
+    }
+
+    private static class SleepingTestCase implements TestCase {
+        private final String id;
+        private final long sleepMillis;
+        private final AtomicInteger finished;
+
+        SleepingTestCase(String id, long sleepMillis, AtomicInteger finished) {
+            this.id = id;
+            this.sleepMillis = sleepMillis;
+            this.finished = finished;
+        }
+
+        @Override
+        public String getId() {
+            return id;
+        }
+
+        @Override
+        public String getName() {
+            return id;
+        }
+
+        @Override
+        public String getDescription() {
+            return id;
+        }
+
+        @Override
+        public List<Finding> execute(EndpointInfo endpoint, HttpClient httpClient) throws IOException {
+            try {
+                Thread.sleep(sleepMillis);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted", e);
+            }
+            finished.incrementAndGet();
+            return List.of();
+        }
     }
 
     // -------------------------------------------------------------------------

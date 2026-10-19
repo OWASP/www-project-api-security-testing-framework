@@ -46,6 +46,10 @@ public class Scanner {
     // Scan metrics and tracking
     private final AtomicInteger completedTasks = new AtomicInteger(0);
     private final AtomicInteger totalTasks = new AtomicInteger(0);
+    // Tasks cut short by the scan timeout or executor shutdown (never counted as completed)
+    private final AtomicInteger abandonedTasks = new AtomicInteger(0);
+    // Overrides the minute-granularity config timeout; tests only
+    private long timeoutMillisOverride = -1;
     private final Map<Severity, AtomicInteger> findingsBySeverity = new ConcurrentHashMap<>();
     private LocalDateTime scanStartTime;
     private LocalDateTime scanEndTime;
@@ -56,9 +60,14 @@ public class Scanner {
      * @param config The scan configuration
      */
     public Scanner(ScanConfig config) {
+        this(config, new TestCaseRegistry());
+    }
+
+    // Package-private so tests can supply their own test cases.
+    Scanner(ScanConfig config, TestCaseRegistry testCaseRegistry) {
         this.config = config;
         this.httpClient = new HttpClient(config);
-        this.testCaseRegistry = new TestCaseRegistry();
+        this.testCaseRegistry = testCaseRegistry;
         this.discoveryService = new EndpointDiscoveryService(config, httpClient);
 
         // Initialize severity counters
@@ -163,9 +172,10 @@ public class Scanner {
                                 concurrencyLimiter.acquire();
                             } catch (InterruptedException ie) {
                                 Thread.currentThread().interrupt();
-                                completedTasks.incrementAndGet();
+                                abandonedTasks.incrementAndGet();
                                 return;
                             }
+                            boolean abandoned = false;
                             try {
                                 logger.debug("Executing {} on {}", testCase.getId(), endpoint);
                                 List<Finding> testFindings = testCase.execute(endpoint, httpClient);
@@ -184,15 +194,21 @@ public class Scanner {
                                             testFindings.size(), testCase.getId(), endpoint);
                                 }
                             } catch (Exception e) {
+                                // A task interrupted mid-request by the timeout/shutdown did not finish
+                                abandoned = Thread.currentThread().isInterrupted();
                                 logger.error("Error executing test case {} on endpoint {}: {}",
                                         testCase.getId(), endpoint.getPath(), e.getMessage());
                                 logger.debug("Exception details:", e);
                             } finally {
                                 concurrencyLimiter.release();
-                                // Update progress
-                                int completed = completedTasks.incrementAndGet();
-                                if (completed % 10 == 0 || completed == totalTasks.get()) {
-                                    logProgress();
+                                if (abandoned || Thread.currentThread().isInterrupted()) {
+                                    abandonedTasks.incrementAndGet();
+                                } else {
+                                    // Update progress
+                                    int completed = completedTasks.incrementAndGet();
+                                    if (completed % 10 == 0 || completed == totalTasks.get()) {
+                                        logProgress();
+                                    }
                                 }
                             }
                         }, executor);
@@ -203,7 +219,9 @@ public class Scanner {
 
                 // Wait for all tasks to complete or timeout
                 CompletableFuture.allOf(futures.toArray(new CompletableFuture[0]))
-                        .orTimeout(config.getTimeoutMinutes(), TimeUnit.MINUTES)
+                        .orTimeout(timeoutMillisOverride >= 0
+                                ? timeoutMillisOverride
+                                : TimeUnit.MINUTES.toMillis(config.getTimeoutMinutes()), TimeUnit.MILLISECONDS)
                         .exceptionally(ex -> {
                             logger.warn("Scan interrupted or timed out before completion: {}", ex.getMessage());
                             return null;
@@ -222,6 +240,12 @@ public class Scanner {
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                 }
+            }
+
+            // Anything not completed (including tasks that never terminated) was abandoned.
+            abandonedTasks.set(totalTasks.get() - completedTasks.get());
+            if (abandonedTasks.get() > 0) {
+                logProgress();
             }
 
             logger.info("Scan completed. Found {} issues: {} critical, {} high, {} medium, {} low, {} info",
@@ -245,6 +269,23 @@ public class Scanner {
         return result;
     }
 
+    // Package-private accessors for tests.
+    void setTimeoutMillisForTesting(long millis) {
+        this.timeoutMillisOverride = millis;
+    }
+
+    int getCompletedTasks() {
+        return completedTasks.get();
+    }
+
+    int getAbandonedTasks() {
+        return abandonedTasks.get();
+    }
+
+    int getTotalTasks() {
+        return totalTasks.get();
+    }
+
     /**
      * Attempts to discover API endpoints for the target.
      *
@@ -262,8 +303,14 @@ public class Scanner {
         int total = totalTasks.get();
         double percentComplete = (double) completed / total * 100;
 
-        logger.info("Scan progress: {}% ({}/{} tasks completed)",
-                String.format("%.1f", percentComplete), completed, total);
+        int abandoned = abandonedTasks.get();
+        if (abandoned > 0) {
+            logger.info("Scan progress: {}% ({}/{} tasks completed, {} abandoned at timeout)",
+                    String.format("%.1f", percentComplete), completed, total, abandoned);
+        } else {
+            logger.info("Scan progress: {}% ({}/{} tasks completed)",
+                    String.format("%.1f", percentComplete), completed, total);
+        }
     }
 
     /**
