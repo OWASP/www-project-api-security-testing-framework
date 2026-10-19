@@ -27,7 +27,7 @@ ASTF has been validated against real, intentionally-vulnerable API targets — [
 - **Multiple auth modes** — Bearer token (including a second, distinct identity for cross-user testing), API key, Basic auth, mutual TLS client certificates, custom headers
 - **Four output formats** — HTML (human review), JSON (processing), SARIF (GitHub Code Scanning), XML
 - **CI/CD ready** — GitHub Actions workflow included; exits with code `1` when findings detected for pipeline gating
-- **350 passing unit tests** — fully test-covered implementation
+- **Full unit test suite on every pull request** — fully test-covered implementation
 - **Proven on real targets, with an honest scorecard** — validated against OWASP crAPI, VAmPI, and DVGA, with a public [traceability matrix](https://github.com/OWASP/www-project-api-security-testing-framework/blob/main/docs/TRACEABILITY.md) showing exactly what is and isn't detected against each target's own documented vulnerability list, not just an unqualified "100% coverage" claim
 
 ## Test Case Coverage
