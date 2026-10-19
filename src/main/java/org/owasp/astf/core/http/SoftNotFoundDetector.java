@@ -376,7 +376,7 @@ public class SoftNotFoundDetector {
             }
             int longest = Math.max(left.length(), right.length());
             int shortest = Math.min(left.length(), right.length());
-            if (longest - shortest > Math.max(8, longest / 50)) {
+            if (longest - shortest > longest / 50) {
                 return false;
             }
 
@@ -394,7 +394,16 @@ public class SoftNotFoundDetector {
                 suffix++;
             }
 
-            return prefix + suffix >= (int) (shortest * 0.95);
+            // Integer division on purpose: a body shorter than 20 characters tolerates no
+            // differing character at all, so short payloads like "{}" vs "{\"a\":1}" stay distinct.
+            int differing = longest - (prefix + suffix);
+            boolean nearlyIdentical = differing <= longest / 20;
+            if (nearlyIdentical) {
+                logger.info("Response body matches the unknown-path baseline within tolerance "
+                        + "({} of {} characters differ); treating it as the catch-all answering.",
+                        differing, longest);
+            }
+            return nearlyIdentical;
         }
     }
 }
