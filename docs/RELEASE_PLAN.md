@@ -1,6 +1,6 @@
 # ASTF release plan: 2.0.2, 2.1.0, 2.2
 
-Status: draft for maintainer review. Date: TBD.
+Status: draft for maintainer review. Date: TBD. Everything below, including the decision record and the refused list, is a proposal until the maintainers sign off. Nothing here is a committed scope or date.
 
 This plan covers three releases. It is built from the v2.1.0 milestone (#127, #129, #120), the Phase 6 roadmap in `index.md`, `docs/OPEN_ITEMS.md`, the open issues and PR review comments, and a code audit of `main` at commit 172f701. Each audit finding was checked by reading the code and, where noted, by running it. None of the fixes below have been implemented yet, and the effort sizes are estimates. Items that could not be verified are marked.
 
@@ -10,7 +10,7 @@ ASTF is a command line tool. A user gives it a target, optional credentials and 
 
 The core is local and file-based: no database, no accounts, no hosted component, and no state between runs other than files the user asks for. A local report viewer that reads those files is acceptable if users need one (see 2.2). What the project does not take on is anything that has to keep running for other people, or needs a database behind it. Nothing in this plan changes that.
 
-One rule from `CLAUDE.md` applies to every item: a change must never cause an endpoint or test case to be skipped. When a safety control holds a check back, the report lists what did not run and why.
+One project rule applies to every item: a change must never cause an endpoint or test case to be skipped. When a safety control holds a check back, the report lists what did not run and why.
 
 ## How we decided what goes in
 
@@ -21,6 +21,8 @@ The goal is a scanner a security engineer can stand behind in a report, so corre
 3. Can it be built and tested locally, without a hosted service or a database? If not, it is out of scope.
 
 ## Decision record: what we keep, what we defer, what we refuse
+
+These are proposed decisions for the maintainers to confirm or change.
 
 ### Good for us, keep
 
@@ -63,7 +65,7 @@ A patch must be small diffs nobody has to think hard about, and it must not chan
 | 4 | `RegexDosTestCase` turns any `IOException` into a HIGH ReDoS finding. A scan-timeout interrupt or a network error is reported as a hang. | `RegexDosTestCase.java:97-140` | Treat only `SocketTimeoutException` as the signal, re-probe the baseline after a failure, return no finding if the thread was interrupted. |
 | 5 | The cookie store is an unsynchronised `HashMap` used from many virtual threads. | `HttpClient.java:77, 743-781` | `ConcurrentHashMap` with `CopyOnWriteArrayList`. |
 | 6 | Reports contain raw session cookies and `Location` values in evidence and are written world-readable. | `BrokenAuthenticationTestCase.java:944-976`, `UnsafeConsumptionOfApisTestCase.java:219`, the four generators | Cheap half only: mask `Cookie` and `Set-Cookie` values in evidence and create report files with owner-only permissions. The full redactor ships with #127. |
-| 7 | Dependabot alerts #11 and #12 (jackson-databind 2.22.2 to 2.22.3). | `pom.xml` | Already open as PR #138. |
+| 7 | Dependabot alerts #11 and #12 (jackson-databind 2.22.2 to 2.22.3). | `pom.xml` | Done: merged as PR #138 on 19 October. |
 | 8 | README build steps confuse newcomers (discussion #46, "class ASTFCli not found"). | `README.md` | Clarify the build and run steps. |
 
 Also in 2.0.2: correct `docs/OPEN_ITEMS.md` on the scan timeout. Every task is a live virtual thread parked in the semaphore, not a queued job, and tasks interrupted mid-request are also counted as completed.
@@ -78,7 +80,7 @@ Priority is marked must, should or could. If capacity runs short, cut from the b
 
 **#129 GitHub Action and container image.** A Dockerfile, a published image, an `action.yml`, and SARIF upload. Neither integration package is reachable from the shipped jar today (`CICommand` is not registered), so the Action calls the main CLI and does not depend on that code. Before this ships, add `--fail-on <severity>`. Today any finding, including INFO, exits 1.
 
-**#120 NoSQL breadth.** Merge PR #136 once the requested changes are confirmed fixed.
+**#120 NoSQL breadth.** PR #136 merged on 19 October. #120 stays open until the generic detection is live-verified: crAPI row 12 has not been re-verified and may remain a miss. A full scan of VAmPI after the merge produced CRITICAL false positives on `/users/v1/login` (issue #142), so that fix comes first.
 
 **Honest scan status.** Add a status and the list of checks that did not run to the result, show both in all four report formats and the console summary, and exit with a distinct code (proposed: 3). Stop printing "N/N tasks completed" when tasks were interrupted. SARIF currently hardcodes success. Because exit codes affect CI users, `--fail-on` defaults to today's behavior and the change is listed under "behavior changes" in the release notes.
 
@@ -140,9 +142,9 @@ DVGA rows 19 and 21 describe gaps for which code exists (`testLoginMutationBrute
 
 ## Open decisions for the maintainers
 
-1. Whether 2.0.2 ships before or together with PRs #136 and #138.
+1. Whether 2.0.2 ships now that PRs #136 and #138 are merged, or waits for the fix in issue #142.
 2. The incomplete-scan exit code, and whether `--fail-on` stays off by default.
-3. Uniform CRITICAL for every confirmed NoSQL bypass (settled in the PR #136 discussion) versus a confidence field in 2.1.0.
+3. Uniform CRITICAL for every confirmed NoSQL bypass (decided in the PR #136 discussion) versus a confidence field in 2.1.0. Issue #142 is a reason to revisit this.
 4. How much of 2.1.0 two maintainers can carry. The cut order is stated above, from the bottom of Could upward.
 
 ## Sources
