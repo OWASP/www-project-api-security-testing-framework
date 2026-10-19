@@ -482,4 +482,114 @@ class SqlNoSqlInjectionTestCaseTest {
         List<Finding> findings = testCase.execute(endpoint, httpClient);
         assertTrue(findings.isEmpty(), "An endpoint that accepts every value has no bypass to report");
     }
+
+    // ── #142: false CRITICAL findings when the target degrades mid-scan ───────────────────────
+
+    private static boolean isBaselineRequest(Object body) {
+        return body != null && body.toString().contains("astf-nosql-baseline-value");
+    }
+
+    @Test
+    @DisplayName("Does not flag a bypass when a degraded target answers 200 with a pretty-printed " +
+            "\"status\": \"fail\" (regression, #142: VAmPI /users/v1/login)")
+    void testNoNoSqlBypassWhenFailureIsPrettyPrintedStatusFail() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json",
+                "{\"username\":\"name1\",\"password\":\"pass1\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Healthy baseline: a recognised failure. Everything else, payloads included, is the
+        // degraded answer VAmPI gave once a ReDoS probe had wedged it. Note the spaces after the
+        // colons, which a literal "status":"fail" substring never matched.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> isBaselineRequest(inv.getArgument(3))
+                        ? new HttpResponse(200, "{ \"status\": \"fail\", \"message\": \"Username does not exist\" }", Map.of())
+                        : new HttpResponse(200, "{ \"status\": \"fail\", \"message\": \"An error occurred!\" }", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Bypass")),
+                "A response that says status: fail is a failure however it is formatted");
+    }
+
+    @Test
+    @DisplayName("Does not flag a bypass when the cached baseline went stale: a fresh baseline no longer fails " +
+            "(regression, #142: baseline taken while healthy, payloads answered while degraded)")
+    void testNoNoSqlBypassWhenFreshBaselineNoLongerFails() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders", "POST", "application/json",
+                "{\"note\":\"hello\",\"amount\":10}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        java.util.concurrent.atomic.AtomicInteger baselineCalls = new java.util.concurrent.atomic.AtomicInteger();
+        // The first baseline is taken while the target is healthy and fails. From then on the
+        // target answers everything, an invalid value included, with the same unrecognised 200.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    if (isBaselineRequest(inv.getArgument(3)) && baselineCalls.getAndIncrement() == 0) {
+                        return new HttpResponse(400, "{\"detail\":\"rejected\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"result\":\"done\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Bypass")),
+                "A baseline that no longer fails means the target's behaviour changed: inconclusive, not a bypass");
+        assertTrue(baselineCalls.get() >= 2, "The baseline must have been re-sent before anything was reported");
+    }
+
+    @Test
+    @DisplayName("Still reports a real bypass when the fresh baseline also fails")
+    void testStillReportsBypassWhenFreshBaselineStillFails() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/shop/apply", "POST", "application/json",
+                "{\"code\":\"SAVE10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        java.util.concurrent.atomic.AtomicInteger baselineCalls = new java.util.concurrent.atomic.AtomicInteger();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    if (isBaselineRequest(inv.getArgument(3))) {
+                        baselineCalls.incrementAndGet();
+                        return new HttpResponse(400, "{\"error\":\"coupon rejected\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"applied\":true,\"discount\":10}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Bypass")),
+                "A target that stays healthy and still accepts the operator must keep being reported");
+        assertEquals(2, baselineCalls.get(),
+                "One cached baseline plus exactly one fresh re-send for the single reported finding");
+    }
+
+    @Test
+    @DisplayName("A top-level error field marks a 200 response as a failure")
+    void testTopLevelErrorFieldIsAFailure() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/shop/apply", "POST", "application/json",
+                "{\"code\":\"SAVE10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        // "bad coupon code" matches none of the text markers: only the error field says it failed.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> isBaselineRequest(inv.getArgument(3))
+                        ? new HttpResponse(400, "{\"error\":\"bad coupon code\"}", Map.of())
+                        : new HttpResponse(200, "{\"error\":\"bad coupon code\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Bypass")));
+    }
+
+    @Test
+    @DisplayName("An empty or null error field is not a failure, so a real bypass is still reported")
+    void testEmptyErrorFieldIsNotAFailure() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/shop/apply", "POST", "application/json",
+                "{\"code\":\"SAVE10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> isBaselineRequest(inv.getArgument(3))
+                        ? new HttpResponse(400, "{\"error\":\"coupon rejected\"}", Map.of())
+                        : new HttpResponse(200, "{\"errors\":[],\"error\":null,\"applied\":true}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Bypass")),
+                "errors: [] and error: null mean no error, so the success must not be discarded");
+    }
 }
