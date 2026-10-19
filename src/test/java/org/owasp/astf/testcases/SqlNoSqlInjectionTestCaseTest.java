@@ -12,8 +12,10 @@ import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -417,6 +419,91 @@ class SqlNoSqlInjectionTestCaseTest {
         assertEquals(2, findings.size(), "Each vulnerable field should produce its own finding");
         assertTrue(findings.stream().anyMatch(f -> f.getRequestDetails().contains("Field: coupon_code")));
         assertTrue(findings.stream().anyMatch(f -> f.getRequestDetails().contains("Field: voucher")));
+    }
+
+    // ── false positives when the target degrades mid-scan (issue #142, VAmPI /users/v1/login) ──
+
+    @Test
+    @DisplayName("A pretty-printed {\"status\": \"fail\"} body counts as a failure, not a successful bypass (#142)")
+    void testSpacedStatusFailIsNotABypass() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"secret\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        // The baseline fails in a recognized way; every other request gets HTTP 200 with a space
+        // after the colon and a message no phrase list would recognize.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv ->
+                ((String) inv.getArgument(3)).contains("astf-nosql-baseline-value")
+                        ? new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of())
+                        : new HttpResponse(200, "{ \"status\": \"fail\", \"message\": \"zzz\" }", Map.of()));
+
+        assertTrue(testCase.execute(endpoint, httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("A generic 'An error occurred!' reply is a failure, not a bypass (#142)")
+    void testGenericErrorReplyIsNotABypass() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/login", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"secret\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv ->
+                ((String) inv.getArgument(3)).contains("astf-nosql-baseline-value")
+                        ? new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of())
+                        : new HttpResponse(200, "{\"message\":\"An error occurred!\"}", Map.of()));
+
+        assertTrue(testCase.execute(endpoint, httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("No bypass is reported when the target degrades after the baseline was taken, so the " +
+            "fresh baseline now answers like the payload (#142)")
+    void testDegradedTargetDoesNotProduceBypassFinding() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        AtomicInteger baselineCalls = new AtomicInteger();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value")) {
+                // the first baseline is taken while the target is healthy; later ones hit the degraded target
+                return baselineCalls.getAndIncrement() == 0
+                        ? new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of())
+                        : new HttpResponse(200, "{\"credit\":75}", Map.of());
+            }
+            return body.contains("$ne") ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                    : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+        });
+
+        assertTrue(testCase.execute(endpoint, httpClient).isEmpty(),
+                "the target answers the baseline and the payload identically by now, so there is no bypass to report");
+    }
+
+    @Test
+    @DisplayName("A real bypass is still reported after the fresh baseline re-check confirms the baseline fails")
+    void testRealBypassStillReportedAfterBaselineRecheck() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        List<String> baselineBodies = new ArrayList<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value")) {
+                baselineBodies.add(body);
+                return new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+            }
+            return body.contains("\"coupon_code\":\"$ne\"")
+                    ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                    : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertTrue(findings.get(0).getTitle().contains("Authorization/Logic Bypass"));
+        assertEquals(2, baselineBodies.size(), "one cached baseline plus one fresh re-check before reporting");
     }
 
     @Test
