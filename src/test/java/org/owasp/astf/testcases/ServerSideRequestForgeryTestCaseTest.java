@@ -157,4 +157,75 @@ class ServerSideRequestForgeryTestCaseTest {
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
     }
+
+    @Test
+    @DisplayName("Should NOT flag a GET endpoint that echoes the injected URL (payload contains 'computeMetadata')")
+    void testNoFindingWhenGetEndpointEchoesPayload() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        // Reflect the (URL-encoded) query value back, as an echo API would.
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String value = url.substring(url.indexOf('=') + 1);
+                    String decoded = java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+                    return new HttpResponse(200, "{\"you_sent\":\"" + decoded + "\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "An API that only reflects the payload must not be reported as SSRF");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag a POST endpoint that echoes the JSON body (incl. escaped slashes)")
+    void testNoFindingWhenPostEndpointEchoesPayload() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "POST");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> new HttpResponse(200,
+                        "{\"received\":" + ((String) inv.getArgument(3)).replace("/", "\\/") + "}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "A body echo must not be reported as SSRF");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag a non-2xx response that contains an indicator")
+    void testNoFindingOnNon2xx() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(400, "{\"error\":\"bad instance-id\"}", Map.of()));
+
+        assertTrue(testCase.execute(endpoint, httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("Should still flag genuine metadata content that is not part of the payload, even when the payload is echoed too")
+    void testStillDetectsRealMetadataAlongsideEcho() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String value = url.substring(url.indexOf('=') + 1);
+                    String decoded = java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+                    return new HttpResponse(200, "{\"url\":\"" + decoded + "\",\"body\":"
+                            + "{\"instance-id\":\"i-0abc123\",\"iam\":{\"AccessKeyId\":\"ASIA...\"}}}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+    }
 }
