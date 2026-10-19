@@ -13,8 +13,10 @@ import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -504,6 +506,51 @@ class SqlNoSqlInjectionTestCaseTest {
         assertEquals(1, findings.size());
         assertTrue(findings.get(0).getTitle().contains("Authorization/Logic Bypass"));
         assertEquals(2, baselineBodies.size(), "one cached baseline plus one fresh re-check before reporting");
+    }
+
+    @Test
+    @DisplayName("A one-off success that turns into 'already exists' is a state change, reported only as a " +
+            "MEDIUM 'possible' finding and never as CRITICAL (VAmPI /users/v1/register)")
+    void testOneOffStateChangeIsNotCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"email\":\"alice@example.com\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Each distinct request body creates its user the first time and fails with "already exists" after that.
+        Set<String> seen = new HashSet<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value") || !seen.add(body)) {
+                return new HttpResponse(200, "{ \"status\": \"fail\", \"message\": \"User already exists.\" }", Map.of());
+            }
+            return new HttpResponse(200, "{\"message\":\"Successfully registered. Login to receive an auth token.\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL),
+                "a one-off state change must never be reported as a CRITICAL bypass");
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Possible Bypass (not reproducible)")
+                && f.getSeverity() == Severity.MEDIUM), "it is still reported, at MEDIUM, so nothing is dropped");
+    }
+
+    @Test
+    @DisplayName("A bypass that succeeds again when the payload is re-sent is reported as CRITICAL")
+    void testReproducibleBypassIsCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv ->
+                ((String) inv.getArgument(3)).contains("\"coupon_code\":\"$ne\"")
+                        ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                        : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getTitle().contains("Authorization/Logic Bypass"));
     }
 
     @Test

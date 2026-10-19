@@ -537,12 +537,25 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             String title = (isAuthLike && isCredentialField)
                                     ? "NoSQL Injection — Authentication Bypass"
                                     : "NoSQL Injection — Authorization/Logic Bypass";
-                            findings.add(buildNoSqlFinding(endpoint, field, payload,
-                                    "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
+                            String evidence = "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
                                     field + "' field was replaced with a NoSQL query operator, while an " +
                                     "ordinary invalid value on the same field failed (HTTP " +
-                                    (baseline != null ? baseline.getStatusCode() : "?") + ")", Severity.CRITICAL,
-                                    title));
+                                    (baseline != null ? baseline.getStatusCode() : "?") + ")";
+                            // A real operator bypass succeeds again when the same payload is re-sent. A
+                            // one-off success is often a state change instead (the first request creates the
+                            // record, e.g. a registration, and later ones fail with "already exists"), and
+                            // that depends on request order, so it must not be reported as CRITICAL.
+                            // It is still reported, at a lower severity, so nothing is silently dropped.
+                            if (payloadSucceedsAgain(endpoint, httpClient, body)) {
+                                findings.add(buildNoSqlFinding(endpoint, field, payload, evidence,
+                                        Severity.CRITICAL, title));
+                            } else {
+                                findings.add(buildNoSqlFinding(endpoint, field, payload, evidence +
+                                        ". Re-sending the same payload did not succeed again, so this may be a " +
+                                        "one-off state change (for example a record created by the first request) " +
+                                        "and not an injection; verify manually",
+                                        Severity.MEDIUM, "NoSQL Injection — Possible Bypass (not reproducible)"));
+                            }
                             continue nextField;
                         }
                     }
@@ -634,6 +647,18 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             return TEXT_FAILURE_MARKERS.stream().anyMatch(messageText.toLowerCase()::contains);
         }
         return TEXT_FAILURE_MARKERS.stream().anyMatch(lower::contains);
+    }
+
+    /** True when sending the same payload request again still gets a success with no failure signal. */
+    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody) {
+        try {
+            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody);
+            String againBody = again != null ? again.getBody() : null;
+            return again != null && againBody != null && again.isSuccess() && !containsFailureMarker(againBody);
+        } catch (Exception e) {
+            logger.debug("Could not re-send NoSQL payload on {}: {}", endpoint, e.getMessage());
+            return false;
+        }
     }
 
     /**
