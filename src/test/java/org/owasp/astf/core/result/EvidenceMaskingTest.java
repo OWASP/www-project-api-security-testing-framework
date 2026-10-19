@@ -17,8 +17,9 @@ class EvidenceMaskingTest {
     }
 
     @Test
-    void cookieHeaderMasksEveryValue() {
-        assertEquals("a=[REDACTED]; b=[REDACTED]", EvidenceMasking.maskCookie("a=1; b=2"));
+    void locationMasksTokenInFragment() {
+        assertEquals("https://h/cb#access_token=[REDACTED]&state=x",
+                EvidenceMasking.maskLocation("https://h/cb#access_token=abc&state=x"));
     }
 
     @Test

@@ -12,7 +12,7 @@ public final class EvidenceMasking {
     public static final String MARKER = "[REDACTED]";
 
     private static final Pattern TOKEN_PARAM = Pattern.compile(
-            "(?i)([?&;](?:[a-z0-9_.-]*(?:token|secret|password|passwd|session|sig|auth|jwt|key)[a-z0-9_.-]*|code)=)([^&#]*)");
+            "(?i)([?&;#](?:[a-z0-9_.-]*(?:token|secret|password|passwd|session|sig|auth|jwt|key)[a-z0-9_.-]*|code)=)([^&#]*)");
 
     private EvidenceMasking() {
     }
@@ -32,25 +32,7 @@ public final class EvidenceMasking {
         return pair.substring(0, eq + 1) + MARKER + rest;
     }
 
-    /** Masks every value in a Cookie request header, keeping the names. */
-    public static String maskCookie(String header) {
-        if (header == null) {
-            return null;
-        }
-        StringBuilder sb = new StringBuilder();
-        boolean first = true;
-        for (String part : header.split(";", -1)) {
-            if (!first) {
-                sb.append(';');
-            }
-            first = false;
-            int eq = part.indexOf('=');
-            sb.append(eq < 0 ? part : part.substring(0, eq + 1) + MARKER);
-        }
-        return sb.toString();
-    }
-
-    /** Masks the values of token-like query parameters in a Location header. */
+    /** Masks the values of token-like query or fragment parameters in a Location header (e.g. ?token=x, #access_token=x). */
     public static String maskLocation(String location) {
         if (location == null) {
             return null;
