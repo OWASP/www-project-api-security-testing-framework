@@ -364,7 +364,9 @@ public class SoftNotFoundDetector {
          * tolerates a small residue of variation that normalisation didn't mask — a rotating
          * nonce with punctuation in it, a slightly different wording of the same generic page —
          * by requiring the two bodies to be within 2% of each other in length and to agree on
-         * 95% of their characters, counting from both ends.
+         * 95% of their characters, counting from both ends. Integer arithmetic means a body
+         * shorter than 20 characters must match exactly: a single differing character in a body
+         * that short is a real difference, not residue.
          *
          * <p>Both ends are measured because the variation is typically in the middle of an
          * otherwise identical page; a leading-prefix-only comparison would score an 86-character
