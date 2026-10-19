@@ -1,8 +1,6 @@
 package org.owasp.astf.reporting;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
@@ -76,7 +74,7 @@ public class JsonReportGenerator implements ReportGenerator {
     @Override
     public void generateToFile(ScanResult result, String outputPath) throws IOException {
         String content = generate(result);
-        Files.write(Paths.get(outputPath), content.getBytes(StandardCharsets.UTF_8));
+        ReportFileWriter.write(Paths.get(outputPath), content);
         logger.info("JSON report written to {}", outputPath);
     }
 }
