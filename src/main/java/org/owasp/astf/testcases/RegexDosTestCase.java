@@ -103,8 +103,9 @@ public class RegexDosTestCase implements TestCase {
                 try {
                     sendRequest(endpoint, httpClient, buildJsonBody(fields, field, payload));
                 } catch (SocketTimeoutException e) {
-                    // A read timeout after the payload was sent, against a healthy baseline, is
-                    // strong evidence of a hang. It is confirmed below by re-probing the baseline.
+                    // A socket timeout (OkHttp raises it for connect, read and write timeouts) after
+                    // the payload was sent, against a healthy baseline, is evidence of a hang. It is
+                    // confirmed below by re-probing the baseline.
                     timedOut = true;
                 } catch (InterruptedIOException e) {
                     // Scan-level cancellation, not a hang: stop quietly and keep the interrupt flag.
@@ -125,9 +126,11 @@ public class RegexDosTestCase implements TestCase {
                 elapsed = System.currentTimeMillis() - start;
 
                 if (timedOut && !baselineStillHealthy(endpoint, httpClient, fields, slowThreshold)) {
-                    logger.debug("Baseline re-probe failed after a timeout on {}, target unhealthy, not reporting ReDoS",
-                            endpoint);
-                    return findings;
+                    // The target is unhealthy or slow right now, so this timeout says nothing about the
+                    // regex. Skip only this payload; the remaining fields and payloads are still tested.
+                    logger.debug("Baseline re-probe failed after a timeout on {} field {}, target unhealthy, "
+                            + "not reporting ReDoS for this payload", endpoint, field);
+                    continue;
                 }
 
                 if (timedOut || elapsed > slowThreshold) {

@@ -181,4 +181,35 @@ class RegexDosTestCaseTest {
 
         assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
     }
+
+    @Test
+    @DisplayName("A re-probe that succeeds but is slower than the threshold is not a healthy baseline")
+    void testTimeoutWithSlowReprobeIsNotReDos() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))   // baseline
+                .thenThrow(new SocketTimeoutException("Read timed out")) // first payload
+                .thenAnswer(inv -> {                                     // slow but successful re-probe
+                    Thread.sleep(4300);
+                    return new HttpResponse(200, "{}", Map.of());
+                })
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));      // everything after is fast and fine
+
+        assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("An unhealthy re-probe skips only that payload: later payloads are still tested and can be reported")
+    void testUnhealthyReprobeDoesNotStopTestingOtherPayloads() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))          // baseline
+                .thenThrow(new SocketTimeoutException("Read timed out"))    // payload 1 times out
+                .thenThrow(new IOException("Connection refused"))           // re-probe fails: payload 1 not reported
+                .thenThrow(new SocketTimeoutException("Read timed out"))    // payload 2 times out
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));         // re-probe healthy: payload 2 is reported
+
+        List<Finding> findings = testCase.execute(putEndpoint(), httpClient);
+
+        assertEquals(1, findings.size(), "the second payload must still be tested and reported");
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+    }
 }
