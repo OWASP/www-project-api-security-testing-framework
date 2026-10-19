@@ -97,15 +97,27 @@ public class RegexDosTestCase implements TestCase {
 
         for (String field : fields) {
             for (String payload : REDOS_PAYLOADS) {
+                // Health is checked BEFORE the payload, never after: a genuine ReDoS leaves a
+                // single-threaded server busy, so a re-probe after the payload would fail for
+                // exactly the targets that are vulnerable. A target that is already unhealthy cannot
+                // tell us anything about the payload, so only this payload is skipped.
+                if (!targetHealthy(endpoint, httpClient, fields, slowThreshold)) {
+                    logger.debug("Target not answering the baseline normally before the ReDoS payload on {} field {}, "
+                            + "not testing this payload", endpoint, field);
+                    if (Thread.currentThread().isInterrupted()) {
+                        return findings;
+                    }
+                    continue;
+                }
+
                 boolean timedOut = false;
                 long elapsed;
                 long start = System.currentTimeMillis();
                 try {
                     sendRequest(endpoint, httpClient, buildJsonBody(fields, field, payload));
                 } catch (SocketTimeoutException e) {
-                    // A socket timeout (OkHttp raises it for connect, read and write timeouts) after
-                    // the payload was sent, against a healthy baseline, is evidence of a hang. It is
-                    // confirmed below by re-probing the baseline.
+                    // A socket timeout (OkHttp raises it for connect, read and write timeouts) right
+                    // after a normal baseline answer is evidence that the payload caused a hang.
                     timedOut = true;
                 } catch (InterruptedIOException e) {
                     // Scan-level cancellation, not a hang: stop quietly and keep the interrupt flag.
@@ -124,14 +136,6 @@ public class RegexDosTestCase implements TestCase {
                     return findings;
                 }
                 elapsed = System.currentTimeMillis() - start;
-
-                if (timedOut && !baselineStillHealthy(endpoint, httpClient, fields, slowThreshold)) {
-                    // The target is unhealthy or slow right now, so this timeout says nothing about the
-                    // regex. Skip only this payload; the remaining fields and payloads are still tested.
-                    logger.debug("Baseline re-probe failed after a timeout on {} field {}, target unhealthy, "
-                            + "not reporting ReDoS for this payload", endpoint, field);
-                    continue;
-                }
 
                 if (timedOut || elapsed > slowThreshold) {
                     Finding finding = new Finding(
@@ -164,8 +168,9 @@ public class RegexDosTestCase implements TestCase {
         return findings;
     }
 
-    private boolean baselineStillHealthy(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
-                                         long slowThreshold) {
+    /** True when the baseline request is answered normally and within the slow threshold. */
+    private boolean targetHealthy(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
+                                  long slowThreshold) {
         long start = System.currentTimeMillis();
         try {
             sendRequest(endpoint, httpClient, buildJsonBody(fields, null, null));

@@ -20,6 +20,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisplayName("RegexDosTestCase unit tests")
@@ -159,8 +161,8 @@ class RegexDosTestCaseTest {
     }
 
     @Test
-    @DisplayName("Timeout with healthy baseline and healthy re-probe still yields the HIGH finding")
-    void testTimeoutWithHealthyReprobeStillFlags() throws IOException {
+    @DisplayName("Timeout right after a healthy baseline check yields the HIGH finding")
+    void testTimeoutAfterHealthyBaselineFlags() throws IOException {
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(b -> !isRedosPayload(b))))
                 .thenReturn(new HttpResponse(200, "{}", Map.of()));
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(RegexDosTestCaseTest::isRedosPayload)))
@@ -172,40 +174,56 @@ class RegexDosTestCaseTest {
     }
 
     @Test
-    @DisplayName("Timeout where the baseline re-probe also fails yields no finding")
-    void testTimeoutWithFailingReprobeIsNotReDos() throws IOException {
-        // Baseline succeeds once, then the target goes down: payload times out and so does the re-probe.
+    @DisplayName("A real ReDoS that leaves the server hung is still reported (single-threaded target, e.g. VAmPI)")
+    void testHungServerAfterRealReDosIsStillReported() throws IOException {
+        // Baseline and the pre-payload health check are answered, the payload hangs the server, and
+        // every request after that also times out because the server is stuck in the regex.
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))
+                .thenThrow(new SocketTimeoutException("Read timed out"));
+
+        List<Finding> findings = testCase.execute(putEndpoint(), httpClient);
+
+        assertEquals(1, findings.size(), "the hang caused by the payload is the finding, not a reason to discard it");
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("A target that is not answering the baseline before the payload is not tested or reported")
+    void testUnhealthyTargetBeforePayloadIsNotReDos() throws IOException {
+        // Baseline succeeds once, then the target goes down: the health check before each payload fails.
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{}", Map.of()))
                 .thenThrow(new SocketTimeoutException("Read timed out"));
 
         assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
+        verify(httpClient, never()).putWithStatus(anyString(), anyMap(), anyString(),
+                argThat(RegexDosTestCaseTest::isRedosPayload));
     }
 
     @Test
-    @DisplayName("A re-probe that succeeds but is slower than the threshold is not a healthy baseline")
-    void testTimeoutWithSlowReprobeIsNotReDos() throws IOException {
+    @DisplayName("A baseline that answers but slower than the threshold before the payload is not a healthy target")
+    void testSlowBaselineBeforePayloadIsNotReDos() throws IOException {
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
-                .thenReturn(new HttpResponse(200, "{}", Map.of()))   // baseline
-                .thenThrow(new SocketTimeoutException("Read timed out")) // first payload
-                .thenAnswer(inv -> {                                     // slow but successful re-probe
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))             // baseline
+                .thenAnswer(inv -> {                                          // slow health check: skip payload 1
                     Thread.sleep(4300);
                     return new HttpResponse(200, "{}", Map.of());
                 })
-                .thenReturn(new HttpResponse(200, "{}", Map.of()));      // everything after is fast and fine
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));            // everything after is fast and fine
 
         assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
     }
 
     @Test
-    @DisplayName("An unhealthy re-probe skips only that payload: later payloads are still tested and can be reported")
-    void testUnhealthyReprobeDoesNotStopTestingOtherPayloads() throws IOException {
+    @DisplayName("An unhealthy check before one payload skips only that payload: later payloads are still tested")
+    void testUnhealthyCheckDoesNotStopTestingOtherPayloads() throws IOException {
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{}", Map.of()))          // baseline
-                .thenThrow(new SocketTimeoutException("Read timed out"))    // payload 1 times out
-                .thenThrow(new IOException("Connection refused"))           // re-probe fails: payload 1 not reported
-                .thenThrow(new SocketTimeoutException("Read timed out"))    // payload 2 times out
-                .thenReturn(new HttpResponse(200, "{}", Map.of()));         // re-probe healthy: payload 2 is reported
+                .thenThrow(new IOException("Connection refused"))           // health check 1 fails: payload 1 skipped
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))          // health check 2 passes
+                .thenThrow(new SocketTimeoutException("Read timed out"));   // payload 2 hangs: reported
 
         List<Finding> findings = testCase.execute(putEndpoint(), httpClient);
 
