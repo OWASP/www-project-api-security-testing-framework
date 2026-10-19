@@ -12,6 +12,9 @@ import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.ConnectException;
+import java.net.SocketTimeoutException;
 import java.util.List;
 import java.util.Map;
 
@@ -64,7 +67,7 @@ class RegexDosTestCaseTest {
     }
 
     @Test
-    @DisplayName("Detects ReDoS when the payload request times out (IOException)")
+    @DisplayName("Detects ReDoS when the payload request times out (SocketTimeoutException)")
     void testDetectsReDosViaTimeout() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users/1/email", "PUT", "application/json",
                 "{\"email\":\"a@b.com\"}", true);
@@ -79,7 +82,7 @@ class RegexDosTestCaseTest {
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(),
                 argThat(body -> body != null && (body.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                         || body.contains("11111111111111111111111111111111111")))))
-                .thenThrow(new IOException("Read timed out"));
+                .thenThrow(new SocketTimeoutException("Read timed out"));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -100,5 +103,82 @@ class RegexDosTestCaseTest {
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
         assertTrue(findings.isEmpty(), "Should skip gracefully when even the baseline can't be established");
+    }
+
+    private static boolean isRedosPayload(String body) {
+        return body != null && (body.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                || body.contains("11111111111111111111111111111111111"));
+    }
+
+    private EndpointInfo putEndpoint() {
+        EndpointInfo endpoint = new EndpointInfo("/api/users/1/email", "PUT", "application/json",
+                "{\"email\":\"a@b.com\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+        return endpoint;
+    }
+
+    @Test
+    @DisplayName("ConnectException on a payload request is not reported as ReDoS")
+    void testConnectExceptionIsNotReDos() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(b -> !isRedosPayload(b))))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(RegexDosTestCaseTest::isRedosPayload)))
+                .thenThrow(new ConnectException("Connection refused"));
+
+        assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("Non-timeout IOException (connection reset) is not reported as ReDoS")
+    void testConnectionResetIsNotReDos() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(b -> !isRedosPayload(b))))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(RegexDosTestCaseTest::isRedosPayload)))
+                .thenThrow(new IOException("Connection reset"));
+
+        assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("Interrupted request yields no finding and preserves the interrupt flag")
+    void testInterruptedIsNotReDos() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(b -> !isRedosPayload(b))))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(RegexDosTestCaseTest::isRedosPayload)))
+                .thenAnswer(inv -> {
+                    Thread.currentThread().interrupt();
+                    throw new InterruptedIOException("interrupted");
+                });
+
+        try {
+            assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
+            assertTrue(Thread.currentThread().isInterrupted(), "Interrupt flag must be preserved");
+        } finally {
+            Thread.interrupted(); // clear so later tests are unaffected
+        }
+    }
+
+    @Test
+    @DisplayName("Timeout with healthy baseline and healthy re-probe still yields the HIGH finding")
+    void testTimeoutWithHealthyReprobeStillFlags() throws IOException {
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(b -> !isRedosPayload(b))))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()));
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), argThat(RegexDosTestCaseTest::isRedosPayload)))
+                .thenThrow(new SocketTimeoutException("Read timed out"));
+
+        List<Finding> findings = testCase.execute(putEndpoint(), httpClient);
+        assertEquals(1, findings.size());
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Timeout where the baseline re-probe also fails yields no finding")
+    void testTimeoutWithFailingReprobeIsNotReDos() throws IOException {
+        // Baseline succeeds once, then the target goes down: payload times out and so does the re-probe.
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{}", Map.of()))
+                .thenThrow(new SocketTimeoutException("Read timed out"));
+
+        assertTrue(testCase.execute(putEndpoint(), httpClient).isEmpty());
     }
 }

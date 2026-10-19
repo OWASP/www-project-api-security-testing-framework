@@ -1,6 +1,8 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -100,16 +102,33 @@ public class RegexDosTestCase implements TestCase {
                 long start = System.currentTimeMillis();
                 try {
                     sendRequest(endpoint, httpClient, buildJsonBody(fields, field, payload));
-                } catch (IOException e) {
-                    // A connect/read timeout while processing this specific payload is itself
-                    // strong evidence of a hang — treat it as the slowest possible signal rather
-                    // than silently swallowing it like other test cases' generic catch blocks do.
+                } catch (SocketTimeoutException e) {
+                    // A read timeout after the payload was sent, against a healthy baseline, is
+                    // strong evidence of a hang. It is confirmed below by re-probing the baseline.
                     timedOut = true;
+                } catch (InterruptedIOException e) {
+                    // Scan-level cancellation, not a hang: stop quietly and keep the interrupt flag.
+                    Thread.currentThread().interrupt();
+                    return findings;
+                } catch (IOException e) {
+                    // Connection refused/reset and similar say the target is unreachable, not that
+                    // a regex is backtracking.
+                    logger.debug("Network error testing ReDoS on {} field {}: {}", endpoint, field, e.getMessage());
+                    continue;
                 } catch (Exception e) {
                     logger.debug("Error testing ReDoS on {} field {}: {}", endpoint, field, e.getMessage());
                     continue;
                 }
+                if (Thread.currentThread().isInterrupted()) {
+                    return findings;
+                }
                 elapsed = System.currentTimeMillis() - start;
+
+                if (timedOut && !baselineStillHealthy(endpoint, httpClient, fields, slowThreshold)) {
+                    logger.debug("Baseline re-probe failed after a timeout on {}, target unhealthy, not reporting ReDoS",
+                            endpoint);
+                    return findings;
+                }
 
                 if (timedOut || elapsed > slowThreshold) {
                     Finding finding = new Finding(
@@ -140,6 +159,21 @@ public class RegexDosTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    private boolean baselineStillHealthy(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
+                                         long slowThreshold) {
+        long start = System.currentTimeMillis();
+        try {
+            sendRequest(endpoint, httpClient, buildJsonBody(fields, null, null));
+        } catch (InterruptedIOException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+        return !Thread.currentThread().isInterrupted()
+                && System.currentTimeMillis() - start <= slowThreshold;
     }
 
     private List<String> extractBodyFieldNames(EndpointInfo endpoint) {
