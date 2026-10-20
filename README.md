@@ -3,7 +3,7 @@
 [![OWASP Incubator](https://img.shields.io/badge/owasp-incubator-blue.svg)](https://owasp.org/www-project-api-security-testing-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-371%20passing-brightgreen.svg)](#)
+[![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/OWASP/www-project-api-security-testing-framework?include_prereleases&label=latest)](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)
 
 A comprehensive automated testing framework for detecting API security vulnerabilities based on the **OWASP API Security Top 10 2023**.
@@ -24,8 +24,8 @@ A comprehensive automated testing framework for detecting API security vulnerabi
 Download the latest pre-built JAR directly from the [GitHub Releases page](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest) — no build step needed:
 
 ```bash
-# Download the latest stable release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
+# Download a specific release (pinned, so the filename always matches)
+curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.1/astf-v2.0.1.jar
 ```
 
 Or build from source:
@@ -38,6 +38,8 @@ mvn clean package -DskipTests
 ```
 
 ### 3. Run your first scan (copy-paste ready)
+
+> **Only scan systems you are authorized to test, and use a staging environment.** Some checks send bursts of requests (rate limiting, denial-of-service probes) and state-changing calls, and a few can degrade or crash a fragile target. See [Responsible Testing](docs/TESTING_GUIDELINES.md#responsible-testing).
 
 **Option A — Inline flags** (quickest):
 ```bash
@@ -73,7 +75,7 @@ start crapi-report.html
 
 ## Releases
 
-Releases are published automatically when a version tag is pushed. The workflow runs all 371 tests, builds the fat JAR, and attaches it to the GitHub Release.
+Releases are published automatically when a version tag is pushed. The workflow runs the full test suite, builds the fat JAR, and attaches it to the GitHub Release.
 
 | Tag format | Release type | Example |
 |---|---|---|
@@ -89,34 +91,24 @@ The JAR asset on each release is named `astf-<tag>.jar`, e.g. `astf-v2.0.1.jar`.
 
 ## Configuration Basics
 
-The simplest config file — target URL plus a Bearer token:
+The simplest config file sets the target and the output. Keys are flat (not nested):
 
 ```yaml
-# docs/examples/quickstart.yaml
-target:
-  url: "https://api.example.com"
-
-auth:
-  bearerToken: "eyJhbGciOiJIUzI1NiJ9..."
-
-output:
-  format: "HTML"
-  file: "results.html"
-  verbose: true
+targetUrl: "https://api.example.com"
+outputFormat: "HTML"
+outputFile: "results.html"
+verbose: true
 ```
 
-For API key authentication:
+Credentials are **not** read from the config file. Pass them on the command line, preferably from environment variables so they stay out of shell history:
 
-```yaml
-target:
-  url: "https://api.example.com"
-
-auth:
-  apiKey: "sk-abc123"
-  apiKeyHeader: "X-API-Key"   # defaults to X-API-Key if omitted
+```bash
+java -jar astf-v2.0.1.jar -c scan.yaml --token "$API_TOKEN"
+# API key:  --api-key "$KEY" --api-key-header X-API-Key
+# Two identities for cross-user BOLA checks:  --token "$TOKEN_A" --secondary-token "$TOKEN_B"
 ```
 
-See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for the full reference covering proxy, custom headers, thread count, rate limiting, test selection, and output options.
+See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for every supported key: proxy, custom headers, thread count, timeout, test selection, and inline endpoints.
 
 ---
 
@@ -305,17 +297,20 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: Download ASTF
+      - name: Download ASTF (pinned release)
         run: |
-          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest/download/astf-v2.0.1.jar
+          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.1/astf-v2.0.1.jar
 
       - name: Run ASTF scan
+        id: scan
+        env:
+          API_URL: ${{ secrets.API_URL }}
+          API_TOKEN: ${{ secrets.API_TOKEN }}
         run: |
-          java -jar astf-v2.0.1.jar \
-            -u ${{ secrets.API_URL }} \
-            --token ${{ secrets.API_TOKEN }} \
-            -f SARIF -o results.sarif \
-            --timeout 10 || echo "ASTF_EXIT=$?" >> $GITHUB_ENV
+          set +e
+          java -jar astf-v2.0.1.jar -u "$API_URL" --token "$API_TOKEN" \
+            -f SARIF -o results.sarif --timeout 10
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
       - name: Upload SARIF to Code Scanning
         uses: github/codeql-action/upload-sarif@v3
@@ -323,13 +318,16 @@ jobs:
           sarif_file: results.sarif
         continue-on-error: true
 
-      - name: Fail build on HIGH or CRITICAL findings
+      - name: Fail the build on findings or a scan error
         run: |
-          if [ "${ASTF_EXIT}" = "1" ]; then
-            echo "ASTF detected security findings — review SARIF report"
-            exit 1
-          fi
+          case "${{ steps.scan.outputs.exit_code }}" in
+            0) echo "No findings" ;;
+            1) echo "ASTF reported findings (any severity); review the SARIF results"; exit 1 ;;
+            *) echo "ASTF scan error (exit ${{ steps.scan.outputs.exit_code }})"; exit 1 ;;
+          esac
 ```
+
+Exit code `1` means findings of **any** severity were found. To fail only on HIGH or CRITICAL, use the next section instead.
 
 ### Gate on HIGH/CRITICAL only (not every finding)
 
@@ -360,7 +358,7 @@ www-project-api-security-testing-framework/
 │   │   │   └── integrations/  # GitHub Actions result processor
 │   │   └── resources/
 │   │       └── log4j2.xml     # Logging configuration
-│   └── test/                  # 371 unit tests
+│   └── test/                  # unit tests
 ├── docs/
 │   ├── TESTING_GUIDELINES.md  # Methodology: how to test, interpret results, reduce false positives
 │   ├── FRAMEWORK_OVERVIEW.md  # Capabilities, all 16 test cases, live-verification results
@@ -415,7 +413,7 @@ git tag v2.0.1
 git push origin v2.0.1
 ```
 
-The `release.yml` workflow will run all 371 tests, build `astf-v2.0.1.jar`, and create a
+The `release.yml` workflow will run the full test suite, build `astf-v2.0.1.jar`, and create a
 GitHub Release with the JAR attached as a downloadable asset. A plain `vX.Y.Z` tag (no
 `alpha`/`beta`/`rc` suffix) is published as a **stable** release; only tags matching one of
 those suffixes are marked as a pre-release — see the [tag format table](#releases) above.
