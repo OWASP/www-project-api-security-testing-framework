@@ -364,7 +364,9 @@ public class SoftNotFoundDetector {
          * tolerates a small residue of variation that normalisation didn't mask — a rotating
          * nonce with punctuation in it, a slightly different wording of the same generic page —
          * by requiring the two bodies to be within 2% of each other in length and to agree on
-         * 95% of their characters, counting from both ends.
+         * 95% of their characters, counting from both ends. Integer arithmetic means a body
+         * shorter than 20 characters must match exactly: a single differing character in a body
+         * that short is a real difference, not residue.
          *
          * <p>Both ends are measured because the variation is typically in the middle of an
          * otherwise identical page; a leading-prefix-only comparison would score an 86-character
@@ -376,7 +378,7 @@ public class SoftNotFoundDetector {
             }
             int longest = Math.max(left.length(), right.length());
             int shortest = Math.min(left.length(), right.length());
-            if (longest - shortest > Math.max(8, longest / 50)) {
+            if (longest - shortest > longest / 50) {
                 return false;
             }
 
@@ -394,7 +396,16 @@ public class SoftNotFoundDetector {
                 suffix++;
             }
 
-            return prefix + suffix >= (int) (shortest * 0.95);
+            // Integer division on purpose: a body shorter than 20 characters tolerates no
+            // differing character at all, so short payloads like "{}" vs "{\"a\":1}" stay distinct.
+            int differing = longest - (prefix + suffix);
+            boolean nearlyIdentical = differing <= longest / 20;
+            if (nearlyIdentical) {
+                logger.info("Response body matches the unknown-path baseline within tolerance "
+                        + "({} of {} characters differ); treating it as the catch-all answering.",
+                        differing, longest);
+            }
+            return nearlyIdentical;
         }
     }
 }
