@@ -1,5 +1,5 @@
 # OWASP API Security Testing Framework: example configuration
-# Pass this file to the CLI with: java -jar astf-v2.0.1.jar -c scan-config.yaml
+# Pass this file to the CLI with: java -jar astf-v2.0.2.jar -c scan-config.yaml
 #
 # Every key is optional except targetUrl (or pass -u on the command line).
 # Command-line flags override what is written here.
