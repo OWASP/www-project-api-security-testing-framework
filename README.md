@@ -28,14 +28,18 @@ Download the latest pre-built JAR directly from the [GitHub Releases page](https
 curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.1/astf-v2.0.1.jar
 ```
 
-Or build from source:
+Or build from source. Maven itself must run on JDK 21 or newer. `java -version` and `mvn -v` can report different JDKs, and it is the one shown by `mvn -v` that compiles the code:
 
 ```bash
+java -version   # must show 21 or newer
+mvn -v          # the "Java version" line must also show 21 or newer; if not, point JAVA_HOME at a JDK 21
 git clone https://github.com/OWASP/www-project-api-security-testing-framework.git
 cd www-project-api-security-testing-framework
 mvn clean package -DskipTests
-# JAR is at: target/api-security-testing-framework-2.0.1.jar
+java -jar target/api-security-testing-framework-2.0.1.jar --version   # prints the version if the build worked
 ```
+
+Run `target/api-security-testing-framework-<version>.jar`. The `original-api-security-testing-framework-<version>.jar` next to it is the intermediate jar without dependencies and fails with `no main manifest attribute`. If the build or the first run fails, see [Troubleshooting](docs/TROUBLESHOOTING.md#build-and-launch-problems).
 
 ### 3. Run your first scan (copy-paste ready)
 
