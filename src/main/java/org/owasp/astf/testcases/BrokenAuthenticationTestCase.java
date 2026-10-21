@@ -19,6 +19,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.http.SoftNotFoundDetector;
 import org.owasp.astf.core.result.EvidenceMasking;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
@@ -340,6 +341,14 @@ public class BrokenAuthenticationTestCase implements TestCase {
      * never responds with a rate-limit or lockout signal (HTTP 429, or 423 Locked). No lockout
      * after repeated failures means credential-stuffing and brute-force attacks face no
      * automated resistance.
+     * <p>
+     * An outside attacker has no credentials, so the attempts are first sent without any. A run
+     * whose every attempt is answered 401/403 exactly as a path that does not exist is answered
+     * (for example by a gateway that rejects every anonymous call) never reached the login
+     * handler, so it says nothing about lockout. In that case, when the scan has credentials, the
+     * attempts are repeated with them and a result is reported as reachable with the configured
+     * credentials, at a lower severity; without credentials nothing is reported about lockout.
+     * The evidence always says which way the attempts were sent.
      */
     List<Finding> testBruteForceLockout(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
@@ -348,42 +357,132 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         String fullUrl = endpoint.getFullUrl();
-        HttpResponse lastResponse = null;
-
         try {
-            for (int attempt = 0; attempt < BRUTE_FORCE_ATTEMPTS; attempt++) {
-                // An outside attacker has no credentials, so the attempts carry none either.
-                lastResponse = httpClient.postWithStatusNoAuth(fullUrl, "application/json",
-                        String.format("{\"username\":\"admin\",\"password\":\"WrongPass-%d!\"}", attempt));
-                if (lastResponse == null) {
-                    return findings;
-                }
-                if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
-                    return findings; // lockout/rate-limiting is working correctly
-                }
+            LockoutRun anonymousRun = runLockoutAttempts(httpClient, fullUrl, true);
+            if (anonymousRun == null || anonymousRun.lockoutSeen()) {
+                return findings;
+            }
+            if (!anonymousRun.rejectedBeforeHandler()) {
+                findings.add(lockoutFinding(endpoint, anonymousRun, true, null));
+                return findings;
+            }
+            if (!httpClient.hasConfiguredCredentials()) {
+                logger.info("Lockout check on {}: every attempt sent without credentials got HTTP {}, the same " +
+                        "answer as a path that does not exist, so none reached the login handler; no " +
+                        "credentials are configured to retry with, so nothing is reported about lockout.",
+                        fullUrl, anonymousRun.lastResponse().getStatusCode());
+                return findings;
             }
 
-            Finding finding = new Finding(
-                    UUID.randomUUID().toString(),
-                    "No Account Lockout or Rate Limiting on Repeated Failed Logins",
-                    String.format("%d consecutive failed login attempts against the same account produced " +
-                            "no rate-limiting or lockout response (HTTP 429/423). This allows unrestricted " +
-                            "brute-force and credential-stuffing attacks against user accounts.",
-                            BRUTE_FORCE_ATTEMPTS),
-                    Severity.MEDIUM,
-                    getId(),
-                    endpoint.getMethod() + " " + endpoint.getPath(),
-                    "Implement account lockout or exponential rate limiting after a small number of failed " +
-                    "attempts (e.g. 5), and consider CAPTCHA or IP-based throttling for repeated failures."
-            );
-            finding.setEvidence("Last of " + BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
-                    lastResponse.getStatusCode() + " with no lockout signal");
-            findings.add(finding);
+            LockoutRun credentialedRun = runLockoutAttempts(httpClient, fullUrl, false);
+            if (credentialedRun == null || credentialedRun.lockoutSeen()) {
+                return findings;
+            }
+            if (credentialedRun.rejectedBeforeHandler()) {
+                logger.info("Lockout check on {}: attempts were rejected before the login handler both " +
+                        "without credentials and with the configured credentials (HTTP {}); nothing is " +
+                        "reported about lockout.", fullUrl, credentialedRun.lastResponse().getStatusCode());
+                return findings;
+            }
+            findings.add(lockoutFinding(endpoint, credentialedRun, false, anonymousRun));
         } catch (Exception e) {
             logger.debug("Error testing brute-force lockout on {}: {}", endpoint, e.getMessage());
         }
 
         return findings;
+    }
+
+    /**
+     * One run of failed login attempts.
+     *
+     * @param lastResponse          the last response received
+     * @param lockoutSeen           true if an attempt was answered 429 or 423
+     * @param rejectedBeforeHandler true if every attempt was answered 401/403 the same way as a
+     *                              request to a path that does not exist, sent the same way
+     */
+    private record LockoutRun(HttpResponse lastResponse, boolean lockoutSeen, boolean rejectedBeforeHandler) { }
+
+    /** @return the run, or {@code null} if an attempt got no response at all */
+    private LockoutRun runLockoutAttempts(HttpClient httpClient, String fullUrl, boolean anonymous)
+            throws IOException {
+        HttpResponse lastResponse = null;
+        boolean allRejected = true;
+        for (int attempt = 0; attempt < BRUTE_FORCE_ATTEMPTS; attempt++) {
+            lastResponse = postLogin(httpClient, fullUrl, anonymous,
+                    String.format("{\"username\":\"admin\",\"password\":\"WrongPass-%d!\"}", attempt));
+            if (lastResponse == null) {
+                return null;
+            }
+            if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
+                return new LockoutRun(lastResponse, true, false);
+            }
+            int status = lastResponse.getStatusCode();
+            allRejected &= status == 401 || status == 403;
+        }
+        boolean rejectedBeforeHandler = allRejected
+                && answeredLikeUnknownPath(httpClient, fullUrl, anonymous, lastResponse);
+        return new LockoutRun(lastResponse, false, rejectedBeforeHandler);
+    }
+
+    /**
+     * Sends the same kind of login attempt to a sibling path that does not exist. If that is
+     * answered with the same status and body as the login attempts, the 401/403 came from
+     * something in front of the handler (a gateway or global auth filter), not from the login
+     * handler rejecting a wrong password. If the sibling request fails, this answers
+     * {@code false}, so the check keeps reporting as it did before.
+     */
+    private boolean answeredLikeUnknownPath(HttpClient httpClient, String fullUrl, boolean anonymous,
+                                            HttpResponse loginResponse) {
+        okhttp3.HttpUrl url = okhttp3.HttpUrl.parse(fullUrl);
+        if (url == null) {
+            return false;
+        }
+        okhttp3.HttpUrl sibling = url.resolve("astf-lockout-check-" + UUID.randomUUID().toString().substring(0, 8));
+        if (sibling == null) {
+            return false;
+        }
+        try {
+            HttpResponse unknown = postLogin(httpClient, sibling.toString(), anonymous,
+                    "{\"username\":\"admin\",\"password\":\"WrongPass-0!\"}");
+            return unknown != null
+                    && unknown.getStatusCode() == loginResponse.getStatusCode()
+                    && SoftNotFoundDetector.normalizeBody(unknown.getBody())
+                            .equals(SoftNotFoundDetector.normalizeBody(loginResponse.getBody()));
+        } catch (IOException e) {
+            logger.debug("Unknown-path comparison for the lockout check failed on {}: {}", fullUrl, e.getMessage());
+            return false;
+        }
+    }
+
+    private Finding lockoutFinding(EndpointInfo endpoint, LockoutRun run, boolean anonymous, LockoutRun anonymousRun) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                anonymous ? "No Account Lockout or Rate Limiting on Repeated Failed Logins"
+                        : "No Account Lockout or Rate Limiting on Repeated Failed Logins"
+                                + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                String.format("%d consecutive failed login attempts against the same account produced " +
+                        "no rate-limiting or lockout response (HTTP 429/423)%s. This allows unrestricted " +
+                        "brute-force and credential-stuffing attacks against user accounts%s.",
+                        BRUTE_FORCE_ATTEMPTS,
+                        anonymous ? "" : " when the attempts carry the scan's configured credentials " +
+                                "(without them, every attempt was rejected before reaching the login handler)",
+                        anonymous ? "" : " by anyone holding such credentials"),
+                anonymous ? Severity.MEDIUM : Severity.LOW,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Implement account lockout or exponential rate limiting after a small number of failed " +
+                "attempts (e.g. 5), and consider CAPTCHA or IP-based throttling for repeated failures."
+        );
+        String evidence = "Last of " + BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
+                run.lastResponse().getStatusCode() + " with no lockout signal. Attempts sent " +
+                (anonymous ? "without credentials" : "with the configured credentials");
+        if (anonymousRun != null) {
+            evidence += ". Sent without credentials, every attempt got HTTP " +
+                    anonymousRun.lastResponse().getStatusCode() +
+                    ", the same answer as a path that does not exist";
+        }
+        finding.setEvidence(evidence);
+        return finding;
     }
 
     private List<Finding> testMissingAuthentication(EndpointInfo endpoint, HttpClient httpClient) {

@@ -225,7 +225,8 @@ public class HttpClient {
      * Sends a request as the secondary identity only. Unlike passing
      * {@link #getSecondaryAuthHeaders()} to a normal request, which only replaces
      * {@code Authorization}, this leaves off everything that belongs to the primary identity: the
-     * configured API key, credential-like custom headers, cookies and the Basic Auth retry. Used
+     * configured API key, every custom header except the protocol headers (see
+     * {@link #isPrimaryCredentialHeader}), cookies and the Basic Auth retry. Used
      * by cross-user checks so a success can only be explained by the secondary token.
      *
      * @param method      GET, POST, PUT, PATCH or DELETE (anything else is sent with that method name)
@@ -243,10 +244,13 @@ public class HttpClient {
     }
 
     /**
-     * @return true if this scan sends any credential of its own: a bearer token, API key, Basic
-     *     Auth, an {@code Authorization} or credential-like custom header, or a cookie captured
-     *     earlier in the scan. Checks that first probe without credentials use this to decide
-     *     whether a credentialed retry can show anything the anonymous probe did not.
+     * @return true if this scan was configured with a credential of its own: a bearer token, API
+     *     key, Basic Auth, or a custom header that is part of the primary identity (any custom
+     *     header other than the protocol headers Accept, Content-Type, User-Agent, Accept-Language
+     *     and Accept-Encoding). A cookie the target set during the scan does not count: a scan
+     *     with no credentials can still collect cookies, and retrying with those would not show
+     *     anything about the configured identity. Checks that first probe without credentials use
+     *     this to decide whether a credentialed retry can show anything the anonymous probe did not.
      */
     public boolean hasConfiguredCredentials() {
         if (config.getBearerToken() != null && !config.getBearerToken().isEmpty()) {
@@ -258,10 +262,7 @@ public class HttpClient {
         if (config.getBasicAuthUsername() != null && !config.getBasicAuthUsername().isEmpty()) {
             return true;
         }
-        if (defaultHeaders.keySet().stream().anyMatch(this::isPrimaryCredentialHeader)) {
-            return true;
-        }
-        return cookieStore.values().stream().anyMatch(list -> !list.isEmpty());
+        return defaultHeaders.keySet().stream().anyMatch(this::isPrimaryCredentialHeader);
     }
 
     /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
@@ -310,7 +311,7 @@ public class HttpClient {
      * different client identities, not to verify the server's identity to the caller.
      * <p>
      * The request carries the certificate as its only credential: no bearer token, API key,
-     * credential-like custom header, cookie or Basic Auth retry. Otherwise a server that ignores
+     * custom header other than the protocol headers, cookie or Basic Auth retry. Otherwise a server that ignores
      * the certificate but accepts the token would look like it accepts any certificate.
      *
      * @param url The target URL (must be https://)
@@ -599,7 +600,7 @@ public class HttpClient {
 
     /**
      * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header,
-     *     the configured API-key header and credential-like custom headers (see
+     *     the configured API-key header and every custom header except the protocol headers (see
      *     {@link #isPrimaryCredentialHeader(String)}) that would otherwise always be attached from
      *     {@link #defaultHeaders}. Needed by any caller that
      *     deliberately wants to send a request with zero credentials — e.g. an "endpoint actually
@@ -666,28 +667,25 @@ public class HttpClient {
         return names;
     }
 
-    // Name fragments that mark a user-configured custom header as a credential (for example
-    // X-Auth-Token, X-Session-Id, X-CSRF-Token, X-Api-Secret). Such a header is left off requests
-    // that must not carry the primary identity; other custom headers (tenant ids, versions) are
-    // still sent so the request is routed the same way.
-    private static final List<String> CREDENTIAL_NAME_FRAGMENTS = List.of(
-            "auth", "token", "key", "secret", "session", "cookie", "csrf", "xsrf",
-            "password", "passwd", "credential", "jwt", "signature");
+    // The only user-configured custom headers that a request without the primary identity still
+    // carries: protocol headers that say how to frame or decode the exchange and cannot name a
+    // user. Every other custom header is treated as part of the primary identity, because
+    // identity often travels in headers whose names do not look like credentials (X-User-Id,
+    // X-Hasura-Role, X-Forwarded-User, X-Remote-User, X-Account-Id behind a trusting gateway).
+    private static final Set<String> PROTOCOL_HEADERS = Set.of(
+            "accept", "content-type", "user-agent", "accept-language", "accept-encoding");
 
     /**
-     * @return true if a default (config) header with this name carries the primary identity:
-     *     {@code Authorization}, cookies, the configured API-key header, or a custom header whose
-     *     name looks like a credential (see {@link #CREDENTIAL_NAME_FRAGMENTS}).
+     * @return true if a default (config) header with this name belongs to the primary identity
+     *     and is left off NoAuth and secondary-identity requests: {@code Authorization}, the
+     *     configured API-key header, and every other user-configured custom header except the
+     *     protocol headers in {@link #PROTOCOL_HEADERS}.
      */
     private boolean isPrimaryCredentialHeader(String headerName) {
-        if (NEVER_STRIPPED.stream().anyMatch(headerName::equalsIgnoreCase)) {
-            return false;
-        }
         if (credentialHeaderNames().stream().anyMatch(headerName::equalsIgnoreCase)) {
             return true;
         }
-        String lower = headerName.toLowerCase(java.util.Locale.ROOT);
-        return CREDENTIAL_NAME_FRAGMENTS.stream().anyMatch(lower::contains);
+        return PROTOCOL_HEADERS.stream().noneMatch(headerName::equalsIgnoreCase);
     }
 
     /**
@@ -742,7 +740,7 @@ public class HttpClient {
 
     /**
      * Any-method variant of {@link #getWithStatusNoAuth(String)}: sends {@code method} with no
-     * credentials of any kind (no token, API key, credential-like custom header, cookie or Basic
+     * credentials of any kind (no token, API key, custom header other than the protocol headers, cookie or Basic
      * Auth retry).
      *
      * @param contentType content type of {@code body}; ignored for GET, HEAD and DELETE

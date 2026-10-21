@@ -206,15 +206,19 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                 // would otherwise yield one CRITICAL finding per admin path probed below.
                 // The probe is sent without credentials first, since the finding claims no
                 // authorization was needed.
+                // Each response is compared with an unknown-path baseline fetched the same way
+                // (anonymous or with credentials), so a login wall's sign-in page is not
+                // mistaken for an admin endpoint.
                 AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
                         () -> httpClient.getWithStatusNoAuth(testUrl),
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && isApiResponse(r)
-                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r));
+                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r, true));
                 HttpResponse response = probe.response();
 
                 if (response != null && response.isSuccess() && isApiResponse(response)
-                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
+                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response,
+                                probe.anonymous())) {
                     Finding finding = probe.anonymous()
                             ? new Finding(
                                     UUID.randomUUID().toString(),

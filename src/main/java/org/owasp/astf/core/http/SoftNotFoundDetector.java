@@ -68,7 +68,9 @@ import org.apache.logging.log4j.Logger;
  *
  * <p>Baselines are cached per base URL on the detector instance. Test cases hold one detector for
  * their lifetime and the registry creates each test case once per scan, so the probe costs two
- * requests per target per test case — not two per endpoint.</p>
+ * requests per target per test case — not two per endpoint. A test case that compares probes
+ * sent without credentials asks for an anonymous baseline, which is fetched without credentials
+ * and cached separately, so such a test case can cost two more requests per target.</p>
  */
 public class SoftNotFoundDetector {
     private static final Logger logger = LogManager.getLogger(SoftNotFoundDetector.class);
@@ -111,6 +113,15 @@ public class SoftNotFoundDetector {
     private final Map<String, Baseline> baselinesByBaseUrl = new ConcurrentHashMap<>();
 
     /**
+     * Baselines fetched without credentials, for comparing probes that were themselves sent
+     * without credentials. Kept apart from {@link #baselinesByBaseUrl} because a target behind a
+     * login wall answers an anonymous caller with the same sign-in page for every path while
+     * answering an authenticated caller's unknown path with a 404: compared with the
+     * authenticated baseline, that sign-in page would look like a real hit on every probed path.
+     */
+    private final Map<String, Baseline> anonymousBaselinesByBaseUrl = new ConcurrentHashMap<>();
+
+    /**
      * Reports whether {@code response} is indistinguishable from what {@code baseUrl} returns for
      * a path that doesn't exist, and therefore must not be read as evidence that the probed path
      * is real.
@@ -126,6 +137,19 @@ public class SoftNotFoundDetector {
      * @return {@code true} when the response is the target's generic unknown-path answer
      */
     public boolean looksLikeUnknownPath(String baseUrl, HttpClient httpClient, HttpResponse response) {
+        return looksLikeUnknownPath(baseUrl, httpClient, response, false);
+    }
+
+    /**
+     * Same as {@link #looksLikeUnknownPath(String, HttpClient, HttpResponse)}, with the baseline
+     * fetched the same way the probe was sent. Pass {@code anonymous = true} for a response to a
+     * request sent without credentials (the {@code *NoAuth} methods of {@link HttpClient}); its
+     * baseline is then fetched without credentials too, and cached separately.
+     *
+     * @param anonymous true if {@code response} came from a request sent without credentials
+     */
+    public boolean looksLikeUnknownPath(String baseUrl, HttpClient httpClient, HttpResponse response,
+                                        boolean anonymous) {
         if (response == null || !response.isSuccess()) {
             return false;
         }
@@ -141,7 +165,7 @@ public class SoftNotFoundDetector {
             return false;
         }
 
-        Baseline baseline = baselineFor(baseUrl, httpClient);
+        Baseline baseline = baselineFor(baseUrl, httpClient, anonymous);
         return baseline.matches(response);
     }
 
@@ -158,7 +182,7 @@ public class SoftNotFoundDetector {
         if (baseUrl == null || baseUrl.isBlank() || httpClient == null) {
             return false;
         }
-        return baselineFor(baseUrl, httpClient).catchAllPresent();
+        return baselineFor(baseUrl, httpClient, false).catchAllPresent();
     }
 
     /**
@@ -239,7 +263,7 @@ public class SoftNotFoundDetector {
      * @param body raw response body; {@code null} normalises to an empty string
      * @return the normalised form used for baseline comparison
      */
-    static String normalizeBody(String body) {
+    public static String normalizeBody(String body) {
         if (body == null) {
             return "";
         }
@@ -251,8 +275,9 @@ public class SoftNotFoundDetector {
         return normalized.trim();
     }
 
-    private Baseline baselineFor(String baseUrl, HttpClient httpClient) {
-        Baseline cached = baselinesByBaseUrl.get(baseUrl);
+    private Baseline baselineFor(String baseUrl, HttpClient httpClient, boolean anonymous) {
+        Map<String, Baseline> cache = anonymous ? anonymousBaselinesByBaseUrl : baselinesByBaseUrl;
+        Baseline cached = cache.get(baseUrl);
         if (cached != null) {
             return cached;
         }
@@ -260,18 +285,20 @@ public class SoftNotFoundDetector {
         // Probing outside the map's compute lock: a race just means two threads each send the
         // two probe requests and one of the results is discarded, which is cheaper than holding
         // a bin lock across network I/O.
-        Baseline probed = probe(baseUrl, httpClient);
-        Baseline existing = baselinesByBaseUrl.putIfAbsent(baseUrl, probed);
+        Baseline probed = probe(baseUrl, httpClient, anonymous);
+        Baseline existing = cache.putIfAbsent(baseUrl, probed);
         return existing != null ? existing : probed;
     }
 
-    private Baseline probe(String baseUrl, HttpClient httpClient) {
+    private Baseline probe(String baseUrl, HttpClient httpClient, boolean anonymous) {
         String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         List<Sample> samples = new ArrayList<>(2);
 
         for (String probePath : probePaths()) {
             try {
-                HttpResponse response = httpClient.getWithStatus(cleanBase + probePath, Map.of());
+                HttpResponse response = anonymous
+                        ? httpClient.getWithStatusNoAuth(cleanBase + probePath)
+                        : httpClient.getWithStatus(cleanBase + probePath, Map.of());
                 if (response != null && response.isSuccess()) {
                     samples.add(new Sample(contentTypeFamily(response), normalizeBody(response.getBody())));
                 }
@@ -284,8 +311,9 @@ public class SoftNotFoundDetector {
         }
 
         if (!samples.isEmpty()) {
-            logger.info("Target {} answers 2xx for deliberately-nonexistent paths — probe hits " +
-                    "matching that generic response will not be reported as discoveries.", cleanBase);
+            logger.info("Target {} answers 2xx for deliberately-nonexistent paths{} — probe hits " +
+                    "matching that generic response will not be reported as discoveries.", cleanBase,
+                    anonymous ? " when asked without credentials" : "");
         }
         return new Baseline(samples);
     }

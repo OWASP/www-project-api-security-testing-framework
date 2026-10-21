@@ -72,6 +72,14 @@ class HttpClientCredentialIsolationTest {
         config.addHeader("X-API-Key", "primary-key");
         config.addHeader("X-Session-Token", "custom-secret");
         config.addHeader("X-Custom-Static-Header", "keep-me");
+        config.addHeader("X-User-Id", "42");
+        config.addHeader("X-Hasura-Role", "admin");
+        config.addHeader("X-Forwarded-User", "alice");
+        config.addHeader("X-Remote-User", "alice");
+        config.addHeader("X-Account-Id", "acct-7");
+        config.addHeader("Accept", "application/vnd.test+json");
+        config.addHeader("User-Agent", "astf-test-agent");
+        config.addHeader("Accept-Language", "de-DE");
         config.setSecondaryBearerToken("secondary-token");
         return new HttpClient(config);
     }
@@ -86,6 +94,26 @@ class HttpClientCredentialIsolationTest {
         assertNull(r.getHeader("X-API-Key"), "API key must not be sent: " + r.getRequestLine());
         assertNull(r.getHeader("X-Session-Token"), "credential-like custom header must not be sent: " + r.getRequestLine());
         assertNull(r.getHeader("Cookie"), "cookies must not be sent: " + r.getRequestLine());
+        assertNoIdentityHeaders(r);
+    }
+
+    /** Custom headers that name or select a user (or anything else not on the protocol allowlist). */
+    private static final List<String> IDENTITY_HEADERS = List.of(
+            "X-User-Id", "X-Hasura-Role", "X-Forwarded-User", "X-Remote-User", "X-Account-Id",
+            "X-Custom-Static-Header");
+
+    private static void assertNoIdentityHeaders(RecordedRequest r) {
+        for (String name : IDENTITY_HEADERS) {
+            assertNull(r.getHeader(name), name + " is part of the primary identity and must not be sent: "
+                    + r.getRequestLine());
+        }
+    }
+
+    /** The protocol headers the user configured are still sent, with the user's values. */
+    private static void assertProtocolHeadersKept(RecordedRequest r) {
+        assertEquals("application/vnd.test+json", r.getHeader("Accept"), r.getRequestLine());
+        assertEquals("astf-test-agent", r.getHeader("User-Agent"), r.getRequestLine());
+        assertEquals("de-DE", r.getHeader("Accept-Language"), r.getRequestLine());
     }
 
     @Test
@@ -107,8 +135,7 @@ class HttpClientCredentialIsolationTest {
         assertEquals(7, received.size());
         for (RecordedRequest r : received) {
             assertNoPrimaryCredentials(r);
-            assertEquals("keep-me", r.getHeader("X-Custom-Static-Header"),
-                    "non-credential custom headers are still sent");
+            assertProtocolHeadersKept(r);
         }
         assertEquals("PATCH", received.get(3).getMethod());
     }
@@ -132,7 +159,24 @@ class HttpClientCredentialIsolationTest {
             assertNull(r.getHeader("X-API-Key"), "primary API key must not ride along: " + r.getRequestLine());
             assertNull(r.getHeader("X-Session-Token"), "primary custom credential must not ride along");
             assertNull(r.getHeader("Cookie"), "primary cookies must not ride along");
+            assertNoIdentityHeaders(r);
+            assertProtocolHeadersKept(r);
         }
+    }
+
+    @Test
+    @DisplayName("Normal requests still carry every configured custom header")
+    void normalRequestsKeepIdentityHeaders() throws Exception {
+        startServer();
+        HttpClient client = credentialedClient(server.url("/").toString());
+        client.getWithStatus(server.url("/api/me").toString(), java.util.Map.of());
+
+        RecordedRequest r = received.get(0);
+        assertEquals("Bearer primary-token", r.getHeader("Authorization"));
+        assertEquals("42", r.getHeader("X-User-Id"));
+        assertEquals("admin", r.getHeader("X-Hasura-Role"));
+        assertEquals("keep-me", r.getHeader("X-Custom-Static-Header"));
+        assertProtocolHeadersKept(r);
     }
 
     @Test
@@ -147,7 +191,7 @@ class HttpClientCredentialIsolationTest {
     }
 
     @Test
-    @DisplayName("hasConfiguredCredentials reports token, API key, basic auth and captured cookies")
+    @DisplayName("hasConfiguredCredentials reports configured token, API key, basic auth and identity headers only")
     void hasConfiguredCredentials() throws Exception {
         startServer();
         String target = server.url("/").toString();
@@ -173,13 +217,21 @@ class HttpClientCredentialIsolationTest {
         custom.addHeader("X-Session-Token", "s");
         assertTrue(new HttpClient(custom).hasConfiguredCredentials());
 
+        ScanConfig identity = new ScanConfig();
+        identity.setTargetUrl(target);
+        identity.addHeader("X-User-Id", "42");
+        assertTrue(new HttpClient(identity).hasConfiguredCredentials(),
+                "an identity header such as X-User-Id is part of the configured identity");
+
         ScanConfig none = new ScanConfig();
         none.setTargetUrl(target);
-        none.addHeader("X-Custom-Static-Header", "keep-me");
+        none.addHeader("Accept", "application/json");
+        none.addHeader("User-Agent", "astf-test-agent");
         HttpClient plain = new HttpClient(none);
         assertFalse(plain.hasConfiguredCredentials());
         captureSessionCookie(plain);
-        assertTrue(plain.hasConfiguredCredentials(), "a captured session cookie is a credential");
+        assertFalse(plain.hasConfiguredCredentials(),
+                "a cookie the target set during a scan with no credentials is not a configured credential");
     }
 
     @Test

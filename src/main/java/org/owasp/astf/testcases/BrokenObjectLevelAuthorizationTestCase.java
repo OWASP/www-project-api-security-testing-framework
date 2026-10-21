@@ -104,8 +104,9 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      * is false), and the single-identity checks above remain the fallback.
      * <p>
      * The secondary request is sent with {@link HttpClient#sendWithStatusAsSecondary}, which
-     * carries only the secondary token: none of the primary identity's API key, credential-like
-     * custom headers or cookies, so the success cannot come from the primary identity.
+     * carries only the secondary token: none of the primary identity's API key, custom headers (other
+     * than Accept, Content-Type, User-Agent, Accept-Language and Accept-Encoding) or cookies, so the
+     * success cannot come from the primary identity.
      *
      * Unlike {@link #testNumericIdManipulation}/{@link #testUuidManipulation}, which need a
      * numeric/UUID value to substitute an alternative into, this check only compares two

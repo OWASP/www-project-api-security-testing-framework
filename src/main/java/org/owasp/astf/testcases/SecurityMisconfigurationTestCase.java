@@ -218,16 +218,20 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                 // an API gateway default route answers 200 with a JSON "not found" envelope —
                 // either way every single probe would otherwise be reported, most of them HIGH.
                 // Sent without credentials first, since the finding says "publicly accessible".
+                // Each response is compared with an unknown-path baseline fetched the same way
+                // (anonymous or with credentials), so a login wall that answers every anonymous
+                // request with the same sign-in page is not read as 30 exposed endpoints.
                 AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
                         () -> httpClient.getWithStatusNoAuth(testUrl),
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && !r.getBody().isEmpty()
-                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r));
+                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r, true));
                 HttpResponse response = probe.response();
 
                 if (response != null && response.isSuccess()
                         && !response.getBody().isEmpty()
-                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
+                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response,
+                                probe.anonymous())) {
                     boolean conventionallyPublic = CONVENTIONALLY_PUBLIC_ENDPOINTS.contains(debugPath);
                     boolean anonymous = probe.anonymous();
                     Severity severity = conventionallyPublic
