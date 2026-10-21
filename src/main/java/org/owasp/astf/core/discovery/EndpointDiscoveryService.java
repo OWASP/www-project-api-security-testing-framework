@@ -309,9 +309,11 @@ public class EndpointDiscoveryService {
      *   <li>The operation's own {@code security}, when present: a non-empty array requires auth,
      *       an explicit empty array {@code []} marks it public.</li>
      *   <li>Otherwise the root {@code security}, with the same meaning.</li>
-     *   <li>Otherwise, if the spec defines {@code components.securitySchemes}, the API has an
-     *       authentication mechanism, so the operation is treated as requiring auth.</li>
-     *   <li>Otherwise it is public.</li>
+     *   <li>Otherwise it is public. Defining {@code components.securitySchemes} does not by itself
+     *       require anything: a scheme only applies where a {@code security} requirement names it,
+     *       so an operation that declares none is public (VAmPI marks only its protected
+     *       operations, and treating the rest as protected reported them as missing
+     *       authentication).</li>
      * </ol>
      */
     static boolean resolveEffectiveSecurity(JsonNode root, JsonNode operation) {
@@ -323,8 +325,7 @@ public class EndpointDiscoveryService {
         if (rootSecurity != null && rootSecurity.isArray()) {
             return rootSecurity.size() > 0;
         }
-        JsonNode schemes = root == null ? null : root.path("components").get("securitySchemes");
-        return schemes != null && schemes.isObject() && schemes.size() > 0;
+        return false;
     }
 
     /**

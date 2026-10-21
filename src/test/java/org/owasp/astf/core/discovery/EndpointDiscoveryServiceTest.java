@@ -335,15 +335,15 @@ class EndpointDiscoveryServiceTest {
     }
 
     @Test
-    @DisplayName("A spec that defines securitySchemes but no security requirement treats operations as protected")
-    void testSecuritySchemesWithoutRequirementMeansAuth() throws IOException {
+    @DisplayName("securitySchemes alone require nothing: only operations that name a scheme are protected (VAmPI shape)")
+    void testSecuritySchemesWithoutRequirementIsPublic() throws IOException {
         String openApi = """
                 {
                   "openapi": "3.0.0",
-                  "components": {"securitySchemes": {"apiKey": {"type": "apiKey", "in": "header", "name": "X-Key"}}},
+                  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
                   "paths": {
-                    "/api/products": {"get": {}},
-                    "/api/status": {"get": {"security": []}}
+                    "/books/v1": {"get": {}, "post": {"security": [{"bearerAuth": []}]}},
+                    "/me": {"get": {"security": [{"bearerAuth": []}]}}
                   }
                 }
                 """;
@@ -351,7 +351,9 @@ class EndpointDiscoveryServiceTest {
 
         List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
 
-        assertTrue(find(endpoints, "GET", "/api/products").isRequiresAuthentication());
-        assertFalse(find(endpoints, "GET", "/api/status").isRequiresAuthentication());
+        assertFalse(find(endpoints, "GET", "/books/v1").isRequiresAuthentication(),
+                "no security requirement anywhere on this operation means it is public");
+        assertTrue(find(endpoints, "POST", "/books/v1").isRequiresAuthentication());
+        assertTrue(find(endpoints, "GET", "/me").isRequiresAuthentication());
     }
 }
