@@ -35,6 +35,7 @@ import okhttp3.Cookie;
 import okhttp3.CookieJar;
 import okhttp3.Credentials;
 import okhttp3.HttpUrl;
+import okhttp3.Interceptor;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
@@ -98,8 +99,12 @@ public class HttpClient {
                 .writeTimeout(Duration.ofSeconds(30))
                 .connectionPool(new ConnectionPool(20, 5, TimeUnit.MINUTES))
                 .cookieJar(new InMemoryCookieJar())
-                .followRedirects(true)
-                .followSslRedirects(true);
+                .followRedirects(config.isFollowRedirects())
+                .followSslRedirects(config.isFollowRedirects())
+                // A network interceptor sees every hop, including followed redirects, after the
+                // cookie jar has added its Cookie header, so it is the one place that can keep
+                // credentials on the target for every request this client sends.
+                .addNetworkInterceptor(this::pinCredentialsToScope);
 
         // Configure proxy if specified
         if (config.getProxyHost() != null && !config.getProxyHost().isEmpty()) {
@@ -739,11 +744,10 @@ public class HttpClient {
                     return null;
                 }
             }
-            // Only send the credentials to the configured target host and port, never to a redirect target.
+            // Only send the credentials to the configured target (or a scopeHosts entry),
+            // never to some other host a redirect led to.
             HttpUrl target = HttpUrl.parse(config.getTargetUrl());
-            HttpUrl requestUrl = response.request().url();
-            if (target == null || !target.host().equalsIgnoreCase(requestUrl.host())
-                    || target.port() != requestUrl.port()) {
+            if (target == null || !isInCredentialScope(response.request().url())) {
                 return null;
             }
             String credential = Credentials.basic(config.getBasicAuthUsername(), config.getBasicAuthPassword());
@@ -753,6 +757,139 @@ public class HttpClient {
         };
 
         builder.authenticator(authenticator);
+    }
+
+    // Standard protocol headers that are never treated as credentials, even when the user set
+    // them as custom headers: removing them would change how the request is framed or decoded.
+    private static final Set<String> NEVER_STRIPPED = Set.of(
+            "accept", "accept-encoding", "accept-language", "content-type", "content-length",
+            "content-encoding", "transfer-encoding", "user-agent", "host", "connection",
+            "proxy-authorization");
+
+    /**
+     * Network interceptor that keeps the scan's credentials on the target. A request to any
+     * host:port other than the target (or a {@code scopeHosts} entry) is still sent, so discovery
+     * and redirect handling are not reduced, but without the Authorization header, the API-key
+     * header, any user-configured custom header, and cookies.
+     */
+    private Response pinCredentialsToScope(Interceptor.Chain chain) throws IOException {
+        Request request = chain.request();
+        HttpUrl url = request.url();
+        if (isInCredentialScope(url)) {
+            // OkHttp itself drops Authorization when a redirect changes host. A host the user
+            // listed in scopeHosts is allowed to receive it, so put back the caller's value.
+            if (request.header("Authorization") == null && !isTargetHost(url)) {
+                String original = chain.call().request().header("Authorization");
+                if (original != null) {
+                    request = request.newBuilder().header("Authorization", original).build();
+                }
+            }
+            return chain.proceed(request);
+        }
+
+        Request.Builder stripped = request.newBuilder();
+        List<String> removed = new ArrayList<>();
+        for (String name : request.headers().names()) {
+            if (isCredentialForScope(name)) {
+                stripped.removeHeader(name);
+                removed.add(name);
+            }
+        }
+        if (!removed.isEmpty()) {
+            logger.debug("Request to {}:{} is outside the scan scope; sent without {}",
+                    url.host(), url.port(), removed);
+        }
+        return chain.proceed(stripped.build());
+    }
+
+    private boolean isCredentialForScope(String headerName) {
+        if (NEVER_STRIPPED.stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return false;
+        }
+        if ("Authorization".equalsIgnoreCase(headerName) || "Cookie".equalsIgnoreCase(headerName)
+                || "Cookie2".equalsIgnoreCase(headerName)) {
+            return true;
+        }
+        if (credentialHeaderNames().stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return true;
+        }
+        return defaultHeaders.keySet().stream().anyMatch(headerName::equalsIgnoreCase);
+    }
+
+    /**
+     * @return true if the URL's host and port are the configured target's, or match an entry in
+     *     {@code scopeHosts} ({@code host} for any port, {@code host:port} for that port only).
+     *     With no parseable target URL there is nothing to pin to, and every host is in scope.
+     */
+    boolean isInCredentialScope(HttpUrl url) {
+        HttpUrl target = config.getTargetUrl() != null ? HttpUrl.parse(config.getTargetUrl()) : null;
+        if (target == null) {
+            return true;
+        }
+        if (isTargetHost(url)) {
+            return true;
+        }
+        for (String entry : config.getScopeHosts()) {
+            if (scopeEntryMatches(entry, url)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isTargetHost(HttpUrl url) {
+        HttpUrl target = config.getTargetUrl() != null ? HttpUrl.parse(config.getTargetUrl()) : null;
+        return target != null && target.host().equalsIgnoreCase(url.host()) && target.port() == url.port();
+    }
+
+    private static boolean scopeEntryMatches(String entry, HttpUrl url) {
+        if (entry == null || entry.isBlank()) {
+            return false;
+        }
+        String e = entry.trim();
+        String host;
+        int port = -1;
+        if (e.contains("://")) {
+            HttpUrl parsed = HttpUrl.parse(e);
+            if (parsed == null) {
+                return false;
+            }
+            host = parsed.host();
+            port = parsed.port();
+        } else if (e.startsWith("[")) {
+            int close = e.indexOf(']');
+            if (close < 0) {
+                return false;
+            }
+            host = e.substring(1, close);
+            if (e.length() > close + 2 && e.charAt(close + 1) == ':') {
+                port = parsePort(e.substring(close + 2));
+                if (port < 0) {
+                    return false;
+                }
+            }
+        } else if (e.indexOf(':') > 0 && e.indexOf(':') == e.lastIndexOf(':')) {
+            host = e.substring(0, e.indexOf(':'));
+            port = parsePort(e.substring(e.indexOf(':') + 1));
+            if (port < 0) {
+                return false;
+            }
+        } else {
+            host = e;
+        }
+        if (!host.equalsIgnoreCase(url.host())) {
+            return false;
+        }
+        return port == -1 || port == url.port();
+    }
+
+    private static int parsePort(String s) {
+        try {
+            int p = Integer.parseInt(s.trim());
+            return p > 0 && p <= 65535 ? p : -1;
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
     }
 
     /**

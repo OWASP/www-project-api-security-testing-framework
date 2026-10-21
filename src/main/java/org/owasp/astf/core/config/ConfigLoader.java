@@ -204,6 +204,27 @@ public class ConfigLoader {
             config.setVerbose(root.get("verbose").asBoolean());
         }
 
+        if (root.has("followRedirects")) {
+            config.setFollowRedirects(root.get("followRedirects").asBoolean(true));
+        }
+
+        // Extra hosts allowed to receive credentials besides the target: a list, or one
+        // comma-separated string.
+        if (root.has("scopeHosts")) {
+            JsonNode scope = root.get("scopeHosts");
+            if (scope.isArray()) {
+                List<String> hosts = new ArrayList<>();
+                scope.forEach(node -> {
+                    if (!node.asText().isBlank()) {
+                        hosts.add(node.asText().trim());
+                    }
+                });
+                config.setScopeHosts(hosts);
+            } else if (scope.isTextual()) {
+                config.setScopeHosts(splitList(scope.asText()));
+            }
+        }
+
         // Headers
         if (root.has("headers") && root.get("headers").isObject()) {
             JsonNode headers = root.get("headers");
@@ -377,6 +398,14 @@ public class ConfigLoader {
             config.setVerbose(Boolean.parseBoolean(props.getProperty("verbose")));
         }
 
+        if (props.containsKey("followRedirects")) {
+            config.setFollowRedirects(Boolean.parseBoolean(props.getProperty("followRedirects").trim()));
+        }
+
+        if (props.containsKey("scopeHosts")) {
+            config.setScopeHosts(splitList(props.getProperty("scopeHosts")));
+        }
+
         // Headers
         for (String key : props.stringPropertyNames()) {
             if (key.startsWith("header.")) {
@@ -435,6 +464,19 @@ public class ConfigLoader {
         }
     }
 
+    private static List<String> splitList(String value) {
+        List<String> items = new ArrayList<>();
+        if (value == null) {
+            return items;
+        }
+        for (String item : value.split(",")) {
+            if (!item.isBlank()) {
+                items.add(item.trim());
+            }
+        }
+        return items;
+    }
+
     /**
      * Applies a configuration value to the specified configuration.
      *
@@ -457,6 +499,8 @@ public class ConfigLoader {
             case "timeoutminutes" -> config.setTimeoutMinutes(Integer.parseInt(value));
             case "discoveryenabled" -> config.setDiscoveryEnabled(Boolean.parseBoolean(value));
             case "verbose" -> config.setVerbose(Boolean.parseBoolean(value));
+            case "followredirects" -> config.setFollowRedirects(Boolean.parseBoolean(value.trim()));
+            case "scopehosts" -> config.setScopeHosts(splitList(value));
             case "proxy_host" -> config.setProxyHost(value);
             case "proxy_port" -> config.setProxyPort(Integer.parseInt(value));
             case "proxy_username" -> config.setProxyUsername(value);

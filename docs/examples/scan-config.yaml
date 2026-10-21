@@ -36,6 +36,18 @@ headers:
   Accept: "application/json"
   # X-Custom-Header: "value"
 
+# Redirects. Followed by default; set to false to report the 3xx response itself.
+followRedirects: true
+
+# Credentials stay on the target. A request to any other host:port (for example a
+# redirect, or a spec URL named by a Swagger UI page) is still sent, but without the
+# Authorization header, the API-key header, the custom headers above, or cookies.
+# List extra hosts that may receive them here: "host" allows any port on that host,
+# "host:port" only that port.
+# scopeHosts:
+#   - "auth.example.com"
+#   - "files.example.com:8443"
+
 # HTTP Basic credentials (alternative to --username / --password).
 # basicAuth:
 #   username: "admin"

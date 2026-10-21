@@ -640,4 +640,51 @@ class ConfigLoaderTest {
         assertNotNull(config);
         assertEquals(ScanConfig.OutputFormat.JSON, config.getOutputFormat());
     }
+
+    @Test
+    @DisplayName("Should read scopeHosts and followRedirects from YAML")
+    void testScopeHostsAndFollowRedirectsYaml(@TempDir Path tempDir) throws IOException {
+        String yaml = """
+                targetUrl: https://api.example.com
+                followRedirects: false
+                scopeHosts:
+                  - auth.example.com
+                  - "files.example.com:8443"
+                """;
+        Path yamlFile = tempDir.resolve("config.yaml");
+        Files.writeString(yamlFile, yaml);
+
+        ScanConfig config = loader.loadFromFile(yamlFile.toString());
+
+        assertFalse(config.isFollowRedirects());
+        assertEquals(List.of("auth.example.com", "files.example.com:8443"), config.getScopeHosts());
+    }
+
+    @Test
+    @DisplayName("Should read scopeHosts and followRedirects from a properties file")
+    void testScopeHostsAndFollowRedirectsProperties(@TempDir Path tempDir) throws IOException {
+        Path props = tempDir.resolve("config.properties");
+        Files.writeString(props, """
+                targetUrl=https://api.example.com
+                followRedirects=false
+                scopeHosts=auth.example.com, files.example.com:8443
+                """);
+
+        ScanConfig config = loader.loadFromFile(props.toString());
+
+        assertFalse(config.isFollowRedirects());
+        assertEquals(List.of("auth.example.com", "files.example.com:8443"), config.getScopeHosts());
+    }
+
+    @Test
+    @DisplayName("followRedirects defaults to true and scopeHosts to empty")
+    void testScopeDefaults(@TempDir Path tempDir) throws IOException {
+        Path yamlFile = tempDir.resolve("config.yaml");
+        Files.writeString(yamlFile, "targetUrl: https://api.example.com\n");
+
+        ScanConfig config = loader.loadFromFile(yamlFile.toString());
+
+        assertTrue(config.isFollowRedirects());
+        assertTrue(config.getScopeHosts().isEmpty());
+    }
 }

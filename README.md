@@ -111,6 +111,15 @@ java -jar astf-v2.0.2.jar -c scan.yaml --token "$API_TOKEN"
 # Two identities for cross-user BOLA checks:  --token "$TOKEN_A" --secondary-token "$TOKEN_B"
 ```
 
+Credentials stay on the target. When a request goes to another host or port (a redirect, or a spec URL that a Swagger UI page points to), ASTF still sends it but drops the `Authorization` header, the API-key header, all custom headers and cookies. To let other hosts receive credentials, list them under `scopeHosts` (`host` for any port, `host:port` for one port). Redirects are followed unless `followRedirects: false` is set:
+
+```yaml
+targetUrl: "https://api.example.com"
+followRedirects: true
+scopeHosts:
+  - "auth.example.com"
+```
+
 See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for every supported key: proxy, custom headers, thread count, timeout, test selection, and inline endpoints.
 
 ---
