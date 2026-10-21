@@ -35,6 +35,7 @@ import okhttp3.Cookie;
 import okhttp3.CookieJar;
 import okhttp3.Credentials;
 import okhttp3.HttpUrl;
+import okhttp3.Interceptor;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Protocol;
@@ -82,6 +83,8 @@ public class HttpClient {
 
     // Lazily-built, per-keystore-path clients for mTLS testing — see getWithClientCert().
     private final Map<String, OkHttpClient> clientCertClients = new ConcurrentHashMap<>();
+    // Same, but built on the credentialed client: see getWithClientCertAndCredentials().
+    private final Map<String, OkHttpClient> credentialedClientCertClients = new ConcurrentHashMap<>();
 
     /**
      * Creates a new HTTP client with the specified configuration.
@@ -89,6 +92,15 @@ public class HttpClient {
      * @param config The scan configuration
      */
     public HttpClient(ScanConfig config) {
+        this(config, builder -> { });
+    }
+
+    /**
+     * Test seam: {@code transport} may adjust how connections are made (socket factory, TLS
+     * trust) before the client is built. It runs after every scan setting has been applied, and
+     * the no-auth client is derived from the result, so both share the same transport.
+     */
+    HttpClient(ScanConfig config, java.util.function.Consumer<OkHttpClient.Builder> transport) {
         this.config = config;
         this.defaultHeaders = new HashMap<>(config.getHeaders());
 
@@ -98,8 +110,12 @@ public class HttpClient {
                 .writeTimeout(Duration.ofSeconds(30))
                 .connectionPool(new ConnectionPool(20, 5, TimeUnit.MINUTES))
                 .cookieJar(new InMemoryCookieJar())
-                .followRedirects(true)
-                .followSslRedirects(true);
+                .followRedirects(config.isFollowRedirects())
+                .followSslRedirects(config.isFollowRedirects())
+                // A network interceptor sees every hop, including followed redirects, after the
+                // cookie jar has added its Cookie header, so it is the one place that can keep
+                // credentials on the target for every request this client sends.
+                .addNetworkInterceptor(this::pinCredentialsToScope);
 
         // Configure proxy if specified
         if (config.getProxyHost() != null && !config.getProxyHost().isEmpty()) {
@@ -111,6 +127,7 @@ public class HttpClient {
             configureBasicAuth(builder);
         }
 
+        transport.accept(builder);
         this.client = builder.build();
         this.noAuthClient = this.client.newBuilder()
                 .authenticator(Authenticator.NONE)
@@ -210,6 +227,179 @@ public class HttpClient {
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
 
+    /** @return true if a secondary identity was configured via {@code --secondary-token} */
+    public boolean hasSecondaryIdentity() {
+        String secondaryToken = config.getSecondaryBearerToken();
+        return secondaryToken != null && !secondaryToken.isEmpty();
+    }
+
+    /**
+     * Sends a request as the secondary identity only. Unlike passing
+     * {@link #getSecondaryAuthHeaders()} to a normal request, which only replaces
+     * {@code Authorization}, this leaves off everything that belongs to the primary identity: the
+     * configured API key, every custom header except the protocol headers (see
+     * {@link #isPrimaryCredentialHeader}), cookies and the Basic Auth retry. Used
+     * by cross-user checks so a success can only be explained by the secondary token.
+     *
+     * @param method      GET, POST, PUT, PATCH or DELETE (anything else is sent with that method name)
+     * @param contentType content type of {@code body}; ignored for methods without a body
+     * @param body        request body; ignored for GET and DELETE
+     * @throws IllegalStateException if no secondary identity is configured
+     */
+    public HttpResponse sendWithStatusAsSecondary(String method, String url, String contentType, String body)
+            throws IOException {
+        if (!hasSecondaryIdentity()) {
+            throw new IllegalStateException("No secondary identity configured");
+        }
+        Request request = buildBareRequest(method, url, contentType, body, getSecondaryAuthHeaders());
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    // Normalized (lower case, without '-' and '_') fragments of custom header names that carry an
+    // application or gateway credential rather than a user's identity, e.g. X-API-Key, apikey,
+    // Ocp-Apim-Subscription-Key, X-App-Key, X-Application-Id, X-Client-Id, X-Gateway-Key.
+    private static final List<String> APPLICATION_CREDENTIAL_NAME_FRAGMENTS = List.of(
+            "apikey", "subscriptionkey", "appkey", "applicationkey", "appid", "applicationid",
+            "clientid", "clientkey", "gatewaykey", "consumerkey");
+
+    // Fragments that mark a header as belonging to a user (or session) even when it also looks
+    // like an application key, e.g. X-User-Api-Key or X-Session-App-Id.
+    private static final List<String> USER_IDENTITY_NAME_FRAGMENTS = List.of(
+            "user", "account", "session", "role", "member", "customer", "token");
+
+    private static String normalizeHeaderName(String name) {
+        return name.toLowerCase(java.util.Locale.ROOT).replace("-", "").replace("_", "");
+    }
+
+    /**
+     * @return the application-level credential headers of this scan: the configured API key under
+     *     its header name, plus any custom header whose name looks like an application or gateway
+     *     key (see {@link #APPLICATION_CREDENTIAL_NAME_FRAGMENTS}) and not like a user identity.
+     *     Never {@code Authorization}, {@code Cookie} or {@code Proxy-Authorization}. Gateways often
+     *     require such a key for every caller in addition to the user's bearer token, so a request
+     *     as the secondary identity can need it too.
+     */
+    private Map<String, String> applicationCredentialHeaders() {
+        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        String apiKey = config.getApiKey();
+        if (apiKey != null && !apiKey.isEmpty()) {
+            String name = config.getApiKeyHeader() != null ? config.getApiKeyHeader() : "X-API-Key";
+            if (!isUserCredentialTransport(name)) {
+                headers.put(name, apiKey);
+            }
+        }
+        for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
+            String name = entry.getKey();
+            if (isUserCredentialTransport(name)
+                    || headers.keySet().stream().anyMatch(name::equalsIgnoreCase)) {
+                continue;
+            }
+            String normalized = normalizeHeaderName(name);
+            if (APPLICATION_CREDENTIAL_NAME_FRAGMENTS.stream().anyMatch(normalized::contains)
+                    && USER_IDENTITY_NAME_FRAGMENTS.stream().noneMatch(normalized::contains)) {
+                headers.put(name, entry.getValue());
+            }
+        }
+        return headers;
+    }
+
+    private static boolean isUserCredentialTransport(String headerName) {
+        return "Authorization".equalsIgnoreCase(headerName) || "Cookie".equalsIgnoreCase(headerName)
+                || "Cookie2".equalsIgnoreCase(headerName) || "Proxy-Authorization".equalsIgnoreCase(headerName);
+    }
+
+    /**
+     * @return true if the scan has an application-level credential (the configured API key, or a
+     *     custom header named like an application or gateway key) that
+     *     {@link #sendWithStatusAsSecondaryWithApplicationCredentials} can add
+     */
+    public boolean hasApplicationCredentials() {
+        return !applicationCredentialHeaders().isEmpty();
+    }
+
+    /** @return the names (never the values) of the application-level credential headers, for evidence */
+    public List<String> getApplicationCredentialHeaderNames() {
+        return new ArrayList<>(applicationCredentialHeaders().keySet());
+    }
+
+    /**
+     * Like {@link #sendWithStatusAsSecondary}, but the request also carries the application-level
+     * credential headers (see {@link #hasApplicationCredentials()}). For API gateways that require
+     * an application API key in addition to each user's bearer token, where the secondary token
+     * alone is always rejected. The request still carries no primary bearer token, cookie, Basic
+     * Auth retry or other custom header.
+     *
+     * @throws IllegalStateException if no secondary identity is configured
+     */
+    public HttpResponse sendWithStatusAsSecondaryWithApplicationCredentials(String method, String url,
+                                                                           String contentType, String body)
+            throws IOException {
+        if (!hasSecondaryIdentity()) {
+            throw new IllegalStateException("No secondary identity configured");
+        }
+        Map<String, String> headers = new java.util.LinkedHashMap<>(applicationCredentialHeaders());
+        headers.putAll(getSecondaryAuthHeaders());
+        Request request = buildBareRequest(method, url, contentType, body, headers);
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    /**
+     * Sends a request with the application-level credential headers only: no bearer token of
+     * either identity, no cookie, no Basic Auth retry and no other custom header. A control for
+     * {@link #sendWithStatusAsSecondaryWithApplicationCredentials}: if this is accepted too, the
+     * application key alone grants access and a success with it says nothing about the
+     * secondary user.
+     */
+    public HttpResponse sendWithStatusApplicationCredentialsOnly(String method, String url,
+                                                                 String contentType, String body)
+            throws IOException {
+        Request request = buildBareRequest(method, url, contentType, body, applicationCredentialHeaders());
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    /**
+     * @return true if this scan was configured with a credential of its own: a bearer token, API
+     *     key, Basic Auth, or a custom header that is part of the primary identity (any custom
+     *     header other than the protocol headers Accept, Content-Type, User-Agent, Accept-Language
+     *     and Accept-Encoding). A cookie the target set during the scan does not count: a scan
+     *     with no credentials can still collect cookies, and retrying with those would not show
+     *     anything about the configured identity. Checks that first probe without credentials use
+     *     this to decide whether a credentialed retry can show anything the anonymous probe did not.
+     */
+    public boolean hasConfiguredCredentials() {
+        if (config.getBearerToken() != null && !config.getBearerToken().isEmpty()) {
+            return true;
+        }
+        if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
+            return true;
+        }
+        if (config.getBasicAuthUsername() != null && !config.getBasicAuthUsername().isEmpty()) {
+            return true;
+        }
+        return defaultHeaders.keySet().stream().anyMatch(this::isPrimaryCredentialHeader);
+    }
+
+    /**
+     * @return true if the scan was configured with an identity credential: a bearer token, API
+     *     key, Basic Auth, or a custom {@code Authorization}, {@code Cookie} or
+     *     {@code Proxy-Authorization} header. A scan whose only configured credential-like values
+     *     are other custom headers (for example a gateway's subscription key) answers false here
+     *     and true for {@link #hasConfiguredCredentials()}; a result reached with them is
+     *     described as reachable with the configured headers rather than with credentials.
+     */
+    public boolean hasIdentityCredentials() {
+        if (config.getBearerToken() != null && !config.getBearerToken().isEmpty()) {
+            return true;
+        }
+        if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
+            return true;
+        }
+        if (config.getBasicAuthUsername() != null && !config.getBasicAuthUsername().isEmpty()) {
+            return true;
+        }
+        return defaultHeaders.keySet().stream().anyMatch(HttpClient::isUserCredentialTransport);
+    }
+
     /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
     public boolean hasClientCert() {
         return config.getClientCertPath() != null && !config.getClientCertPath().isEmpty();
@@ -254,6 +444,10 @@ public class HttpClient {
      * The server's own certificate is deliberately NOT validated by this client (a permissive
      * trust manager is used) — this method exists to probe how the SERVER behaves toward
      * different client identities, not to verify the server's identity to the caller.
+     * <p>
+     * The request carries the certificate as its only credential: no bearer token, API key,
+     * custom header other than the protocol headers, cookie or Basic Auth retry. Otherwise a server that ignores
+     * the certificate but accepts the token would look like it accepts any certificate.
      *
      * @param url The target URL (must be https://)
      * @param headers Additional headers to include
@@ -267,8 +461,32 @@ public class HttpClient {
     public HttpResponse getWithClientCert(String url, Map<String, String> headers,
                                            String certPath, String certPassword) throws IOException {
         OkHttpClient certClient = clientCertClients.computeIfAbsent(certPath,
-                path -> buildClientCertClient(path, certPassword));
+                path -> buildClientCertClient(noAuthClient, path, certPassword));
+        Request request = buildBareRequest("GET", url, null, null, headers);
+        return executeClientCertRequest(certClient, request);
+    }
+
+    /**
+     * Like {@link #getWithClientCert}, but the request also carries the scan's primary
+     * credentials: the bearer token, API key, custom headers and the Basic Auth retry, kept on the
+     * target host as for any other request. For APIs that need a client certificate AND a token,
+     * where the certificate alone is never accepted, so two certificates can only be compared when
+     * both requests carry the same credentials.
+     * <p>
+     * Cookies are not sent and responses do not store any, so a session cookie set by one
+     * certificate's response cannot ride along on the next request: two calls with different
+     * certificates differ only in the certificate.
+     */
+    public HttpResponse getWithClientCertAndCredentials(String url, Map<String, String> headers,
+                                                         String certPath, String certPassword) throws IOException {
+        OkHttpClient certClient = credentialedClientCertClients.computeIfAbsent(certPath,
+                path -> buildValidatingClientCertClient(client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build(),
+                        path, certPassword));
         Request request = createRequest(url, "GET", headers, null, null);
+        return executeClientCertRequest(certClient, request);
+    }
+
+    private HttpResponse executeClientCertRequest(OkHttpClient certClient, Request request) throws IOException {
         try (Response response = certClient.newCall(request).execute()) {
             String body = response.body() != null ? response.body().string() : "";
             Map<String, List<String>> responseHeaders = extractHeaders(response);
@@ -276,7 +494,49 @@ public class HttpClient {
         }
     }
 
-    private OkHttpClient buildClientCertClient(String certPath, String certPassword) {
+    /**
+     * Like {@link #buildClientCertClient} but for requests that carry the scan's credentials: the
+     * client certificate is presented, and the server's certificate and host name are validated
+     * normally (default trust store, default host name verification). A connection whose server
+     * certificate cannot be validated fails with an {@code SSLException} instead of sending a token
+     * or API key to a server that may not be the target.
+     */
+    private OkHttpClient buildValidatingClientCertClient(OkHttpClient base, String certPath, String certPassword) {
+        try {
+            KeyStore keyStore = KeyStore.getInstance("PKCS12");
+            try (FileInputStream in = new FileInputStream(certPath)) {
+                keyStore.load(in, certPassword != null ? certPassword.toCharArray() : new char[0]);
+            }
+            KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(
+                    KeyManagerFactory.getDefaultAlgorithm());
+            keyManagerFactory.init(keyStore, certPassword != null ? certPassword.toCharArray() : new char[0]);
+
+            javax.net.ssl.TrustManagerFactory trustManagerFactory = javax.net.ssl.TrustManagerFactory.getInstance(
+                    javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm());
+            trustManagerFactory.init((KeyStore) null);
+            X509TrustManager defaultTrust = null;
+            for (javax.net.ssl.TrustManager tm : trustManagerFactory.getTrustManagers()) {
+                if (tm instanceof X509TrustManager x509) {
+                    defaultTrust = x509;
+                    break;
+                }
+            }
+            if (defaultTrust == null) {
+                throw new IllegalStateException("No default X509TrustManager available");
+            }
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(keyManagerFactory.getKeyManagers(), new X509TrustManager[]{defaultTrust},
+                    new SecureRandom());
+            return base.newBuilder()
+                    .sslSocketFactory(sslContext.getSocketFactory(), defaultTrust)
+                    .build();
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load client certificate from " + certPath, e);
+        }
+    }
+
+    private OkHttpClient buildClientCertClient(OkHttpClient base, String certPath, String certPassword) {
         try {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
             try (FileInputStream in = new FileInputStream(certPath)) {
@@ -299,7 +559,7 @@ public class HttpClient {
             sslContext.init(keyManagerFactory.getKeyManagers(),
                     new X509TrustManager[]{trustAllServerCerts}, new SecureRandom());
 
-            return client.newBuilder()
+            return base.newBuilder()
                     .sslSocketFactory(sslContext.getSocketFactory(), trustAllServerCerts)
                     .hostnameVerifier((hostname, session) -> true)
                     .build();
@@ -540,9 +800,10 @@ public class HttpClient {
     }
 
     /**
-     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header
-     *     and the configured API-key header (see {@link #credentialHeaderNames()}) that would
-     *     otherwise always be attached from {@link #defaultHeaders}. Needed by any caller that
+     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header,
+     *     the configured API-key header and every custom header except the protocol headers (see
+     *     {@link #isPrimaryCredentialHeader(String)}) that would otherwise always be attached from
+     *     {@link #defaultHeaders}. Needed by any caller that
      *     deliberately wants to send a request with zero credentials — e.g. an "endpoint actually
      *     requires auth" baseline probe. Passing an empty {@code additionalHeaders} map is NOT
      *     enough to achieve that on its own: {@link #defaultHeaders} is always applied first
@@ -551,6 +812,19 @@ public class HttpClient {
      */
     private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
                                   MediaType mediaType, RequestBody body, boolean suppressCredentialHeaders) {
+        return createRequest(url, method, additionalHeaders, mediaType, body,
+                suppressCredentialHeaders ? this::isPrimaryCredentialHeader : name -> false);
+    }
+
+    /**
+     * @param skipDefaultHeader decides which default (config) headers are left off: none for a
+     *     normal request, {@link #isPrimaryCredentialHeader} for a request without credentials, or
+     *     only {@link #credentialHeaderNames()} for the 2.0.2 form of that request (see
+     *     {@link #sendWithStatusNoAuthKeepingCustomHeaders}).
+     */
+    private Request createRequest(String url, String method, Map<String, String> additionalHeaders,
+                                  MediaType mediaType, RequestBody body,
+                                  java.util.function.Predicate<String> skipDefaultHeader) {
         Request.Builder requestBuilder = new Request.Builder()
                 .url(url);
 
@@ -573,9 +847,8 @@ public class HttpClient {
 
         // Add default headers from config, skipping credential headers when the caller
         // explicitly asked for an unauthenticated request.
-        Set<String> credentialHeaderNames = suppressCredentialHeaders ? credentialHeaderNames() : Set.of();
         for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
-            if (credentialHeaderNames.stream().anyMatch(entry.getKey()::equalsIgnoreCase)) {
+            if (skipDefaultHeader.test(entry.getKey())) {
                 continue;
             }
             requestBuilder.header(entry.getKey(), entry.getValue());
@@ -608,6 +881,44 @@ public class HttpClient {
         return names;
     }
 
+    // The only user-configured custom headers that a request without the primary identity still
+    // carries: protocol headers that say how to frame or decode the exchange and cannot name a
+    // user. Every other custom header is treated as part of the primary identity, because
+    // identity often travels in headers whose names do not look like credentials (X-User-Id,
+    // X-Hasura-Role, X-Forwarded-User, X-Remote-User, X-Account-Id behind a trusting gateway).
+    private static final Set<String> PROTOCOL_HEADERS = Set.of(
+            "accept", "content-type", "user-agent", "accept-language", "accept-encoding");
+
+    /**
+     * @return true if a default (config) header with this name belongs to the primary identity
+     *     and is left off NoAuth and secondary-identity requests: {@code Authorization}, the
+     *     configured API-key header, and every other user-configured custom header except the
+     *     protocol headers in {@link #PROTOCOL_HEADERS}.
+     */
+    private boolean isPrimaryCredentialHeader(String headerName) {
+        if (credentialHeaderNames().stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return true;
+        }
+        return PROTOCOL_HEADERS.stream().noneMatch(headerName::equalsIgnoreCase);
+    }
+
+    /**
+     * Builds a request without any of the primary identity's credential headers (see
+     * {@link #isPrimaryCredentialHeader}), then applies {@code extraHeaders}. Executed on
+     * {@link #noAuthClient}, it also has no cookies and no Basic Auth retry.
+     */
+    private Request buildBareRequest(String method, String url, String contentType, String body,
+                                     Map<String, String> extraHeaders) {
+        String m = method.toUpperCase(java.util.Locale.ROOT);
+        MediaType mediaType = null;
+        RequestBody requestBody = null;
+        if (!m.equals("GET") && !m.equals("HEAD") && !m.equals("DELETE")) {
+            mediaType = MediaType.parse(contentType != null ? contentType : "application/json");
+            requestBody = RequestBody.create(body != null ? body : "", mediaType);
+        }
+        return createRequest(url, m, extraHeaders, mediaType, requestBody, true);
+    }
+
     /**
      * Makes a GET request with no credentials attached — not even the configured bearer token or
      * API key — for use as an "endpoint actually requires auth" baseline probe. See
@@ -636,9 +947,113 @@ public class HttpClient {
         return executeRequestWithStatus(createRequest(url, "DELETE", Map.of(), null, null, true), noAuthClient);
     }
 
+    /** PATCH variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse patchWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        return sendWithStatusNoAuth("PATCH", url, contentType, body);
+    }
+
+    /**
+     * Any-method variant of {@link #getWithStatusNoAuth(String)}: sends {@code method} with no
+     * credentials of any kind (no token, API key, custom header other than the protocol headers, cookie or Basic
+     * Auth retry).
+     *
+     * @param contentType content type of {@code body}; ignored for GET, HEAD and DELETE
+     * @param body        request body; ignored for GET, HEAD and DELETE
+     */
+    public HttpResponse sendWithStatusNoAuth(String method, String url, String contentType, String body)
+            throws IOException {
+        return executeRequestWithStatus(buildBareRequest(method, url, contentType, body, Map.of()), noAuthClient);
+    }
+
     /** String-body GET variant of {@link #getWithStatusNoAuth(String)}, for callers that only need the response body. */
     public String getNoAuth(String url) throws IOException {
         return executeRequest(createRequest(url, "GET", Map.of(), null, null, true), noAuthClient);
+    }
+
+    /**
+     * Like {@link #getWithStatusNoAuth(String)}, plus {@code extraHeaders} (for example a guessed
+     * cookie), so the request differs from the anonymous one only in those headers.
+     */
+    public HttpResponse getWithStatusNoAuth(String url, Map<String, String> extraHeaders) throws IOException {
+        return executeRequestWithStatus(buildBareRequest("GET", url, null, null, extraHeaders), noAuthClient);
+    }
+
+    /**
+     * The request that 2.0.2 sent as "without credentials": no {@code Authorization}, no
+     * configured API-key header, no cookies and no Basic Auth retry, but every other custom header
+     * still attached. {@link #sendWithStatusNoAuth} also leaves those headers off, which an API
+     * gateway that wants its own key (for example {@code Ocp-Apim-Subscription-Key} or
+     * {@code X-Gravitee-Api-Key}) rejects before the request reaches the API. Checks send this
+     * form after the stricter one was rejected, so they never find less than 2.0.2 did, and say
+     * in their evidence that the custom headers were kept.
+     */
+    public HttpResponse sendWithStatusNoAuthKeepingCustomHeaders(String method, String url, String contentType,
+                                                                  String body) throws IOException {
+        String m = method.toUpperCase(java.util.Locale.ROOT);
+        MediaType mediaType = null;
+        RequestBody requestBody = null;
+        if (!m.equals("GET") && !m.equals("HEAD") && !m.equals("DELETE")) {
+            mediaType = MediaType.parse(contentType != null ? contentType : "application/json");
+            requestBody = RequestBody.create(body != null ? body : "", mediaType);
+        }
+        Set<String> credentialNames = credentialHeaderNames();
+        Request request = createRequest(url, m, Map.of(), mediaType, requestBody,
+                name -> credentialNames.stream().anyMatch(name::equalsIgnoreCase));
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    /** String-body GET variant of {@link #sendWithStatusNoAuthKeepingCustomHeaders}, as 2.0.2's {@code getNoAuth}. */
+    public String getNoAuthKeepingCustomHeaders(String url) throws IOException {
+        Set<String> credentialNames = credentialHeaderNames();
+        return executeRequest(createRequest(url, "GET", Map.of(), null, null,
+                name -> credentialNames.stream().anyMatch(name::equalsIgnoreCase)), noAuthClient);
+    }
+
+    /**
+     * @return the names of the custom headers that {@link #sendWithStatusNoAuthKeepingCustomHeaders}
+     *     sends and {@link #sendWithStatusNoAuth} does not (every configured header other than
+     *     {@code Authorization}, the API-key header and the protocol headers). Empty when the two
+     *     requests are the same.
+     */
+    public List<String> getCustomHeaderNamesKeptBy202NoAuth() {
+        Set<String> credentialNames = credentialHeaderNames();
+        return defaultHeaders.keySet().stream()
+                .filter(this::isPrimaryCredentialHeader)
+                .filter(name -> credentialNames.stream().noneMatch(name::equalsIgnoreCase))
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    /**
+     * @return the names of the configured headers a normal request carries besides
+     *     {@code Authorization} and the protocol headers (the API-key header and every other
+     *     custom header), plus {@code Cookie} when the cookie jar holds a cookie for {@code url}.
+     *     These are what ride along when only {@code Authorization} is replaced on a normal
+     *     request, as 2.0.2's cross-user check did.
+     */
+    public List<String> getHeaderNamesBesidesAuthorization(String url) {
+        List<String> names = new ArrayList<>(defaultHeaders.keySet().stream()
+                .filter(name -> !"Authorization".equalsIgnoreCase(name))
+                .filter(this::isPrimaryCredentialHeader)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList());
+        if (hasCookiesFor(url)) {
+            names.add("Cookie");
+        }
+        return names;
+    }
+
+    /**
+     * @return true if the cookie jar holds a cookie, set by the target during the scan, that a
+     *     normal request to {@code url} would carry
+     */
+    public boolean hasCookiesFor(String url) {
+        HttpUrl parsed = url != null ? HttpUrl.parse(url) : null;
+        if (parsed == null) {
+            return false;
+        }
+        List<Cookie> cookies = cookieStore.get(parsed.host());
+        return cookies != null && cookies.stream().anyMatch(c -> c.matches(parsed));
     }
 
     /**
@@ -739,11 +1154,17 @@ public class HttpClient {
                     return null;
                 }
             }
-            // Only send the credentials to the configured target host and port, never to a redirect target.
+            // Only send the credentials to the configured target (or a scopeHosts entry),
+            // never to some other host a redirect led to, and never over a downgrade to plain http.
             HttpUrl target = HttpUrl.parse(config.getTargetUrl());
-            HttpUrl requestUrl = response.request().url();
-            if (target == null || !target.host().equalsIgnoreCase(requestUrl.host())
-                    || target.port() != requestUrl.port()) {
+            if (target == null || !isInCredentialScope(response.request().url())) {
+                return null;
+            }
+            Response first = response;
+            while (first.priorResponse() != null) {
+                first = first.priorResponse();
+            }
+            if (isSchemeDowngrade(first.request().url(), response.request().url())) {
                 return null;
             }
             String credential = Credentials.basic(config.getBasicAuthUsername(), config.getBasicAuthPassword());
@@ -753,6 +1174,193 @@ public class HttpClient {
         };
 
         builder.authenticator(authenticator);
+    }
+
+    // Standard protocol headers that are never treated as credentials, even when the user set
+    // them as custom headers: removing them would change how the request is framed or decoded.
+    private static final Set<String> NEVER_STRIPPED = Set.of(
+            "accept", "accept-encoding", "accept-language", "content-type", "content-length",
+            "content-encoding", "transfer-encoding", "user-agent", "host", "connection");
+
+    // host:port values whose requests have already had credentials stripped and been reported
+    // at WARN, so the warning appears once per host rather than once per request.
+    private final Set<String> warnedOutOfScopeHosts = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Network interceptor that keeps the scan's credentials on the target. A request to any
+     * host:port other than the target (or a {@code scopeHosts} entry, or the target's own host
+     * reached by an http to https upgrade between the default ports) is still sent, so discovery
+     * and redirect handling are not reduced, but without the Authorization header, the API-key
+     * header, every user-configured custom header except the protocol headers in
+     * {@link #NEVER_STRIPPED}, a Proxy-Authorization header meant for the origin, and cookies.
+     */
+    private Response pinCredentialsToScope(Interceptor.Chain chain) throws IOException {
+        Request request = chain.request();
+        HttpUrl url = request.url();
+        // A hop from https to http would send credentials in clear text, so it is treated as out of
+        // scope for credentials even on a listed host: the request is still made, without them.
+        if (isInCredentialScope(url) && !isSchemeDowngrade(chain.call().request().url(), url)) {
+            // OkHttp drops Authorization on a redirect that changes scheme, host or port, and
+            // builds every later hop from that reduced request, so on a chain such as
+            // target -> scopeHost -> target it would also be missing on the way back. Every
+            // in-scope hop may receive it, so put back the caller's value wherever it is missing.
+            // A request the caller sent without Authorization (the no-auth variants) has
+            // nothing to restore and stays bare.
+            if (request.header("Authorization") == null) {
+                String original = chain.call().request().header("Authorization");
+                if (original != null) {
+                    request = request.newBuilder().header("Authorization", original).build();
+                }
+            }
+            return chain.proceed(request);
+        }
+
+        boolean viaPlainHttpProxy = isSentThroughPlainHttpProxy(chain, url);
+        Request.Builder stripped = request.newBuilder();
+        List<String> removed = new ArrayList<>();
+        for (String name : request.headers().names()) {
+            if ("Proxy-Authorization".equalsIgnoreCase(name)) {
+                // Through an HTTPS tunnel, OkHttp puts the real proxy credential on the CONNECT
+                // request, which this interceptor never sees, so a Proxy-Authorization here would
+                // travel inside the tunnel to the origin. Only a plain-http request through a
+                // configured HTTP proxy is read by the proxy itself, so it keeps the header.
+                if (!viaPlainHttpProxy) {
+                    stripped.removeHeader(name);
+                    removed.add(name);
+                }
+            } else if (isCredentialForScope(name)) {
+                stripped.removeHeader(name);
+                removed.add(name);
+            }
+        }
+        if (!removed.isEmpty()) {
+            String hostPort = url.host() + ":" + url.port();
+            if (warnedOutOfScopeHosts.add(hostPort.toLowerCase(java.util.Locale.ROOT))) {
+                logger.warn("Request to {} is outside the scan scope; it was sent without {}. "
+                        + "Add it to scopeHosts if it should receive the scan's credentials "
+                        + "(further requests to this host are logged at DEBUG).", hostPort, removed);
+            } else {
+                logger.debug("Request to {} is outside the scan scope; sent without {}", hostPort, removed);
+            }
+        }
+        return chain.proceed(stripped.build());
+    }
+
+    /** True when a call that started on https has been redirected to plain http. */
+    static boolean isSchemeDowngrade(HttpUrl original, HttpUrl hop) {
+        return original != null && original.isHttps() && !hop.isHttps();
+    }
+
+    private static boolean isSentThroughPlainHttpProxy(Interceptor.Chain chain, HttpUrl url) {
+        if (url.isHttps()) {
+            return false;
+        }
+        okhttp3.Connection connection = chain.connection();
+        return connection != null && connection.route().proxy().type() == Proxy.Type.HTTP;
+    }
+
+    private boolean isCredentialForScope(String headerName) {
+        if (NEVER_STRIPPED.stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return false;
+        }
+        if ("Authorization".equalsIgnoreCase(headerName) || "Cookie".equalsIgnoreCase(headerName)
+                || "Cookie2".equalsIgnoreCase(headerName)) {
+            return true;
+        }
+        if (credentialHeaderNames().stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return true;
+        }
+        return defaultHeaders.keySet().stream().anyMatch(headerName::equalsIgnoreCase);
+    }
+
+    /**
+     * @return true if the URL's host and port are the configured target's, or the target's own
+     *     host reached by an upgrade from http on port 80 to https on port 443, or match an entry
+     *     in {@code scopeHosts} ({@code host} for any port, {@code host:port} for that port only).
+     *     With no parseable target URL there is nothing to pin to, and every host is in scope.
+     */
+    boolean isInCredentialScope(HttpUrl url) {
+        HttpUrl target = config.getTargetUrl() != null ? HttpUrl.parse(config.getTargetUrl()) : null;
+        if (target == null) {
+            return true;
+        }
+        if (isTargetHost(url) || isSameHostSchemeUpgrade(target, url)) {
+            return true;
+        }
+        for (String entry : config.getScopeHosts()) {
+            if (scopeEntryMatches(entry, url)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isTargetHost(HttpUrl url) {
+        HttpUrl target = config.getTargetUrl() != null ? HttpUrl.parse(config.getTargetUrl()) : null;
+        return target != null && target.host().equalsIgnoreCase(url.host()) && target.port() == url.port();
+    }
+
+    /**
+     * A target given as {@code http://host} (port 80) that redirects to {@code https://host}
+     * (port 443) is the same service moving to TLS, the most common redirect there is; treating
+     * it as another host would strip credentials from the whole scan. Only the default ports
+     * count, and a downgrade from https to http is not admitted.
+     */
+    private static boolean isSameHostSchemeUpgrade(HttpUrl target, HttpUrl url) {
+        return !target.isHttps() && url.isHttps()
+                && target.host().equalsIgnoreCase(url.host())
+                && target.port() == HttpUrl.defaultPort("http")
+                && url.port() == HttpUrl.defaultPort("https");
+    }
+
+    private static boolean scopeEntryMatches(String entry, HttpUrl url) {
+        if (entry == null || entry.isBlank()) {
+            return false;
+        }
+        String e = entry.trim();
+        String host;
+        int port = -1;
+        if (e.contains("://")) {
+            HttpUrl parsed = HttpUrl.parse(e);
+            if (parsed == null) {
+                return false;
+            }
+            host = parsed.host();
+            port = parsed.port();
+        } else if (e.startsWith("[")) {
+            int close = e.indexOf(']');
+            if (close < 0) {
+                return false;
+            }
+            host = e.substring(1, close);
+            if (e.length() > close + 2 && e.charAt(close + 1) == ':') {
+                port = parsePort(e.substring(close + 2));
+                if (port < 0) {
+                    return false;
+                }
+            }
+        } else if (e.indexOf(':') > 0 && e.indexOf(':') == e.lastIndexOf(':')) {
+            host = e.substring(0, e.indexOf(':'));
+            port = parsePort(e.substring(e.indexOf(':') + 1));
+            if (port < 0) {
+                return false;
+            }
+        } else {
+            host = e;
+        }
+        if (!host.equalsIgnoreCase(url.host())) {
+            return false;
+        }
+        return port == -1 || port == url.port();
+    }
+
+    private static int parsePort(String s) {
+        try {
+            int p = Integer.parseInt(s.trim());
+            return p > 0 && p <= 65535 ? p : -1;
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
     }
 
     /**

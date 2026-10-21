@@ -62,6 +62,8 @@ public class ScanConfig {
     private int requestDelayMs = 0;
     private int maxRequestsPerSecond = 0;
     private boolean followRedirects = true;
+    // Hosts (besides the target) that may receive credentials: "host" or "host:port".
+    private List<String> scopeHosts = new ArrayList<>();
     private boolean validateCertificates = true;
 
     // Output settings
@@ -555,6 +557,30 @@ public class ScanConfig {
      */
     public void setFollowRedirects(boolean followRedirects) {
         this.followRedirects = followRedirects;
+    }
+
+    /**
+     * Gets the extra hosts that may receive the scan's credentials besides the target.
+     * <p>
+     * An entry is either {@code host} (any port on that host) or {@code host:port}. Requests to
+     * any other host are still sent, but without the Authorization header, the API-key header,
+     * cookies, Proxy-Authorization (except on a plain-http request through an HTTP proxy) and every
+     * configured custom header except the protocol headers listed in {@code HttpClient}. A hop from
+     * https to plain http never carries credentials, even to a listed host.
+     *
+     * @return the scope allowlist, never null
+     */
+    public List<String> getScopeHosts() {
+        return scopeHosts;
+    }
+
+    /**
+     * Sets the extra hosts that may receive the scan's credentials besides the target.
+     *
+     * @param scopeHosts entries of the form {@code host} or {@code host:port}; null clears the list
+     */
+    public void setScopeHosts(List<String> scopeHosts) {
+        this.scopeHosts = scopeHosts != null ? new ArrayList<>(scopeHosts) : new ArrayList<>();
     }
 
     /**

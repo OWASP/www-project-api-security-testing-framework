@@ -6,6 +6,8 @@
   "outputFormat": "JSON",
   "outputFile": "astf-results.json",
   "verbose": false,
+  "followRedirects": true,
+  "scopeHosts": [],
   "headers": {
     "Accept": "application/json"
   }

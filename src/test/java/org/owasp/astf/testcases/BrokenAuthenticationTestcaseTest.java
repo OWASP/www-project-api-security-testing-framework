@@ -77,6 +77,9 @@ class BrokenAuthenticationTestCaseTest {
                     .thenReturn(new HttpResponse(401, "{\"error\":\"Unauthorized\"}", Map.of()));
         }
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         if (isAuth && method.equals("POST")) {
@@ -463,6 +466,9 @@ class BrokenAuthenticationTestCaseTest {
                 argThat(body -> body != null && body.contains("\"admin\""))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"Incorrect password\"}", Map.of()));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.testUserEnumeration(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("User Enumeration")),
@@ -491,8 +497,15 @@ class BrokenAuthenticationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/login", "POST");
         endpoint.setBaseUrl("https://example.com");
 
+        // The login handler answers a wrong password with 401; a path that does not exist gets a
+        // 404, so the 401s came from the handler rather than from a gateway in front of it.
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(404, "", Map.of()));
+        when(httpClient.postWithStatus(eq("https://example.com/api/login"), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"Invalid username or password\"}", Map.of()));
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.testBruteForceLockout(endpoint, httpClient);
 

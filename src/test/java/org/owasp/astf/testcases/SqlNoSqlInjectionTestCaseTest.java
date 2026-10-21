@@ -175,6 +175,9 @@ class SqlNoSqlInjectionTestCaseTest {
                 argThat(body -> body != null && body.contains("\"password\":\"astf-nosql-baseline-value\""))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"invalid credentials\"}", Map.of()));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertFalse(findings.isEmpty(), "Should detect NoSQL auth bypass");

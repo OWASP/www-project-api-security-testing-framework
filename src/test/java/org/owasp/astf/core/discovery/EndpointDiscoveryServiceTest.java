@@ -256,4 +256,104 @@ class EndpointDiscoveryServiceTest {
                 .count();
         assertEquals(1, itemEndpoints, "Only the GET method should be extracted for /items");
     }
+
+    // ---- Effective OpenAPI security: operation "security" if present ([] means public),
+    // else the root "security", else "requires auth" when the spec defines securitySchemes.
+
+    private EndpointInfo find(List<EndpointInfo> endpoints, String method, String path) {
+        return endpoints.stream()
+                .filter(e -> method.equals(e.getMethod()) && path.equals(e.getPath()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("missing " + method + " " + path));
+    }
+
+    @Test
+    @DisplayName("Root-level security applies to every operation that does not override it")
+    void testRootSecurityAppliesToAllOperations() throws IOException {
+        String openApi = """
+                {
+                  "openapi": "3.0.0",
+                  "security": [{"bearerAuth": []}],
+                  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+                  "paths": {
+                    "/api/orders": {"get": {}, "post": {}},
+                    "/api/orders/{id}": {"get": {}}
+                  }
+                }
+                """;
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertEquals(3, endpoints.size());
+        assertTrue(endpoints.stream().allMatch(EndpointInfo::isRequiresAuthentication),
+                "Every operation inherits the root security requirement");
+    }
+
+    @Test
+    @DisplayName("An operation with security: [] is public even when the root requires auth")
+    void testOperationEmptySecurityOverridesRoot() throws IOException {
+        String openApi = """
+                {
+                  "openapi": "3.0.0",
+                  "security": [{"bearerAuth": []}],
+                  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+                  "paths": {
+                    "/api/health": {"get": {"security": []}},
+                    "/api/orders": {"get": {}},
+                    "/api/admin": {"get": {"security": [{"bearerAuth": []}]}}
+                  }
+                }
+                """;
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertFalse(find(endpoints, "GET", "/api/health").isRequiresAuthentication(),
+                "security: [] explicitly marks the operation public");
+        assertTrue(find(endpoints, "GET", "/api/orders").isRequiresAuthentication(),
+                "No operation-level security, so the root requirement applies");
+        assertTrue(find(endpoints, "GET", "/api/admin").isRequiresAuthentication());
+    }
+
+    @Test
+    @DisplayName("A spec with no security anywhere and no securitySchemes treats operations as public")
+    void testNoSecurityAnywhereIsPublic() throws IOException {
+        String openApi = """
+                {
+                  "openapi": "3.0.0",
+                  "paths": {
+                    "/api/products": {"get": {}}
+                  }
+                }
+                """;
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertFalse(find(endpoints, "GET", "/api/products").isRequiresAuthentication());
+    }
+
+    @Test
+    @DisplayName("securitySchemes alone require nothing: only operations that name a scheme are protected (VAmPI shape)")
+    void testSecuritySchemesWithoutRequirementIsPublic() throws IOException {
+        String openApi = """
+                {
+                  "openapi": "3.0.0",
+                  "components": {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}},
+                  "paths": {
+                    "/books/v1": {"get": {}, "post": {"security": [{"bearerAuth": []}]}},
+                    "/me": {"get": {"security": [{"bearerAuth": []}]}}
+                  }
+                }
+                """;
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok(openApi));
+
+        List<EndpointInfo> endpoints = discoveryService.discoverEndpoints();
+
+        assertFalse(find(endpoints, "GET", "/books/v1").isRequiresAuthentication(),
+                "no security requirement anywhere on this operation means it is public");
+        assertTrue(find(endpoints, "POST", "/books/v1").isRequiresAuthentication());
+        assertTrue(find(endpoints, "GET", "/me").isRequiresAuthentication());
+    }
 }

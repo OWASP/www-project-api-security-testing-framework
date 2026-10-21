@@ -55,7 +55,6 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     );
 
     private static final List<String> CREDENTIAL_FIELD_NAMES = List.of("password", "pass", "pwd");
-    private static final List<String> AUTH_PATH_PATTERNS = List.of("login", "auth", "signin", "session");
 
     // A deliberately bogus value used to establish a "this should fail" baseline for the
     // generalized bypass check below — works for any field shape (credential, coupon code,
@@ -214,9 +213,54 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
 
         findings.addAll(testSqlInjection(endpoint, httpClient, targetFields, fieldValues));
         if (findings.isEmpty()) {
-            findings.addAll(testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues, isAuthLike));
+            if (!isAuthLike) {
+                findings.addAll(testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                        false, Mode.CREDENTIALED));
+            } else {
+                // An authentication bypass is a claim about an attacker with no credentials, so
+                // on a login-like endpoint the probes are sent without any. If that shows no
+                // bypass and the scan has credentials (for example a gateway that wants an API
+                // key even for login), they are repeated with them, and a bypass seen only then
+                // is reported as reachable with the configured credentials at a lower severity.
+                List<Finding> anonymous = testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                        true, Mode.ANONYMOUS);
+                findings.addAll(anonymous);
+                boolean anonymousBypass = anonymous.stream().anyMatch(f -> f.getTitle().contains("Bypass"));
+                // On a path only one of the 2.0.2 and the word classifications calls login-like,
+                // 2.0.2 may have sent these probes as an ordinary credentialed request. With no
+                // configured credentials that request can still differ from the anonymous one (a
+                // cookie the target set during the scan), so it is sent as 2.0.2 sent it and
+                // reported with 2.0.2's title.
+                Mode retry = null;
+                if (!anonymousBypass && httpClient.hasConfiguredCredentials()) {
+                    retry = Mode.CREDENTIALED_AFTER_ANONYMOUS;
+                } else if (!anonymousBypass && PathKeywordMatcher.isSqlAuthLikeAmbiguous(endpoint.getPath())) {
+                    retry = Mode.CREDENTIALED;
+                }
+                if (retry != null) {
+                    boolean retryAuthLike = retry == Mode.CREDENTIALED
+                            ? PathKeywordMatcher.legacyIsSqlAuthLikePath(endpoint.getPath())
+                            : true;
+                    for (Finding f : testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                            retryAuthLike, retry)) {
+                        if (findings.stream().noneMatch(existing -> existing.getTitle().equals(f.getTitle()))) {
+                            findings.add(f);
+                        }
+                    }
+                }
+            }
         }
         return findings;
+    }
+
+    /** How the NoSQL probes are sent, and how a bypass found that way is reported. */
+    private enum Mode {
+        /** With the scan's credentials; findings as before. */
+        CREDENTIALED,
+        /** Without any credentials (auth-like endpoints). */
+        ANONYMOUS,
+        /** With the scan's credentials after the anonymous pass found no bypass; bypass findings say so. */
+        CREDENTIALED_AFTER_ANONYMOUS
     }
 
     /**
@@ -333,8 +377,10 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private boolean isAuthLikeEndpoint(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
-        return AUTH_PATH_PATTERNS.stream().anyMatch(path::contains);
+        // The word classification BrokenAuthenticationTestCase uses (so /api/authenticate or
+        // /api/userlogin get the anonymous-first bypass probes like /api/login does), or 2.0.2's
+        // substring list, so a path 2.0.2 treated as login-like still is.
+        return PathKeywordMatcher.isSqlAuthLike(endpoint.getPath());
     }
 
     private List<Finding> testSqlInjection(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
@@ -460,7 +506,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
 
     private List<Finding> testNoSqlInjection(EndpointInfo endpoint, HttpClient httpClient,
                                               List<String> fields, Map<String, JsonNode> fieldValues,
-                                              boolean isAuthLike) {
+                                              boolean isAuthLike, Mode mode) {
         List<Finding> findings = new ArrayList<>();
 
         List<String> allPayloads = new ArrayList<>(NOSQL_OPERATOR_PAYLOADS.size() +
@@ -488,7 +534,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             for (String payload : allPayloads) {
                 try {
                     String body = buildJsonBody(fields, fieldValues, field, payload);
-                    HttpResponse response = sendRequest(endpoint, httpClient, body);
+                    HttpResponse response = sendRequest(endpoint, httpClient, body, mode);
                     String responseBody = response != null ? response.getBody() : null;
                     if (response == null || responseBody == null) {
                         continue;
@@ -521,7 +567,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             try {
                                 baseline = sendRequest(endpoint, httpClient,
                                         buildJsonBody(fields, fieldValues, field,
-                                                "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
+                                                "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""), mode);
                             } catch (Exception e) {
                                 logger.debug("Error sending NoSQL baseline request on {} field {}: {}",
                                         endpoint, field, e.getMessage());
@@ -541,7 +587,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         // at most once per reported finding, and treat a baseline that no longer
                         // fails as inconclusive.
                         boolean stillFails = baselineFailed && baselineStillFails(endpoint, httpClient, fields,
-                                fieldValues, field, baselineResponseByField);
+                                fieldValues, field, baselineResponseByField, mode);
                         if (baselineFailed && !stillFails) {
                             // The target answers the invalid baseline differently now than earlier in
                             // the scan, so this result cannot be attributed to the operator. Report it
@@ -571,9 +617,11 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         if (stillFails) {
                             boolean isCredentialField =
                                     CREDENTIAL_FIELD_NAMES.stream().anyMatch(field::equalsIgnoreCase);
-                            String title = (isAuthLike && isCredentialField)
+                            boolean credentialedOnly = mode == Mode.CREDENTIALED_AFTER_ANONYMOUS;
+                            String suffix = credentialedOnly ? AnonymousFirstProbe.CREDENTIALED_SUFFIX : "";
+                            String title = ((isAuthLike && isCredentialField)
                                     ? "NoSQL Injection — Authentication Bypass"
-                                    : "NoSQL Injection — Authorization/Logic Bypass";
+                                    : "NoSQL Injection — Authorization/Logic Bypass") + suffix;
                             String evidence = "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
                                     field + "' field was replaced with a NoSQL query operator, while an " +
                                     "ordinary invalid value on the same field failed (HTTP " +
@@ -584,15 +632,22 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             // and the fresh baseline still fails because the record now exists. That
                             // depends on request order, so it is reported as a possible bypass at MEDIUM,
                             // not CRITICAL. Nothing is dropped.
-                            if (payloadSucceedsAgain(endpoint, httpClient, body)) {
+                            if (credentialedOnly) {
+                                evidence += ". Requests without credentials were rejected; these requests carried " +
+                                        "the scan's configured credentials";
+                            } else if (mode == Mode.ANONYMOUS) {
+                                evidence += ". Requests were sent without any credentials";
+                            }
+                            if (payloadSucceedsAgain(endpoint, httpClient, body, mode)) {
                                 findings.add(buildNoSqlFinding(endpoint, field, payload, evidence,
-                                        Severity.CRITICAL, title));
+                                        credentialedOnly ? Severity.HIGH : Severity.CRITICAL, title));
                             } else {
                                 findings.add(buildNoSqlFinding(endpoint, field, payload, evidence +
                                         ". Re-sending the same payload did not succeed again, so this may be a " +
                                         "one-off state change (for example a record created by the first request) " +
                                         "and not an injection; verify manually",
-                                        Severity.MEDIUM, "NoSQL Injection — Possible Bypass (not reproducible)"));
+                                        credentialedOnly ? Severity.LOW : Severity.MEDIUM,
+                                        "NoSQL Injection — Possible Bypass (not reproducible)" + suffix));
                             }
                             continue nextField;
                         }
@@ -730,11 +785,11 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      */
     private boolean baselineStillFails(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
                                        Map<String, JsonNode> fieldValues, String field,
-                                       Map<String, HttpResponse> baselineResponseByField) {
+                                       Map<String, HttpResponse> baselineResponseByField, Mode mode) {
         HttpResponse fresh;
         try {
             fresh = sendRequest(endpoint, httpClient,
-                    buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
+                    buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""), mode);
         } catch (Exception e) {
             // No new evidence: keep the decision from the cached baseline, so a transient error on
             // this extra request never drops a real result.
@@ -759,9 +814,9 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      * Whether re-sending the same payload request still gets a success with no failure signal.
      * Called only when a bypass is about to be reported, so at most one extra request per finding.
      */
-    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody) {
+    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody, Mode mode) {
         try {
-            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody);
+            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody, mode);
             String againBody = again != null ? again.getBody() : null;
             return again != null && againBody != null && again.isSuccess() && !containsFailureMarker(againBody);
         } catch (Exception e) {
@@ -805,9 +860,22 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private HttpResponse sendRequest(EndpointInfo endpoint, HttpClient httpClient, String body) throws IOException {
+        return sendRequest(endpoint, httpClient, body, Mode.CREDENTIALED);
+    }
+
+    /** {@link Mode#ANONYMOUS} sends the request with no credentials of any kind. */
+    private HttpResponse sendRequest(EndpointInfo endpoint, HttpClient httpClient, String body, Mode mode)
+            throws IOException {
         String url = endpoint.getFullUrl();
         String contentType = endpoint.getContentType() != null ? endpoint.getContentType() : "application/json";
-        return switch (endpoint.getMethod().toUpperCase()) {
+        String method = endpoint.getMethod().toUpperCase();
+        if (mode == Mode.ANONYMOUS) {
+            return switch (method) {
+                case "POST", "PUT", "PATCH" -> httpClient.sendWithStatusNoAuth(method, url, contentType, body);
+                default -> null;
+            };
+        }
+        return switch (method) {
             case "POST"  -> httpClient.postWithStatus(url, Map.of(), contentType, body);
             case "PUT"   -> httpClient.putWithStatus(url, Map.of(), contentType, body);
             case "PATCH" -> httpClient.patchWithStatus(url, Map.of(), contentType, body);

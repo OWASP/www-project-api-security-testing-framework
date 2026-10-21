@@ -361,6 +361,9 @@ class GraphQLSecurityTestCaseTest {
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.endsWith("/graphiql")), anyMap()))
                 .thenReturn(new HttpResponse(404, "", Map.of()));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().equals("GraphQL IDE Exposed in Production")));
@@ -379,6 +382,13 @@ class GraphQLSecurityTestCaseTest {
                 .thenReturn(new HttpResponse(200, "<html><title>GraphiQL</title></html>", Map.of()));
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.endsWith("/graphiql")), anyMap()))
                 .thenReturn(new HttpResponse(404, "", Map.of()));
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+        // The comparison request is anonymous too (it must differ from the baseline only by the cookie).
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && url.endsWith("/graphiql")),
+                argThat(h -> h != null && h.containsKey("Cookie"))))
+                .thenReturn(new HttpResponse(200, "<html><title>GraphiQL</title></html>", Map.of()));
 
         List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
 

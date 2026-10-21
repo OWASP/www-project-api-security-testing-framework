@@ -95,12 +95,13 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        // A secondary identity is configured — HttpClient reports its override headers.
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
-        // Both the primary (Map.of() headers) and secondary (override headers) requests to the
-        // exact same object ID succeed — no ID substitution involved at all.
+        // A secondary identity is configured.
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        // Both the primary request and the secondary-identity-only request to the exact same
+        // object ID succeed, with no ID substitution involved at all.
         when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"owner\":\"someone-else\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), any(), any()))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"owner\":\"someone-else\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -115,8 +116,8 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        // getSecondaryAuthHeaders() defaults to an empty map (Mockito's default for
-        // unstubbed Map-returning methods) — simulating no --secondary-token configured.
+        // hasSecondaryIdentity() defaults to false (Mockito's default for unstubbed boolean
+        // methods), simulating no --secondary-token configured.
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(404, "{}", Map.of()));
 
@@ -132,12 +133,11 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         // Primary succeeds; secondary is correctly rejected with 403 — proper authorization.
         when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42}", Map.of()));
-        when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), any(), any()))
                 .thenReturn(new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -152,8 +152,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
 
         // The collection endpoint (placeholder segment + everything after it stripped) returns
         // a list of real books — "bookTitle82" is the plausible identifier to resolve to.
@@ -164,8 +163,8 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         // Both identities can read the resolved, real object with no ID substitution.
         when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
-        when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"),
-                eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), eq("https://example.com/books/v1/bookTitle82"),
+                any(), any()))
                 .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -180,8 +179,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         // Collection lookup fails (404) — nothing to resolve to.
         when(httpClient.getWithStatus(eq("https://example.com/books/v1"), eq(Map.of())))
                 .thenReturn(new HttpResponse(404, "", Map.of()));
@@ -202,15 +200,22 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         endpoint.setResolvedFromTemplate(true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("PUT"), anyString(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
                 "Should still detect cross-user access on the PUT");
+
+        org.mockito.ArgumentCaptor<String> secondaryBody = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.atLeastOnce())
+                .sendWithStatusAsSecondary(eq("PUT"), anyString(), anyString(), secondaryBody.capture());
+        assertTrue(secondaryBody.getAllValues().stream().allMatch(body -> body.contains("password")),
+                "The secondary identity's PUT must carry the same realistic body");
 
         org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.atLeastOnce())
