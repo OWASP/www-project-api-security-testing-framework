@@ -2,6 +2,13 @@
 
 Releases before 2.0.2 are described on the [GitHub Releases page](https://github.com/OWASP/www-project-api-security-testing-framework/releases).
 
+## 2.1.0 (unreleased)
+
+### Fixed
+
+- **Checks no longer disappear on look-alike paths.** Auth and 2FA endpoints were recognized by substring, so `/api/tokens`, `/api/authors`, `/api/discount-codes` or `/api/otpauth-free-paths` were taken for login or OTP endpoints and never got the missing-auth and JWT checks. Paths are now matched by whole segment words, case-insensitively (`/auth/login`, `/2fa/verify`, `/check-otp`, `/sign-in`, `/twoFactor` still match). The NoSQL "Authentication Bypass" title uses the same matching.
+- **OpenAPI root-level security.** Discovery only read an operation's own `security`, so a spec that declares security at the root made every endpoint look public and the auth checks that need a protected endpoint skipped them. The effective requirement is now the operation's `security` (an explicit `[]` means public), else the root `security`, else "requires auth" when the spec defines `securitySchemes`. Swagger 2.0 specs are unchanged (all operations are still treated as protected).
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).

@@ -38,14 +38,6 @@ public class BrokenAuthenticationTestCase implements TestCase {
     private static final Logger logger = LogManager.getLogger(BrokenAuthenticationTestCase.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private static final List<String> AUTH_PATH_PATTERNS = List.of(
-            "login", "auth", "token", "signin", "oauth", "session"
-    );
-
-    private static final List<String> TWO_FA_PATH_PATTERNS = List.of(
-            "mfa", "otp", "totp", "2fa", "two-factor", "multifactor", "verify", "code"
-    );
-
     // Base64url encoding of {"alg":"none","typ":"JWT"} — the forged header shared by every
     // none-algorithm JWT below, real-claims or placeholder.
     private static final String NONE_ALG_HEADER = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0";
@@ -151,14 +143,14 @@ public class BrokenAuthenticationTestCase implements TestCase {
         return findings;
     }
 
+    // Whole-segment matching: /api/tokens or /api/authors must not be taken for a login
+    // endpoint, or the missing-auth and JWT checks below would never run on them.
     private boolean isAuthEndpoint(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
-        return AUTH_PATH_PATTERNS.stream().anyMatch(path::contains);
+        return PathKeywordMatcher.isAuthPath(endpoint.getPath());
     }
 
     private boolean is2FAEndpoint(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
-        return TWO_FA_PATH_PATTERNS.stream().anyMatch(path::contains);
+        return PathKeywordMatcher.isTwoFactorPath(endpoint.getPath());
     }
 
     /**

@@ -279,13 +279,7 @@ public class EndpointDiscoveryService {
                             if (Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
                                     .contains(method)) {
 
-                                boolean requiresAuth = false;
-
-                                // Check for security requirements
-                                JsonNode security = methodEntry.getValue().path("security");
-                                if (!security.isMissingNode() && security.isArray() && security.size() > 0) {
-                                    requiresAuth = true;
-                                }
+                                boolean requiresAuth = resolveEffectiveSecurity(root, methodEntry.getValue());
 
                                 EndpointInfo endpoint = new EndpointInfo(
                                         path, method, "application/json", null, requiresAuth);
@@ -303,6 +297,34 @@ public class EndpointDiscoveryService {
         }
 
         return endpoints;
+    }
+
+    /**
+     * Resolves whether an OpenAPI 3.x operation requires authentication, following the
+     * specification's inheritance rules rather than looking at the operation alone (which made
+     * every operation of a spec with only root-level security look public, so the auth checks
+     * that only run on protected endpoints skipped all of them).
+     *
+     * <ol>
+     *   <li>The operation's own {@code security}, when present: a non-empty array requires auth,
+     *       an explicit empty array {@code []} marks it public.</li>
+     *   <li>Otherwise the root {@code security}, with the same meaning.</li>
+     *   <li>Otherwise, if the spec defines {@code components.securitySchemes}, the API has an
+     *       authentication mechanism, so the operation is treated as requiring auth.</li>
+     *   <li>Otherwise it is public.</li>
+     * </ol>
+     */
+    static boolean resolveEffectiveSecurity(JsonNode root, JsonNode operation) {
+        JsonNode opSecurity = operation == null ? null : operation.get("security");
+        if (opSecurity != null && opSecurity.isArray()) {
+            return opSecurity.size() > 0;
+        }
+        JsonNode rootSecurity = root == null ? null : root.get("security");
+        if (rootSecurity != null && rootSecurity.isArray()) {
+            return rootSecurity.size() > 0;
+        }
+        JsonNode schemes = root == null ? null : root.path("components").get("securitySchemes");
+        return schemes != null && schemes.isObject() && schemes.size() > 0;
     }
 
     /**
