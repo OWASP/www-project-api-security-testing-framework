@@ -98,6 +98,43 @@ class AuthPathClassificationEndToEndTest {
                 "/api/v1/auth/login must still receive the credential probes");
     }
 
+    @ParameterizedTest(name = "login-only checks run on {0}")
+    @ValueSource(strings = {"/api/authenticate", "/api/userlogin", "/api/logon", "/oauth/token", "/sessions",
+            "/api/JWTAuth"})
+    @DisplayName("Login paths whose keyword is part of a longer word get the login-only checks again")
+    void loginOnlyChecksRunOnStemPaths(String path) throws Exception {
+        run(path, "POST", false);
+
+        List<RecordedRequest> credentialProbes = received.stream()
+                .filter(r -> r.getPath().startsWith(path)
+                        && r.getBody().clone().readUtf8().toLowerCase().contains("password"))
+                .toList();
+        assertTrue(credentialProbes.size() > 1,
+                path + " is a login endpoint, so the weak-credential, enumeration and brute-force "
+                        + "probes must be sent to it; saw " + credentialProbes.size());
+        assertTrue(credentialProbes.stream().anyMatch(r -> r.getHeader("Authorization") == null),
+                "the brute-force and enumeration attempts on " + path + " are sent without the scan's token");
+    }
+
+    @Test
+    @DisplayName("NoSQL bypass probes on /api/authenticate are sent anonymously, as on any login path")
+    void noSqlBypassOnAuthenticateIsAnonymous() throws Exception {
+        HttpClient client = startOpenServer();
+        EndpointInfo endpoint = new EndpointInfo("/api/authenticate", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"secret\"}", false);
+        endpoint.setBaseUrl(server.url("/").toString());
+
+        new SqlNoSqlInjectionTestCase().execute(endpoint, client);
+
+        List<RecordedRequest> operatorProbes = received.stream()
+                .filter(r -> "/api/authenticate".equals(r.getPath())
+                        && r.getBody().clone().readUtf8().contains("$ne"))
+                .toList();
+        assertFalse(operatorProbes.isEmpty(), "NoSQL operator probes must be sent to /api/authenticate");
+        assertTrue(operatorProbes.stream().anyMatch(r -> r.getHeader("Authorization") == null),
+                "/api/authenticate is login-like, so its NoSQL bypass probes go out without credentials first");
+    }
+
     @Test
     @DisplayName("A real 2FA path still gets the OTP bypass probes")
     void real2faPathStillGetsOtpProbes() throws Exception {

@@ -55,7 +55,6 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     );
 
     private static final List<String> CREDENTIAL_FIELD_NAMES = List.of("password", "pass", "pwd");
-    private static final List<String> AUTH_PATH_PATTERNS = List.of("login", "auth", "signin", "sign-in", "session");
 
     // A deliberately bogus value used to establish a "this should fail" baseline for the
     // generalized bypass check below — works for any field shape (credential, coupon code,
@@ -364,7 +363,9 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private boolean isAuthLikeEndpoint(EndpointInfo endpoint) {
-        return PathKeywordMatcher.matchesAny(endpoint.getPath(), AUTH_PATH_PATTERNS);
+        // Same classification as BrokenAuthenticationTestCase, so /api/authenticate or
+        // /api/userlogin get the anonymous-first bypass probes like /api/login does.
+        return PathKeywordMatcher.isAuthPath(endpoint.getPath());
     }
 
     private List<Finding> testSqlInjection(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,

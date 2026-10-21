@@ -4,46 +4,79 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
- * Classifies a request path by whole path segments rather than by substring.
+ * Classifies a request path as a login/authentication endpoint or a 2FA endpoint.
  *
- * <p>Substring matching misclassifies ordinary resources: {@code /api/tokens} contains "token",
- * {@code /api/authors} contains "auth", {@code /api/discount-codes} contains "code". When such a
- * path is taken for a login or 2FA endpoint, the generic missing-auth and JWT checks never run on
- * it. Here a keyword matches only when it is a whole word of a path segment.</p>
+ * <p>Each literal path segment is split into words on {@code -}, {@code _}, {@code .} and
+ * camelCase boundaries and compared case-insensitively. Path parameter placeholders
+ * ({@code {token}}, {@code :token}) and the query string are ignored. Two kinds of keyword are
+ * used:</p>
  *
- * <p>Each literal segment is split into words on {@code -}, {@code _}, {@code .} and camelCase
- * boundaries, compared case-insensitively. A keyword matches when its own words appear as a
- * contiguous run in the segment's words, so "auth" matches {@code /auth} and {@code /auth-v2},
- * "otp" matches {@code /check-otp} and {@code /verifyOtp}, and the compound "two-factor"
- * matches {@code /two-factor}, {@code /two_factor} and {@code /twoFactor}. "token" does not match
- * {@code /tokens} and "otp" does not match {@code /otpauth-free-paths}. Path parameter
- * placeholders ({@code {token}}, {@code :token}) and the query string are ignored.</p>
+ * <ul>
+ *   <li><b>Strong stems</b> ({@link #AUTH_STEMS}, {@link #TWO_FACTOR_STEMS}) almost never occur in
+ *       an ordinary resource name, so they match anywhere inside a word: {@code /api/authenticate},
+ *       {@code /api/userlogin}, {@code /oauth2/authorize}, {@code /api/v1/sessions},
+ *       {@code /api/JWTAuth}, {@code /api/enable2fa}. A few English words that contain a stem
+ *       are listed in {@link #STEM_EXCEPTIONS} ({@code /api/lessons}, {@code /api/processors},
+ *       {@code /api/possessions}, {@code /api/bloginfo}, {@code /api/catalog-index}), and
+ *       "sso" only counts at the start of a word because it occurs inside many common words.</li>
+ *   <li><b>Weak keywords</b> ({@link #AUTH_KEYWORDS}, {@link #TWO_FACTOR_KEYWORDS}) are short or
+ *       common enough to appear inside resource names, so they must be a whole word (or, for a
+ *       compound such as "sign-in", a contiguous run of words). "token" matches {@code /oauth/token}
+ *       and {@code /api/accessToken} but not the resource collection {@code /api/tokens}; "auth"
+ *       matches {@code /auth} and {@code /auth-v2} but not {@code /api/authors},
+ *       {@code /api/authority} or {@code /api/authorization-rules}; "otp" does not match
+ *       {@code /api/otpauth-free-paths}; "code" does not match {@code /api/discount-codes}.</li>
+ * </ul>
  */
 public final class PathKeywordMatcher {
 
-    /** Keywords that identify a login / authentication / session endpoint. */
-    public static final List<String> AUTH_KEYWORDS = List.of(
-            "login", "auth", "token", "signin", "sign-in", "oauth", "session"
+    /** Stems that identify a login / authentication / session endpoint wherever they appear in a word. */
+    public static final List<String> AUTH_STEMS = List.of(
+            "login", "logon", "signin", "signon", "authenticat", "oauth", "sso", "saml", "jwt",
+            "accesstoken", "session"
     );
 
-    /** Keywords that identify a 2FA / MFA / OTP endpoint. */
+    /** Keywords that identify a login / authentication endpoint only as a whole word. */
+    public static final List<String> AUTH_KEYWORDS = List.of(
+            "auth", "token", "sign-in", "sign-on", "log-in", "log-on"
+    );
+
+    /** Stems that identify a 2FA endpoint wherever they appear in a word. */
+    public static final List<String> TWO_FACTOR_STEMS = List.of("2fa");
+
+    /** Keywords that identify a 2FA / MFA / OTP endpoint only as a whole word. */
     public static final List<String> TWO_FACTOR_KEYWORDS = List.of(
             "mfa", "otp", "totp", "2fa", "two-factor", "multifactor", "multi-factor", "verify", "code"
     );
 
+    /**
+     * Ordinary words that contain a strong stem. A word containing one of these is not counted
+     * for that stem (it can still match through another keyword).
+     */
+    static final Map<String, List<String>> STEM_EXCEPTIONS = Map.of(
+            "login", List.of("blogin", "cataloging", "catalogin"),
+            "session", List.of("possession", "obsession"),
+            "signin", List.of("designin", "resignin", "assignin", "consignin"),
+            "signon", List.of("consignon")
+    );
+
+    /** Stems that only count at the start of a word, because they occur inside common words. */
+    private static final List<String> WORD_START_STEMS = List.of("sso");
+
     private PathKeywordMatcher() {
     }
 
-    /** True when the path names an authentication endpoint by a whole segment word. */
+    /** True when the path names an authentication endpoint (strong stem in a word, or weak keyword as a word). */
     public static boolean isAuthPath(String path) {
-        return matchesAny(path, AUTH_KEYWORDS);
+        return matchesStem(path, AUTH_STEMS) || matchesAny(path, AUTH_KEYWORDS);
     }
 
-    /** True when the path names a 2FA/MFA/OTP endpoint by a whole segment word. */
+    /** True when the path names a 2FA/MFA/OTP endpoint (strong stem in a word, or weak keyword as a word). */
     public static boolean isTwoFactorPath(String path) {
-        return matchesAny(path, TWO_FACTOR_KEYWORDS);
+        return matchesStem(path, TWO_FACTOR_STEMS) || matchesAny(path, TWO_FACTOR_KEYWORDS);
     }
 
     /**
@@ -51,8 +84,47 @@ public final class PathKeywordMatcher {
      * keywords) inside one literal segment of the path.
      */
     public static boolean matchesAny(String path, Collection<String> keywords) {
-        if (path == null || path.isEmpty()) {
+        for (List<String> words : segmentWords(path)) {
+            for (String keyword : keywords) {
+                if (containsRun(words, words(keyword))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /** True when any stem occurs inside a word of one literal segment of the path. */
+    public static boolean matchesStem(String path, Collection<String> stems) {
+        for (List<String> words : segmentWords(path)) {
+            for (String word : words) {
+                for (String stem : stems) {
+                    if (wordHasStem(word, stem)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean wordHasStem(String word, String stem) {
+        boolean found = WORD_START_STEMS.contains(stem) ? word.startsWith(stem) : word.contains(stem);
+        if (!found) {
             return false;
+        }
+        for (String exception : STEM_EXCEPTIONS.getOrDefault(stem, List.of())) {
+            if (word.contains(exception)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static List<List<String>> segmentWords(String path) {
+        List<List<String>> out = new ArrayList<>();
+        if (path == null || path.isEmpty()) {
+            return out;
         }
         String withoutQuery = path;
         int q = withoutQuery.indexOf('?');
@@ -68,13 +140,11 @@ public final class PathKeywordMatcher {
                 continue;
             }
             List<String> words = words(segment);
-            for (String keyword : keywords) {
-                if (containsRun(words, words(keyword))) {
-                    return true;
-                }
+            if (!words.isEmpty()) {
+                out.add(words);
             }
         }
-        return false;
+        return out;
     }
 
     private static List<String> words(String text) {
