@@ -88,7 +88,7 @@ Priority is marked must, should or could. If capacity runs short, cut from the b
 
 **Credentials stay on the target.** Host pinning: when a request goes to a host other than the target (a redirect, a spec URL named in Swagger UI HTML), strip every credential header and still make the request, so discovery is not reduced. Make `followRedirects` read its config value. Add the scope allowlist.
 
-**Checks must not disappear.** Match auth and 2FA paths by whole path segment so `/tokens` and `/discount-codes` keep the missing-auth and JWT checks. Resolve OpenAPI effective security as the operation value, else the root value, else true.
+**Checks must not disappear.** Match auth and 2FA paths by whole path segment so `/tokens` and `/discount-codes` keep the missing-auth and JWT checks. Resolve OpenAPI effective security as the operation value (an explicit empty list means public), else the root value, else public: a defined security scheme alone requires nothing, as in the OpenAPI specification. (An earlier draft of this plan said "else true"; a live scan of VAmPI, which defines a scheme but marks only its protected operations, showed that would report public endpoints as missing authentication.) Where a path is classified differently by whole-word and substring matching, run both sets of checks so nothing that 2.0.2 found is lost.
 
 **Configuration that does what it says.** Reject unknown config keys with a clear error. Fix the README and examples to match what the parser reads. Seven documented settings (`requestDelayMs`, `maxRequestsPerSecond`, `followRedirects`, `validateCertificates`, `excludePatterns`, `maxFindings`, `excludeSeverities`) are never read; implement each or remove it from the docs.
 
