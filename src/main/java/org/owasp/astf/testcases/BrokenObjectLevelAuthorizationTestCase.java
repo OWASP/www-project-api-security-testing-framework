@@ -106,7 +106,12 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      * The secondary request is sent with {@link HttpClient#sendWithStatusAsSecondary}, which
      * carries only the secondary token: none of the primary identity's API key, custom headers (other
      * than Accept, Content-Type, User-Agent, Accept-Language and Accept-Encoding) or cookies, so the
-     * success cannot come from the primary identity.
+     * success cannot come from the primary identity. If that request is rejected with 401/403 and
+     * the scan has an application-level credential (the configured API key, or a custom header
+     * named like an application or gateway key), as API gateways that need an application key
+     * besides the user's token do, the request is sent again with the secondary token plus that
+     * application credential, still without the primary token, cookies or other custom headers,
+     * and the finding says which way the secondary request was sent.
      *
      * Unlike {@link #testNumericIdManipulation}/{@link #testUuidManipulation}, which need a
      * numeric/UUID value to substitute an alternative into, this check only compares two
@@ -133,41 +138,133 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         }
 
         try {
-            HttpResponse primaryResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient, Map.of());
-            HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, endpoint.getFullUrl(), httpClient);
+            String url = endpoint.getFullUrl();
+            HttpResponse primaryResponse = makeRequest(endpoint, url, httpClient, Map.of());
+            HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, false);
+
+            // Behind an API gateway that requires an application API key from every caller in
+            // addition to the user's bearer token, the secondary token alone is always rejected.
+            // Try again with the secondary token plus the application credential (never the
+            // primary token, cookies or other custom headers) so the check still runs there.
+            HttpResponse bareSecondaryResponse = secondaryResponse;
+            boolean withApplicationCredentials = false;
+            if (primaryResponse != null && primaryResponse.isSuccess()
+                    && secondaryResponse != null
+                    && (secondaryResponse.isUnauthorized() || secondaryResponse.isForbidden())
+                    && httpClient.hasApplicationCredentials()) {
+                secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, true);
+                withApplicationCredentials = true;
+            }
 
             if (primaryResponse != null && secondaryResponse != null
                     && primaryResponse.isSuccess()
                     && secondaryResponse.isSuccess()
                     && !secondaryResponse.isNotFound()) {
-
-                Finding finding = new Finding(
-                        UUID.randomUUID().toString(),
-                        "Broken Object Level Authorization (Cross-User Access Confirmed)",
-                        String.format("A second, distinct authenticated identity was able to access " +
-                                "'%s' — the same object the primary identity can access — without any " +
-                                "ID substitution. This is direct evidence of a missing object-level " +
-                                "authorization check, not an inference from ID guessing.",
-                                endpoint.getPath()),
-                        Severity.CRITICAL,
-                        getId(),
-                        endpoint.getMethod() + " " + endpoint.getPath(),
-                        "Verify that every object-returning endpoint checks the authenticated caller's " +
-                        "ownership of or explicit permission for the specific object requested, not merely " +
-                        "that the caller is authenticated at all."
-                );
-                finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
-                        " (requested with two distinct identities: the primary credentials, then the " +
-                        "secondary token alone)");
-                finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
-                        "\nSecondary identity status: " + secondaryResponse.getStatusCode());
-                findings.add(finding);
+                if (withApplicationCredentials) {
+                    findings.add(createGatewayCrossUserFinding(endpoint, httpClient, primaryResponse,
+                            bareSecondaryResponse, secondaryResponse));
+                } else {
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "Broken Object Level Authorization (Cross-User Access Confirmed)",
+                            String.format("A second, distinct authenticated identity was able to access " +
+                                    "'%s' — the same object the primary identity can access — without any " +
+                                    "ID substitution. This is direct evidence of a missing object-level " +
+                                    "authorization check, not an inference from ID guessing.",
+                                    endpoint.getPath()),
+                            Severity.CRITICAL,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            CROSS_USER_REMEDIATION
+                    );
+                    finding.setRequestDetails(endpoint.getMethod() + " " + url +
+                            " (requested with two distinct identities: the primary credentials, then the " +
+                            "secondary token alone)");
+                    finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                            "\nSecondary identity status: " + secondaryResponse.getStatusCode());
+                    findings.add(finding);
+                }
             }
         } catch (Exception e) {
             logger.debug("Error testing cross-user BOLA on {}: {}", endpoint, e.getMessage());
         }
 
         return findings;
+    }
+
+    private static final String CROSS_USER_REMEDIATION =
+            "Verify that every object-returning endpoint checks the authenticated caller's " +
+            "ownership of or explicit permission for the specific object requested, not merely " +
+            "that the caller is authenticated at all.";
+
+    /**
+     * Builds the cross-user finding for a secondary request that was only accepted with the
+     * application credential added. A control request with the application credential alone (no
+     * bearer token) shows whether the success needs the secondary user at all: if the control is
+     * rejected, the secondary user's token was what got the object (CRITICAL, as for a bare
+     * secondary request); if it is accepted, the application key alone reaches the object and the
+     * result is reported at MEDIUM with that stated; if it could not be sent, at HIGH.
+     */
+    private Finding createGatewayCrossUserFinding(EndpointInfo endpoint, HttpClient httpClient,
+                                                  HttpResponse primaryResponse, HttpResponse bareSecondaryResponse,
+                                                  HttpResponse secondaryResponse) {
+        String url = endpoint.getFullUrl();
+        String credentialNames = String.join(", ", httpClient.getApplicationCredentialHeaderNames());
+
+        HttpResponse controlResponse = null;
+        try {
+            controlResponse = makeApplicationCredentialOnlyRequest(endpoint, url, httpClient);
+        } catch (Exception e) {
+            logger.debug("Application-credential-only control request on {} failed: {}", endpoint, e.getMessage());
+        }
+
+        String title;
+        Severity severity;
+        String description;
+        if (controlResponse != null && controlResponse.isSuccess()) {
+            title = "Broken Object Level Authorization (Cross-User Access, application API key alone also accepted)";
+            severity = Severity.MEDIUM;
+            description = String.format("A second, distinct identity's bearer token sent with the scan's " +
+                    "application credential (%s) was able to access '%s', the same object the primary " +
+                    "identity can access. The application credential alone, with no bearer token, was " +
+                    "also accepted, so this access may not depend on the user at all: the object is " +
+                    "reachable by anyone holding the application credential.", credentialNames, endpoint.getPath());
+        } else {
+            boolean controlRejected = controlResponse != null;
+            title = "Broken Object Level Authorization (Cross-User Access Confirmed, secondary token with the application API key)";
+            severity = controlRejected ? Severity.CRITICAL : Severity.HIGH;
+            description = String.format("A second, distinct authenticated identity was able to access " +
+                    "'%s', the same object the primary identity can access, without any ID substitution. " +
+                    "The API requires an application credential (%s) in addition to the user's bearer " +
+                    "token, so the secondary request carried the secondary token plus that application " +
+                    "credential; it carried no primary bearer token, cookie or other custom header. %s",
+                    endpoint.getPath(), credentialNames,
+                    controlRejected
+                            ? "The application credential alone was rejected, so the access depends on the secondary user's token."
+                            : "Whether the application credential alone is accepted could not be checked.");
+        }
+
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                title,
+                description,
+                severity,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                CROSS_USER_REMEDIATION
+        );
+        finding.setRequestDetails(endpoint.getMethod() + " " + url +
+                " (requested with two distinct identities: the primary credentials, then the secondary " +
+                "token alone, which was rejected, then the secondary token plus the application credential " +
+                credentialNames + " with no primary bearer token, cookies or other custom headers; " +
+                "control: the application credential alone with no bearer token)");
+        finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                "\nSecondary identity status (secondary token only): " + bareSecondaryResponse.getStatusCode() +
+                "\nSecondary identity status (secondary token plus application credential): " +
+                secondaryResponse.getStatusCode() +
+                "\nApplication credential only (no bearer token) status: " +
+                (controlResponse != null ? String.valueOf(controlResponse.getStatusCode()) : "not obtained"));
+        return finding;
     }
 
     private List<Finding> testNumericIdManipulation(EndpointInfo endpoint, HttpClient httpClient) {
@@ -276,16 +373,36 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
 
     /**
      * Same request as {@link #makeRequest(EndpointInfo, String, HttpClient)}, sent as the
-     * secondary identity only (see {@link HttpClient#sendWithStatusAsSecondary}).
+     * secondary identity only (see {@link HttpClient#sendWithStatusAsSecondary}), or, with
+     * {@code withApplicationCredentials}, as the secondary identity plus the scan's application
+     * credential (see {@link HttpClient#sendWithStatusAsSecondaryWithApplicationCredentials}).
      */
-    private HttpResponse makeSecondaryRequest(EndpointInfo endpoint, String url, HttpClient httpClient)
+    private HttpResponse makeSecondaryRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                              boolean withApplicationCredentials) throws IOException {
+        RequestSender sender = withApplicationCredentials
+                ? httpClient::sendWithStatusAsSecondaryWithApplicationCredentials
+                : httpClient::sendWithStatusAsSecondary;
+        return sendSameAsPrimary(endpoint, url, sender);
+    }
+
+    /** Same request with the application credential only (see {@link HttpClient#sendWithStatusApplicationCredentialsOnly}). */
+    private HttpResponse makeApplicationCredentialOnlyRequest(EndpointInfo endpoint, String url, HttpClient httpClient)
+            throws IOException {
+        return sendSameAsPrimary(endpoint, url, httpClient::sendWithStatusApplicationCredentialsOnly);
+    }
+
+    @FunctionalInterface
+    private interface RequestSender {
+        HttpResponse send(String method, String url, String contentType, String body) throws IOException;
+    }
+
+    private HttpResponse sendSameAsPrimary(EndpointInfo endpoint, String url, RequestSender sender)
             throws IOException {
         String method = endpoint.getMethod().toUpperCase();
         return switch (method) {
-            case "POST", "PUT" -> httpClient.sendWithStatusAsSecondary(method, url, endpoint.getContentType(),
-                    resolveRequestBody(endpoint));
-            case "DELETE" -> httpClient.sendWithStatusAsSecondary("DELETE", url, null, null);
-            default -> httpClient.sendWithStatusAsSecondary("GET", url, null, null);
+            case "POST", "PUT" -> sender.send(method, url, endpoint.getContentType(), resolveRequestBody(endpoint));
+            case "DELETE" -> sender.send("DELETE", url, null, null);
+            default -> sender.send("GET", url, null, null);
         };
     }
 

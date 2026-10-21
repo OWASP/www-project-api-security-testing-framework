@@ -245,6 +245,108 @@ public class HttpClient {
         return executeRequestWithStatus(request, noAuthClient);
     }
 
+    // Normalized (lower case, without '-' and '_') fragments of custom header names that carry an
+    // application or gateway credential rather than a user's identity, e.g. X-API-Key, apikey,
+    // Ocp-Apim-Subscription-Key, X-App-Key, X-Application-Id, X-Client-Id, X-Gateway-Key.
+    private static final List<String> APPLICATION_CREDENTIAL_NAME_FRAGMENTS = List.of(
+            "apikey", "subscriptionkey", "appkey", "applicationkey", "appid", "applicationid",
+            "clientid", "clientkey", "gatewaykey", "consumerkey");
+
+    // Fragments that mark a header as belonging to a user (or session) even when it also looks
+    // like an application key, e.g. X-User-Api-Key or X-Session-App-Id.
+    private static final List<String> USER_IDENTITY_NAME_FRAGMENTS = List.of(
+            "user", "account", "session", "role", "member", "customer", "token");
+
+    private static String normalizeHeaderName(String name) {
+        return name.toLowerCase(java.util.Locale.ROOT).replace("-", "").replace("_", "");
+    }
+
+    /**
+     * @return the application-level credential headers of this scan: the configured API key under
+     *     its header name, plus any custom header whose name looks like an application or gateway
+     *     key (see {@link #APPLICATION_CREDENTIAL_NAME_FRAGMENTS}) and not like a user identity.
+     *     Never {@code Authorization}, {@code Cookie} or {@code Proxy-Authorization}. Gateways often
+     *     require such a key for every caller in addition to the user's bearer token, so a request
+     *     as the secondary identity can need it too.
+     */
+    private Map<String, String> applicationCredentialHeaders() {
+        Map<String, String> headers = new java.util.LinkedHashMap<>();
+        String apiKey = config.getApiKey();
+        if (apiKey != null && !apiKey.isEmpty()) {
+            String name = config.getApiKeyHeader() != null ? config.getApiKeyHeader() : "X-API-Key";
+            if (!isUserCredentialTransport(name)) {
+                headers.put(name, apiKey);
+            }
+        }
+        for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
+            String name = entry.getKey();
+            if (isUserCredentialTransport(name)
+                    || headers.keySet().stream().anyMatch(name::equalsIgnoreCase)) {
+                continue;
+            }
+            String normalized = normalizeHeaderName(name);
+            if (APPLICATION_CREDENTIAL_NAME_FRAGMENTS.stream().anyMatch(normalized::contains)
+                    && USER_IDENTITY_NAME_FRAGMENTS.stream().noneMatch(normalized::contains)) {
+                headers.put(name, entry.getValue());
+            }
+        }
+        return headers;
+    }
+
+    private static boolean isUserCredentialTransport(String headerName) {
+        return "Authorization".equalsIgnoreCase(headerName) || "Cookie".equalsIgnoreCase(headerName)
+                || "Cookie2".equalsIgnoreCase(headerName) || "Proxy-Authorization".equalsIgnoreCase(headerName);
+    }
+
+    /**
+     * @return true if the scan has an application-level credential (the configured API key, or a
+     *     custom header named like an application or gateway key) that
+     *     {@link #sendWithStatusAsSecondaryWithApplicationCredentials} can add
+     */
+    public boolean hasApplicationCredentials() {
+        return !applicationCredentialHeaders().isEmpty();
+    }
+
+    /** @return the names (never the values) of the application-level credential headers, for evidence */
+    public List<String> getApplicationCredentialHeaderNames() {
+        return new ArrayList<>(applicationCredentialHeaders().keySet());
+    }
+
+    /**
+     * Like {@link #sendWithStatusAsSecondary}, but the request also carries the application-level
+     * credential headers (see {@link #hasApplicationCredentials()}). For API gateways that require
+     * an application API key in addition to each user's bearer token, where the secondary token
+     * alone is always rejected. The request still carries no primary bearer token, cookie, Basic
+     * Auth retry or other custom header.
+     *
+     * @throws IllegalStateException if no secondary identity is configured
+     */
+    public HttpResponse sendWithStatusAsSecondaryWithApplicationCredentials(String method, String url,
+                                                                           String contentType, String body)
+            throws IOException {
+        if (!hasSecondaryIdentity()) {
+            throw new IllegalStateException("No secondary identity configured");
+        }
+        Map<String, String> headers = new java.util.LinkedHashMap<>(applicationCredentialHeaders());
+        headers.putAll(getSecondaryAuthHeaders());
+        Request request = buildBareRequest(method, url, contentType, body, headers);
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    /**
+     * Sends a request with the application-level credential headers only: no bearer token of
+     * either identity, no cookie, no Basic Auth retry and no other custom header. A control for
+     * {@link #sendWithStatusAsSecondaryWithApplicationCredentials}: if this is accepted too, the
+     * application key alone grants access and a success with it says nothing about the
+     * secondary user.
+     */
+    public HttpResponse sendWithStatusApplicationCredentialsOnly(String method, String url,
+                                                                 String contentType, String body)
+            throws IOException {
+        Request request = buildBareRequest(method, url, contentType, body, applicationCredentialHeaders());
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
     /**
      * @return true if this scan was configured with a credential of its own: a bearer token, API
      *     key, Basic Auth, or a custom header that is part of the primary identity (any custom
