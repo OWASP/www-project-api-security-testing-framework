@@ -200,8 +200,12 @@ class CrossUserBolaGatewayWireTest {
         assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains(CROSS_USER)), titles(findings));
         List<RecordedRequest> secondary = objectRequests().stream()
                 .filter(CrossUserBolaGatewayWireTest::isSecondary).toList();
-        assertEquals(2, secondary.size(), "the retry with the API key was still attempted");
-        secondary.forEach(CrossUserBolaGatewayWireTest::assertNoPrimaryIdentity);
+        assertEquals(3, secondary.size(),
+                "secondary token alone, the retry with the API key, then the 2.0.2 form as a last resort");
+        // The two strict attempts carry no primary identity. The last one is the 2.0.2 request (only
+        // Authorization replaced, other configured headers kept) and is sent only after both were rejected.
+        assertNoPrimaryIdentity(secondary.get(0));
+        assertNoPrimaryIdentity(secondary.get(1));
     }
 
     @Test
@@ -263,8 +267,10 @@ class CrossUserBolaGatewayWireTest {
         assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains(CROSS_USER)), titles(findings));
         List<RecordedRequest> secondary = objectRequests().stream()
                 .filter(CrossUserBolaGatewayWireTest::isSecondary).toList();
-        assertEquals(1, secondary.size());
+        assertEquals(2, secondary.size(), "the strict request, then the 2.0.2 form because X-Session-Token is configured");
         assertNoPrimaryIdentity(secondary.get(0));
         assertNull(secondary.get(0).getHeader("X-API-Key"));
+        assertEquals("custom-secret", secondary.get(1).getHeader("X-Session-Token"),
+                "the last-resort request is the 2.0.2 one: only Authorization is replaced");
     }
 }

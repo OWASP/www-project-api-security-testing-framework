@@ -212,13 +212,16 @@ class AnonymousProbeBaselineWireTest {
     }
 
     @Test
-    @DisplayName("Lockout: with no credentials, attempts a gateway rejected are not reported as missing lockout")
+    @DisplayName("Lockout: with no credentials, attempts a gateway rejected are reported at LOW as not confirmed, as 2.0.2 reported them")
     void lockoutGatewayRejectsAnonymousNoCredentials() throws Exception {
         HttpClient client = start(false, (r, path) -> json(401, "{\"error\":\"missing token\"}"));
 
         List<Finding> findings = new BrokenAuthenticationTestCase().testBruteForceLockout(endpoint(LOGIN, "POST"), client);
 
-        assertTrue(findings.isEmpty(), titles(findings));
+        assertEquals(1, findings.size(), titles(findings));
+        assertEquals(lockoutTitle() + " (not confirmed)", findings.get(0).getTitle());
+        assertEquals(Severity.LOW, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getDescription().contains("may have been rejected"), findings.get(0).getDescription());
         assertFalse(loginRequests().isEmpty(), "the attempts must still be sent");
     }
 
@@ -237,13 +240,15 @@ class AnonymousProbeBaselineWireTest {
     }
 
     @Test
-    @DisplayName("Lockout: credentials that the gateway also rejects do not produce a missing-lockout finding")
+    @DisplayName("Lockout: credentials that the gateway also rejects give a LOW not-confirmed finding, not a MEDIUM one")
     void lockoutGatewayRejectsCredentialsToo() throws Exception {
         HttpClient client = start(true, (r, path) -> json(403, "{\"error\":\"forbidden\"}"));
 
         List<Finding> findings = new BrokenAuthenticationTestCase().testBruteForceLockout(endpoint(LOGIN, "POST"), client);
 
-        assertTrue(findings.isEmpty(), titles(findings));
+        assertEquals(1, findings.size(), titles(findings));
+        assertEquals(Severity.LOW, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getTitle().endsWith("(not confirmed)"), findings.get(0).getTitle());
         assertTrue(loginRequests().stream().anyMatch(AnonymousProbeBaselineWireTest::authed),
                 "the credentialed attempts must still have been sent");
     }

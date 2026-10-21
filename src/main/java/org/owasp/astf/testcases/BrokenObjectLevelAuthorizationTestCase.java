@@ -156,6 +156,44 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                 withApplicationCredentials = true;
             }
 
+            // Last resort, so 2.1.0 never finds less than 2.0.2: if the secondary-only request (and the
+            // application-credential variant) was rejected, send the request exactly as 2.0.2 did, the
+            // primary request with only the Authorization header replaced by the secondary token. Other
+            // custom headers and cookies ride along then, so a success cannot be pinned on the secondary
+            // identity alone and is reported at HIGH, listing what was sent.
+            List<String> riding = httpClient.getHeaderNamesBesidesAuthorization(url);
+            if (primaryResponse != null && primaryResponse.isSuccess()
+                    && secondaryResponse != null && !secondaryResponse.isSuccess()
+                    && secondaryResponse.getStatusCode() >= 400 && secondaryResponse.getStatusCode() < 500
+                    && !riding.isEmpty()) {
+                HttpResponse legacyResponse = makeRequest(endpoint, url, httpClient,
+                        httpClient.getSecondaryAuthHeaders());
+                if (legacyResponse != null && legacyResponse.isSuccess() && !legacyResponse.isNotFound()) {
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "Broken Object Level Authorization (Cross-User Access, other configured headers kept)",
+                            String.format("A request carrying the second identity's token in place of the " +
+                                    "Authorization header was able to access '%s', the same object the primary " +
+                                    "identity can access. The secondary token alone was rejected (HTTP %d), so the " +
+                                    "other configured headers or cookies sent with it may identify the primary " +
+                                    "user, and the access cannot be attributed to the secondary identity alone.",
+                                    endpoint.getPath(), secondaryResponse.getStatusCode()),
+                            Severity.HIGH,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            CROSS_USER_REMEDIATION
+                    );
+                    finding.setRequestDetails(endpoint.getMethod() + " " + url +
+                            " (primary request with only the Authorization header replaced by the secondary token; "
+                            + "still sent: " + String.join(", ", riding) + ")");
+                    finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                            "\nSecondary token alone: " + secondaryResponse.getStatusCode() +
+                            "\nSecondary token with the other headers kept: " + legacyResponse.getStatusCode());
+                    findings.add(finding);
+                    return findings;
+                }
+            }
+
             if (primaryResponse != null && secondaryResponse != null
                     && primaryResponse.isSuccess()
                     && secondaryResponse.isSuccess()

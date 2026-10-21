@@ -363,10 +363,14 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 return findings;
             }
             if (!httpClient.hasConfiguredCredentials()) {
+                // 2.0.2 reported missing lockout here. It may only be a global authentication filter
+                // answering before the login handler, which cannot be told apart without credentials, so
+                // keep the finding at LOW and say so, instead of staying silent.
                 logger.info("Lockout check on {}: every attempt sent without credentials got HTTP {}, the same " +
-                        "answer as a path that does not exist, so none reached the login handler; no " +
-                        "credentials are configured to retry with, so nothing is reported about lockout.",
+                        "answer as a path that does not exist; no credentials are configured to retry with, " +
+                        "so the finding is reported at LOW with that doubt stated.",
                         fullUrl, anonymousRun.lastResponse().getStatusCode());
+                findings.add(lockoutDoubtFinding(endpoint, anonymousRun, false));
                 return findings;
             }
 
@@ -375,9 +379,10 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 return findings;
             }
             if (credentialedRun.rejectedBeforeHandler()) {
-                logger.info("Lockout check on {}: attempts were rejected before the login handler both " +
-                        "without credentials and with the configured credentials (HTTP {}); nothing is " +
-                        "reported about lockout.", fullUrl, credentialedRun.lastResponse().getStatusCode());
+                logger.info("Lockout check on {}: attempts were rejected like an unknown path both without " +
+                        "credentials and with the configured credentials (HTTP {}); reporting at LOW with " +
+                        "that doubt stated.", fullUrl, credentialedRun.lastResponse().getStatusCode());
+                findings.add(lockoutDoubtFinding(endpoint, credentialedRun, true));
                 return findings;
             }
             findings.add(lockoutFinding(endpoint, credentialedRun, false, anonymousRun));
@@ -450,6 +455,32 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
     }
 
+    /**
+     * The lockout finding for a run that never showed a 429/423 but whose attempts were all answered
+     * like a path that does not exist, so they may not have reached the login handler at all.
+     */
+    private Finding lockoutDoubtFinding(EndpointInfo endpoint, LockoutRun run, boolean withCredentials) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "No Account Lockout or Rate Limiting on Repeated Failed Logins (not confirmed)",
+                String.format("%d consecutive failed login attempts produced no rate-limiting or lockout " +
+                        "response (HTTP 429/423), but every one was answered with HTTP %d, the same answer as a " +
+                        "path that does not exist, so they may have been rejected by a gateway or a global " +
+                        "authentication filter before reaching the login handler. If the login handler was " +
+                        "reached, this allows unrestricted brute-force and credential-stuffing attacks.",
+                        BRUTE_FORCE_ATTEMPTS, run.lastResponse().getStatusCode()),
+                Severity.LOW,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Verify with an attempt that reaches the login handler, and implement account lockout or " +
+                "exponential rate limiting after a small number of failed attempts (e.g. 5)."
+        );
+        finding.setEvidence("Last of " + BRUTE_FORCE_ATTEMPTS + " attempts returned HTTP " +
+                run.lastResponse().getStatusCode() + " with no lockout signal. Attempts sent " +
+                (withCredentials ? "with the configured credentials" : "without credentials, and no credentials are configured to retry with"));
+        return finding;
+    }
+
     private Finding lockoutFinding(EndpointInfo endpoint, LockoutRun run, boolean anonymous, LockoutRun anonymousRun) {
         Finding finding = new Finding(
                 UUID.randomUUID().toString(),
@@ -504,6 +535,11 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 default -> {
                     // Fall back to string-based check for unsupported methods
                     String body = httpClient.getNoAuth(fullUrl);
+                    if (body == null || body.isEmpty()) {
+                        // Strict request got nothing: try the 2.0.2 form with custom headers kept
+                        body = httpClient.getCustomHeaderNamesKeptBy202NoAuth().isEmpty()
+                                ? body : httpClient.getNoAuthKeepingCustomHeaders(fullUrl);
+                    }
                     if (body != null && !body.isEmpty()
                             && !body.contains("unauthorized")
                             && !body.contains("authentication")) {
@@ -516,6 +552,28 @@ public class BrokenAuthenticationTestCase implements TestCase {
             if (looksLikeAuthSuccess(response)) {
                 // A 2xx response without auth headers indicates missing authentication controls
                 findings.add(buildMissingAuthFinding(endpoint));
+            } else {
+                // The strict request above leaves every custom header off. An API gateway that wants
+                // its own key in a custom header (for example Ocp-Apim-Subscription-Key) rejects that
+                // request before it reaches the API, so also send it as 2.0.2 did, with the custom
+                // headers kept, and report what that shows, saying so in the evidence.
+                List<String> keptHeaders = httpClient.getCustomHeaderNamesKeptBy202NoAuth();
+                if (!keptHeaders.isEmpty()) {
+                    String method = endpoint.getMethod().toUpperCase();
+                    HttpResponse withHeaders = httpClient.sendWithStatusNoAuthKeepingCustomHeaders(
+                            method, fullUrl, "application/json", "{}");
+                    if (looksLikeAuthSuccess(withHeaders)) {
+                        Finding finding = buildMissingAuthFinding(endpoint);
+                        finding.setEvidence("Rejected without any custom header (HTTP "
+                                + (response != null ? response.getStatusCode() : "no response")
+                                + "), but accepted (HTTP " + withHeaders.getStatusCode() + ") with no Authorization, "
+                                + "API key or cookie and with these configured custom headers kept: "
+                                + String.join(", ", keptHeaders)
+                                + ". If one of them is the gateway's own key this is expected; if they identify the "
+                                + "user, the endpoint is not checking the Authorization header.");
+                        findings.add(finding);
+                    }
+                }
             }
         } catch (Exception e) {
             logger.debug("Error testing missing authentication on {}: {}", endpoint, e.getMessage());
