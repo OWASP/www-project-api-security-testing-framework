@@ -77,6 +77,9 @@ class BrokenAuthenticationTestCaseTest {
                     .thenReturn(new HttpResponse(401, "{\"error\":\"Unauthorized\"}", Map.of()));
         }
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         if (isAuth && method.equals("POST")) {
@@ -463,6 +466,9 @@ class BrokenAuthenticationTestCaseTest {
                 argThat(body -> body != null && body.contains("\"admin\""))))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"Incorrect password\"}", Map.of()));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.testUserEnumeration(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("User Enumeration")),
@@ -493,6 +499,9 @@ class BrokenAuthenticationTestCaseTest {
 
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(401, "{\"error\":\"Invalid username or password\"}", Map.of()));
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.testBruteForceLockout(endpoint, httpClient);
 

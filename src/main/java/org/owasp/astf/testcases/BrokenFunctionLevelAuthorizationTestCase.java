@@ -199,30 +199,51 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
         for (String adminPath : ADMIN_PATH_PATTERNS) {
             String testUrl = cleanBase + adminPath;
             try {
-                HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
+                // Only flag when the response looks like a real API/admin response (JSON/XML)
+                // AND it differs from what this target returns for a path that doesn't exist.
+                // The content-type check alone only screens out HTML catch-alls; an API
+                // gateway whose default route answers 200 with a JSON body passes it, and
+                // would otherwise yield one CRITICAL finding per admin path probed below.
+                // The probe is sent without credentials first, since the finding claims no
+                // authorization was needed.
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                        () -> httpClient.getWithStatusNoAuth(testUrl),
+                        () -> httpClient.getWithStatus(testUrl, Map.of()),
+                        r -> r.isSuccess() && isApiResponse(r)
+                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r));
+                HttpResponse response = probe.response();
 
                 if (response != null && response.isSuccess() && isApiResponse(response)
                         && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
-                    // Only flag when the response looks like a real API/admin response (JSON/XML)
-                    // AND it differs from what this target returns for a path that doesn't exist.
-                    // The content-type check alone only screens out HTML catch-alls; an API
-                    // gateway whose default route answers 200 with a JSON body passes it, and
-                    // would otherwise yield one CRITICAL finding per admin path probed below.
-                    Finding finding = new Finding(
-                            UUID.randomUUID().toString(),
-                            "Administrative Endpoint Accessible Without Authorization",
-                            String.format("The administrative endpoint '%s' returned HTTP %d without " +
-                                    "requiring authentication or elevated privileges. This could allow " +
-                                    "unauthorized access to management functionality.",
-                                    adminPath, response.getStatusCode()),
-                            Severity.CRITICAL,
-                            getId(),
-                            "GET " + adminPath,
-                            "Restrict access to administrative endpoints using role-based access control. " +
-                            "Ensure admin endpoints require authentication and appropriate privilege levels. " +
-                            "Consider placing admin interfaces on a separate network or VPN."
-                    );
-                    finding.setRequestDetails("GET " + testUrl);
+                    Finding finding = probe.anonymous()
+                            ? new Finding(
+                                    UUID.randomUUID().toString(),
+                                    "Administrative Endpoint Accessible Without Authorization",
+                                    String.format("The administrative endpoint '%s' returned HTTP %d to a request " +
+                                            "sent without any credentials. This could allow unauthorized access " +
+                                            "to management functionality.",
+                                            adminPath, response.getStatusCode()),
+                                    Severity.CRITICAL,
+                                    getId(),
+                                    "GET " + adminPath,
+                                    "Restrict access to administrative endpoints using role-based access control. " +
+                                    "Ensure admin endpoints require authentication and appropriate privilege levels. " +
+                                    "Consider placing admin interfaces on a separate network or VPN.")
+                            : new Finding(
+                                    UUID.randomUUID().toString(),
+                                    "Administrative Endpoint Accessible" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    String.format("The administrative endpoint '%s' rejected a request without " +
+                                            "credentials but returned HTTP %d with the scan's configured " +
+                                            "credentials. If the scanning identity is not meant to have " +
+                                            "administrative rights, this is a function-level authorization flaw.",
+                                            adminPath, response.getStatusCode()),
+                                    Severity.MEDIUM,
+                                    getId(),
+                                    "GET " + adminPath,
+                                    "Confirm the scanning identity's role. Administrative endpoints must check the " +
+                                    "caller's privilege level, not only that the caller is authenticated.");
+                    finding.setRequestDetails("GET " + testUrl +
+                            (probe.anonymous() ? " (no credentials)" : " (with the configured credentials)"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; body length: " + response.getBody().length());
                     findings.add(finding);
@@ -263,33 +284,53 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
         for (String method : SENSITIVE_HTTP_METHODS) {
             try {
                 HttpResponse getResponse  = httpClient.getWithStatus(fullUrl, Map.of());
-                HttpResponse testResponse = switch (method) {
-                    case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                    case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
-                    case "PATCH"  -> httpClient.patchWithStatus(fullUrl, Map.of(), "application/json", "{}");
-                    default       -> null;
-                };
+                if (getResponse == null || !getResponse.isSuccess()) {
+                    continue;
+                }
+                // The state-changing request is sent without credentials first, since the
+                // finding claims no authorization was needed for it.
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                        () -> httpClient.sendWithStatusNoAuth(method, fullUrl, "application/json", "{}"),
+                        () -> switch (method) {
+                            case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                            case "DELETE" -> httpClient.deleteWithStatus(fullUrl, Map.of());
+                            case "PATCH"  -> httpClient.patchWithStatus(fullUrl, Map.of(), "application/json", "{}");
+                            default       -> null;
+                        },
+                        r -> r.isSuccess() && isApiResponse(r));
+                HttpResponse testResponse = probe.response();
 
-                if (getResponse != null && testResponse != null
-                        && getResponse.isSuccess()
+                if (testResponse != null
                         && testResponse.isSuccess()
                         && isApiResponse(testResponse)) {
 
-                    Finding finding = new Finding(
-                            UUID.randomUUID().toString(),
-                            "HTTP Method Escalation - " + method + " Allowed Without Authorization",
-                            String.format("The endpoint accepts %s requests without proper authorization. " +
-                                    "This could allow unauthorized modification or deletion of resources. " +
-                                    "GET was permitted and %s was also permitted without elevated privilege.",
-                                    method, method),
-                            Severity.HIGH,
-                            getId(),
-                            endpoint.getMethod() + " " + endpoint.getPath(),
-                            "Explicitly validate HTTP method permissions for each endpoint. Do not rely on " +
-                            "route configuration alone. Ensure that state-changing methods (PUT, DELETE, PATCH) " +
-                            "require appropriate authorization even when the GET counterpart is public."
-                    );
-                    finding.setRequestDetails(method + " " + fullUrl);
+                    Finding finding = probe.anonymous()
+                            ? new Finding(
+                                    UUID.randomUUID().toString(),
+                                    "HTTP Method Escalation - " + method + " Allowed Without Authorization",
+                                    String.format("The endpoint accepted a %s request sent without any credentials. " +
+                                            "This could allow unauthorized modification or deletion of resources.",
+                                            method),
+                                    Severity.HIGH,
+                                    getId(),
+                                    endpoint.getMethod() + " " + endpoint.getPath(),
+                                    "Explicitly validate HTTP method permissions for each endpoint. Do not rely on " +
+                                    "route configuration alone. Ensure that state-changing methods (PUT, DELETE, PATCH) " +
+                                    "require appropriate authorization even when the GET counterpart is public.")
+                            : new Finding(
+                                    UUID.randomUUID().toString(),
+                                    "HTTP Method Escalation - " + method + " Allowed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    String.format("The endpoint rejected a %s request without credentials but " +
+                                            "accepted it with the scan's configured credentials. If the scanning " +
+                                            "identity is only meant to read this resource, it can also modify or " +
+                                            "delete it.", method),
+                                    Severity.MEDIUM,
+                                    getId(),
+                                    endpoint.getMethod() + " " + endpoint.getPath(),
+                                    "Check that state-changing methods (PUT, DELETE, PATCH) require a privilege " +
+                                    "level of their own, not only the one that allows GET.");
+                    finding.setRequestDetails(method + " " + fullUrl +
+                            (probe.anonymous() ? " (no credentials)" : " (with the configured credentials)"));
                     finding.setResponseDetails("HTTP " + testResponse.getStatusCode());
                     findings.add(finding);
                 }

@@ -142,6 +142,9 @@ class ImproperInventoryManagementTestCaseTest {
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
                 .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertFalse(findings.isEmpty(), "Should detect exposed API documentation");

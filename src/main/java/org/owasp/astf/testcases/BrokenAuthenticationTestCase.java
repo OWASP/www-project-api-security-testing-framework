@@ -252,18 +252,31 @@ public class BrokenAuthenticationTestCase implements TestCase {
             return findings;
         }
 
+        // An outside attacker has no credentials, so the attempts are sent without any first.
+        // If that shows nothing and the scan has credentials (for example a gateway that wants an
+        // API key even for login), the attempts are repeated with them, and a difference seen
+        // only then is reported as reachable with the configured credentials at a lower severity.
+        findings.addAll(testUserEnumeration(endpoint, httpClient, true));
+        if (findings.isEmpty() && httpClient.hasConfiguredCredentials()) {
+            findings.addAll(testUserEnumeration(endpoint, httpClient, false));
+        }
+        return findings;
+    }
+
+    private List<Finding> testUserEnumeration(EndpointInfo endpoint, HttpClient httpClient, boolean anonymous) {
+        List<Finding> findings = new ArrayList<>();
         String fullUrl = endpoint.getFullUrl();
         String randomUsername = "nonexistent_" + UUID.randomUUID().toString().substring(0, 8);
 
         try {
-            HttpResponse randomResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+            HttpResponse randomResponse = postLogin(httpClient, fullUrl, anonymous,
                     String.format("{\"username\":\"%s\",\"password\":\"WrongPass!23\"}", randomUsername));
             if (randomResponse == null) {
                 return findings;
             }
 
             for (String commonUsername : COMMON_USERNAMES) {
-                HttpResponse commonResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+                HttpResponse commonResponse = postLogin(httpClient, fullUrl, anonymous,
                         String.format("{\"username\":\"%s\",\"password\":\"WrongPass!23\"}", commonUsername));
                 if (commonResponse == null) {
                     continue;
@@ -272,22 +285,27 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 if (responsesRevealEnumeration(randomResponse, commonResponse)) {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
-                            "User Enumeration via Differential Login Response",
+                            anonymous ? "User Enumeration via Differential Login Response"
+                                    : "User Enumeration via Differential Login Response"
+                                            + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
                             String.format("The login endpoint responds differently to a definitely-nonexistent " +
                                     "username ('%s') than to the common account name '%s', both with an " +
-                                    "incorrect password. This lets an attacker enumerate valid usernames " +
+                                    "incorrect password%s. This lets an attacker enumerate valid usernames " +
                                     "before attempting to brute-force their passwords.",
-                                    randomUsername, commonUsername),
-                            Severity.MEDIUM,
+                                    randomUsername, commonUsername,
+                                    anonymous ? "" : ", when the requests carry the scan's configured credentials " +
+                                            "(without them, both were answered the same way)"),
+                            anonymous ? Severity.MEDIUM : Severity.LOW,
                             getId(),
                             endpoint.getMethod() + " " + endpoint.getPath(),
                             "Return an identical, generic response (same status code and message, e.g. " +
                             "\"Invalid username or password\") regardless of whether the account exists."
                     );
                     finding.setEvidence(String.format(
-                            "Random username '%s' -> HTTP %d%nCommon username '%s' -> HTTP %d",
+                            "Random username '%s' -> HTTP %d%nCommon username '%s' -> HTTP %d%nRequests sent %s",
                             randomUsername, randomResponse.getStatusCode(),
-                            commonUsername, commonResponse.getStatusCode()));
+                            commonUsername, commonResponse.getStatusCode(),
+                            anonymous ? "without credentials" : "with the configured credentials"));
                     findings.add(finding);
                     return findings; // one confirmed instance is enough
                 }
@@ -297,6 +315,12 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    private HttpResponse postLogin(HttpClient httpClient, String url, boolean anonymous, String body) throws IOException {
+        return anonymous
+                ? httpClient.postWithStatusNoAuth(url, "application/json", body)
+                : httpClient.postWithStatus(url, Map.of(), "application/json", body);
     }
 
     private boolean responsesRevealEnumeration(HttpResponse a, HttpResponse b) {
@@ -328,7 +352,8 @@ public class BrokenAuthenticationTestCase implements TestCase {
 
         try {
             for (int attempt = 0; attempt < BRUTE_FORCE_ATTEMPTS; attempt++) {
-                lastResponse = httpClient.postWithStatus(fullUrl, Map.of(), "application/json",
+                // An outside attacker has no credentials, so the attempts carry none either.
+                lastResponse = httpClient.postWithStatusNoAuth(fullUrl, "application/json",
                         String.format("{\"username\":\"admin\",\"password\":\"WrongPass-%d!\"}", attempt));
                 if (lastResponse == null) {
                     return findings;

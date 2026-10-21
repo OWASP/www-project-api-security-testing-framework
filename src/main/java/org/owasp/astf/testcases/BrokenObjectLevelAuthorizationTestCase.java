@@ -100,8 +100,12 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      * proves the stronger claim BOLA actually names: a different user's credentials reading an
      * object without demonstrated ownership of it.
      * <p>
-     * Skips entirely when no secondary identity is configured — {@link HttpClient#getSecondaryAuthHeaders()}
-     * returns an empty map in that case, and the single-identity checks above remain the fallback.
+     * Skips entirely when no secondary identity is configured ({@link HttpClient#hasSecondaryIdentity()}
+     * is false), and the single-identity checks above remain the fallback.
+     * <p>
+     * The secondary request is sent with {@link HttpClient#sendWithStatusAsSecondary}, which
+     * carries only the secondary token: none of the primary identity's API key, credential-like
+     * custom headers or cookies, so the success cannot come from the primary identity.
      *
      * Unlike {@link #testNumericIdManipulation}/{@link #testUuidManipulation}, which need a
      * numeric/UUID value to substitute an alternative into, this check only compares two
@@ -112,8 +116,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     private List<Finding> testCrossUserAccess(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
-        Map<String, String> secondaryHeaders = httpClient.getSecondaryAuthHeaders();
-        if (secondaryHeaders.isEmpty()) {
+        if (!httpClient.hasSecondaryIdentity()) {
             return findings;
         }
 
@@ -130,7 +133,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
 
         try {
             HttpResponse primaryResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient, Map.of());
-            HttpResponse secondaryResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient, secondaryHeaders);
+            HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, endpoint.getFullUrl(), httpClient);
 
             if (primaryResponse != null && secondaryResponse != null
                     && primaryResponse.isSuccess()
@@ -153,7 +156,8 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                         "that the caller is authenticated at all."
                 );
                 finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
-                        " — requested with two distinct identities (primary and secondary tokens)");
+                        " (requested with two distinct identities: the primary credentials, then the " +
+                        "secondary token alone)");
                 finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
                         "\nSecondary identity status: " + secondaryResponse.getStatusCode());
                 findings.add(finding);
@@ -270,11 +274,20 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     }
 
     /**
-     * Same as {@link #makeRequest(EndpointInfo, String, HttpClient)}, but with a caller-supplied
-     * header override — used by {@link #testCrossUserAccess} to substitute the secondary
-     * identity's Authorization header for a single request without touching the client's
-     * default identity.
+     * Same request as {@link #makeRequest(EndpointInfo, String, HttpClient)}, sent as the
+     * secondary identity only (see {@link HttpClient#sendWithStatusAsSecondary}).
      */
+    private HttpResponse makeSecondaryRequest(EndpointInfo endpoint, String url, HttpClient httpClient)
+            throws IOException {
+        String method = endpoint.getMethod().toUpperCase();
+        return switch (method) {
+            case "POST", "PUT" -> httpClient.sendWithStatusAsSecondary(method, url, endpoint.getContentType(),
+                    resolveRequestBody(endpoint));
+            case "DELETE" -> httpClient.sendWithStatusAsSecondary("DELETE", url, null, null);
+            default -> httpClient.sendWithStatusAsSecondary("GET", url, null, null);
+        };
+    }
+
     private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
                                       Map<String, String> headers) throws IOException {
         return switch (endpoint.getMethod().toUpperCase()) {

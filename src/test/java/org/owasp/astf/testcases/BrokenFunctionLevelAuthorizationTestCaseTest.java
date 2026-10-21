@@ -59,6 +59,9 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
         when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(405, "{}", Map.of()));
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f ->
@@ -85,6 +88,9 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
         // For the GET endpoint itself (used in method escalation test)
         when(httpClient.getWithStatus(eq("https://example.com/api/users"), anyMap()))
                 .thenReturn(new HttpResponse(200, "{\"users\":[]}", Map.of()));
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -231,6 +237,9 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
                 .thenReturn(new HttpResponse(405, "{}", Map.of()));
         when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(405, "{}", Map.of()));
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 

@@ -133,20 +133,32 @@ public class ImproperInventoryManagementTestCase implements TestCase {
 
             String shadowUrl = cleanBase + shadowPath;
             try {
-                HttpResponse response = httpClient.getWithStatus(shadowUrl, Map.of());
+                // Sent without credentials first, since the finding says "publicly accessible".
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                        () -> httpClient.getWithStatusNoAuth(shadowUrl),
+                        () -> httpClient.getWithStatus(shadowUrl, Map.of()),
+                        r -> r.isSuccess() && isApiResponse(r));
+                HttpResponse response = probe.response();
                 if (response != null && response.isSuccess() && isApiResponse(response)) {
+                    boolean anonymous = probe.anonymous();
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
-                            "Shadow/Non-Production API Endpoint Accessible",
-                            String.format("A non-production API endpoint '%s' is publicly accessible. " +
-                                    "Shadow endpoints often bypass production security controls.", shadowPath),
-                            Severity.HIGH,
+                            anonymous ? "Shadow/Non-Production API Endpoint Accessible"
+                                    : "Shadow/Non-Production API Endpoint Accessible" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                            anonymous
+                                    ? String.format("A non-production API endpoint '%s' is publicly accessible. " +
+                                            "Shadow endpoints often bypass production security controls.", shadowPath)
+                                    : String.format("A non-production API endpoint '%s' rejected a request without " +
+                                            "credentials but answered one with the scan's configured credentials. " +
+                                            "Shadow endpoints often bypass production security controls.", shadowPath),
+                            anonymous ? Severity.HIGH : Severity.MEDIUM,
                             getId(),
                             endpoint.getMethod() + " " + endpoint.getPath(),
                             "Block access to non-production API environments from public networks. " +
                             "Ensure all API environments enforce equivalent security controls."
                     );
-                    finding.setRequestDetails(endpoint.getMethod() + " " + shadowUrl);
+                    finding.setRequestDetails("GET " + shadowUrl +
+                            (anonymous ? " (no credentials)" : " (with the configured credentials)"));
                     findings.add(finding);
                 }
             } catch (Exception e) {
@@ -175,12 +187,29 @@ public class ImproperInventoryManagementTestCase implements TestCase {
         // that returns the same generic fallback page for every unknown path will return
         // identical content here and for every doc path probed below — that shared fallback
         // body is not evidence of real documentation being exposed.
-        String fallbackBody = fetchFallbackBaseline(cleanBase, httpClient);
+        // Doc paths are probed without credentials first (the finding says "publicly exposed"),
+        // so each response is compared with the fallback page fetched the same way.
+        String anonymousFallbackBody = fetchFallbackBaseline(cleanBase, httpClient, true);
+        String credentialedFallbackBody = null;
+        boolean credentialedFallbackFetched = false;
 
         for (String docPath : EXPOSED_DOC_ENDPOINTS) {
             String testUrl = cleanBase + docPath;
             try {
-                HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                        () -> httpClient.getWithStatusNoAuth(testUrl),
+                        () -> httpClient.getWithStatus(testUrl, Map.of()),
+                        r -> r.isSuccess() && !r.getBody().isEmpty() && !r.getBody().equals(anonymousFallbackBody));
+                HttpResponse response = probe.response();
+                boolean anonymous = probe.anonymous();
+                String fallbackBody = anonymousFallbackBody;
+                if (!anonymous) {
+                    if (!credentialedFallbackFetched) {
+                        credentialedFallbackBody = fetchFallbackBaseline(cleanBase, httpClient, false);
+                        credentialedFallbackFetched = true;
+                    }
+                    fallbackBody = credentialedFallbackBody;
+                }
 
                 if (response != null && response.isSuccess() && !response.getBody().isEmpty()
                         && !response.getBody().equals(fallbackBody)) {
@@ -193,20 +222,25 @@ public class ImproperInventoryManagementTestCase implements TestCase {
 
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
-                            "API Documentation Publicly Exposed",
-                            String.format("API documentation is publicly accessible at '%s'. " +
+                            anonymous ? "API Documentation Publicly Exposed"
+                                    : "API Documentation Exposed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                            String.format("API documentation %s at '%s'. " +
                                     "Exposed API documentation reveals all endpoints, parameters, " +
                                     "data models, and authentication methods to potential attackers%s.",
+                                    anonymous ? "is publicly accessible"
+                                            : "rejected a request without credentials but was served with the " +
+                                              "scan's configured credentials",
                                     docPath,
                                     isApiSpec ? " (confirmed API specification detected)" : ""),
-                            Severity.LOW,
+                            anonymous ? Severity.LOW : Severity.INFO,
                             getId(),
                             "GET " + docPath,
                             "Restrict access to API documentation in production environments. " +
                             "Consider requiring authentication to view API documentation. " +
                             "At minimum, ensure documentation does not include production credentials or examples."
                     );
-                    finding.setRequestDetails("GET " + testUrl);
+                    finding.setRequestDetails("GET " + testUrl +
+                            (anonymous ? " (no credentials)" : " (with the configured credentials)"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; API spec detected: " + isApiSpec);
                     findings.add(finding);
@@ -225,10 +259,12 @@ public class ImproperInventoryManagementTestCase implements TestCase {
      * {@link #testExposedDocumentation}. Returns {@code null} on any failure, in which case no
      * doc-path response will match it and the check behaves as it did before this fix.
      */
-    private String fetchFallbackBaseline(String cleanBase, HttpClient httpClient) {
+    private String fetchFallbackBaseline(String cleanBase, HttpClient httpClient, boolean anonymous) {
         try {
-            HttpResponse response = httpClient.getWithStatus(
-                    cleanBase + "/__astf_nonexistent_path_check__", Map.of());
+            String url = cleanBase + "/__astf_nonexistent_path_check__";
+            HttpResponse response = anonymous
+                    ? httpClient.getWithStatusNoAuth(url)
+                    : httpClient.getWithStatus(url, Map.of());
             return response != null ? response.getBody() : null;
         } catch (Exception e) {
             logger.debug("Error fetching fallback baseline for {}: {}", cleanBase, e.getMessage());

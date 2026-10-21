@@ -757,23 +757,36 @@ public class GraphQLSecurityTestCase implements TestCase {
         for (String path : GRAPHQL_IDE_PATHS) {
             try {
                 String url = baseUrl + path;
-                HttpResponse response = httpClient.getWithStatus(url, Map.of());
+                // Sent without credentials first, since the finding says "publicly accessible".
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                        () -> httpClient.getWithStatusNoAuth(url),
+                        () -> httpClient.getWithStatus(url, Map.of()),
+                        r -> r.isSuccess() && looksLikeGraphQLIde(r.getBody()));
+                HttpResponse response = probe.response();
 
                 if (response != null && response.isSuccess() && looksLikeGraphQLIde(response.getBody())) {
+                    boolean anonymous = probe.anonymous();
                     Finding f = new Finding(
                             UUID.randomUUID().toString(),
-                            "GraphQL IDE Exposed in Production",
-                            String.format("A GraphQL IDE/explorer interface is publicly accessible at '%s'. " +
-                                    "These developer tools expose the full schema and a live query console " +
-                                    "to anyone who finds the path, and should never be reachable outside " +
-                                    "development environments.", path),
-                            Severity.MEDIUM,
+                            anonymous ? "GraphQL IDE Exposed in Production"
+                                    : "GraphQL IDE Exposed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                            anonymous
+                                    ? String.format("A GraphQL IDE/explorer interface is publicly accessible at '%s'. " +
+                                            "These developer tools expose the full schema and a live query console " +
+                                            "to anyone who finds the path, and should never be reachable outside " +
+                                            "development environments.", path)
+                                    : String.format("A GraphQL IDE/explorer interface at '%s' rejected a request " +
+                                            "without credentials but was served with the scan's configured " +
+                                            "credentials. It gives any holder of such credentials a live query " +
+                                            "console and should not be deployed outside development environments.", path),
+                            anonymous ? Severity.MEDIUM : Severity.LOW,
                             getId(),
                             "GET " + path,
                             "Disable the GraphQL IDE/playground in production builds, or restrict it to " +
                             "internal networks / behind real authentication."
                     );
-                    f.setEvidence("GET " + url + " returned HTTP " + response.getStatusCode() + " with IDE markup");
+                    f.setEvidence("GET " + url + (anonymous ? " without credentials" : " with the configured credentials") +
+                            " returned HTTP " + response.getStatusCode() + " with IDE markup");
                     findings.add(f);
                     continue;
                 }

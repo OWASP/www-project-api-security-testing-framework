@@ -215,6 +215,55 @@ public class HttpClient {
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
 
+    /** @return true if a secondary identity was configured via {@code --secondary-token} */
+    public boolean hasSecondaryIdentity() {
+        String secondaryToken = config.getSecondaryBearerToken();
+        return secondaryToken != null && !secondaryToken.isEmpty();
+    }
+
+    /**
+     * Sends a request as the secondary identity only. Unlike passing
+     * {@link #getSecondaryAuthHeaders()} to a normal request, which only replaces
+     * {@code Authorization}, this leaves off everything that belongs to the primary identity: the
+     * configured API key, credential-like custom headers, cookies and the Basic Auth retry. Used
+     * by cross-user checks so a success can only be explained by the secondary token.
+     *
+     * @param method      GET, POST, PUT, PATCH or DELETE (anything else is sent with that method name)
+     * @param contentType content type of {@code body}; ignored for methods without a body
+     * @param body        request body; ignored for GET and DELETE
+     * @throws IllegalStateException if no secondary identity is configured
+     */
+    public HttpResponse sendWithStatusAsSecondary(String method, String url, String contentType, String body)
+            throws IOException {
+        if (!hasSecondaryIdentity()) {
+            throw new IllegalStateException("No secondary identity configured");
+        }
+        Request request = buildBareRequest(method, url, contentType, body, getSecondaryAuthHeaders());
+        return executeRequestWithStatus(request, noAuthClient);
+    }
+
+    /**
+     * @return true if this scan sends any credential of its own: a bearer token, API key, Basic
+     *     Auth, an {@code Authorization} or credential-like custom header, or a cookie captured
+     *     earlier in the scan. Checks that first probe without credentials use this to decide
+     *     whether a credentialed retry can show anything the anonymous probe did not.
+     */
+    public boolean hasConfiguredCredentials() {
+        if (config.getBearerToken() != null && !config.getBearerToken().isEmpty()) {
+            return true;
+        }
+        if (config.getApiKey() != null && !config.getApiKey().isEmpty()) {
+            return true;
+        }
+        if (config.getBasicAuthUsername() != null && !config.getBasicAuthUsername().isEmpty()) {
+            return true;
+        }
+        if (defaultHeaders.keySet().stream().anyMatch(this::isPrimaryCredentialHeader)) {
+            return true;
+        }
+        return cookieStore.values().stream().anyMatch(list -> !list.isEmpty());
+    }
+
     /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
     public boolean hasClientCert() {
         return config.getClientCertPath() != null && !config.getClientCertPath().isEmpty();
@@ -259,6 +308,10 @@ public class HttpClient {
      * The server's own certificate is deliberately NOT validated by this client (a permissive
      * trust manager is used) — this method exists to probe how the SERVER behaves toward
      * different client identities, not to verify the server's identity to the caller.
+     * <p>
+     * The request carries the certificate as its only credential: no bearer token, API key,
+     * credential-like custom header, cookie or Basic Auth retry. Otherwise a server that ignores
+     * the certificate but accepts the token would look like it accepts any certificate.
      *
      * @param url The target URL (must be https://)
      * @param headers Additional headers to include
@@ -273,7 +326,7 @@ public class HttpClient {
                                            String certPath, String certPassword) throws IOException {
         OkHttpClient certClient = clientCertClients.computeIfAbsent(certPath,
                 path -> buildClientCertClient(path, certPassword));
-        Request request = createRequest(url, "GET", headers, null, null);
+        Request request = buildBareRequest("GET", url, null, null, headers);
         try (Response response = certClient.newCall(request).execute()) {
             String body = response.body() != null ? response.body().string() : "";
             Map<String, List<String>> responseHeaders = extractHeaders(response);
@@ -304,7 +357,7 @@ public class HttpClient {
             sslContext.init(keyManagerFactory.getKeyManagers(),
                     new X509TrustManager[]{trustAllServerCerts}, new SecureRandom());
 
-            return client.newBuilder()
+            return noAuthClient.newBuilder()
                     .sslSocketFactory(sslContext.getSocketFactory(), trustAllServerCerts)
                     .hostnameVerifier((hostname, session) -> true)
                     .build();
@@ -545,9 +598,10 @@ public class HttpClient {
     }
 
     /**
-     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header
-     *     and the configured API-key header (see {@link #credentialHeaderNames()}) that would
-     *     otherwise always be attached from {@link #defaultHeaders}. Needed by any caller that
+     * @param suppressCredentialHeaders when true, skips the default {@code Authorization} header,
+     *     the configured API-key header and credential-like custom headers (see
+     *     {@link #isPrimaryCredentialHeader(String)}) that would otherwise always be attached from
+     *     {@link #defaultHeaders}. Needed by any caller that
      *     deliberately wants to send a request with zero credentials — e.g. an "endpoint actually
      *     requires auth" baseline probe. Passing an empty {@code additionalHeaders} map is NOT
      *     enough to achieve that on its own: {@link #defaultHeaders} is always applied first
@@ -578,9 +632,8 @@ public class HttpClient {
 
         // Add default headers from config, skipping credential headers when the caller
         // explicitly asked for an unauthenticated request.
-        Set<String> credentialHeaderNames = suppressCredentialHeaders ? credentialHeaderNames() : Set.of();
         for (Map.Entry<String, String> entry : defaultHeaders.entrySet()) {
-            if (credentialHeaderNames.stream().anyMatch(entry.getKey()::equalsIgnoreCase)) {
+            if (suppressCredentialHeaders && isPrimaryCredentialHeader(entry.getKey())) {
                 continue;
             }
             requestBuilder.header(entry.getKey(), entry.getValue());
@@ -613,6 +666,47 @@ public class HttpClient {
         return names;
     }
 
+    // Name fragments that mark a user-configured custom header as a credential (for example
+    // X-Auth-Token, X-Session-Id, X-CSRF-Token, X-Api-Secret). Such a header is left off requests
+    // that must not carry the primary identity; other custom headers (tenant ids, versions) are
+    // still sent so the request is routed the same way.
+    private static final List<String> CREDENTIAL_NAME_FRAGMENTS = List.of(
+            "auth", "token", "key", "secret", "session", "cookie", "csrf", "xsrf",
+            "password", "passwd", "credential", "jwt", "signature");
+
+    /**
+     * @return true if a default (config) header with this name carries the primary identity:
+     *     {@code Authorization}, cookies, the configured API-key header, or a custom header whose
+     *     name looks like a credential (see {@link #CREDENTIAL_NAME_FRAGMENTS}).
+     */
+    private boolean isPrimaryCredentialHeader(String headerName) {
+        if (NEVER_STRIPPED.stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return false;
+        }
+        if (credentialHeaderNames().stream().anyMatch(headerName::equalsIgnoreCase)) {
+            return true;
+        }
+        String lower = headerName.toLowerCase(java.util.Locale.ROOT);
+        return CREDENTIAL_NAME_FRAGMENTS.stream().anyMatch(lower::contains);
+    }
+
+    /**
+     * Builds a request without any of the primary identity's credential headers (see
+     * {@link #isPrimaryCredentialHeader}), then applies {@code extraHeaders}. Executed on
+     * {@link #noAuthClient}, it also has no cookies and no Basic Auth retry.
+     */
+    private Request buildBareRequest(String method, String url, String contentType, String body,
+                                     Map<String, String> extraHeaders) {
+        String m = method.toUpperCase(java.util.Locale.ROOT);
+        MediaType mediaType = null;
+        RequestBody requestBody = null;
+        if (!m.equals("GET") && !m.equals("HEAD") && !m.equals("DELETE")) {
+            mediaType = MediaType.parse(contentType != null ? contentType : "application/json");
+            requestBody = RequestBody.create(body != null ? body : "", mediaType);
+        }
+        return createRequest(url, m, extraHeaders, mediaType, requestBody, true);
+    }
+
     /**
      * Makes a GET request with no credentials attached — not even the configured bearer token or
      * API key — for use as an "endpoint actually requires auth" baseline probe. See
@@ -639,6 +733,24 @@ public class HttpClient {
     /** DELETE variant of {@link #getWithStatusNoAuth(String)}. */
     public HttpResponse deleteWithStatusNoAuth(String url) throws IOException {
         return executeRequestWithStatus(createRequest(url, "DELETE", Map.of(), null, null, true), noAuthClient);
+    }
+
+    /** PATCH variant of {@link #getWithStatusNoAuth(String)}. */
+    public HttpResponse patchWithStatusNoAuth(String url, String contentType, String body) throws IOException {
+        return sendWithStatusNoAuth("PATCH", url, contentType, body);
+    }
+
+    /**
+     * Any-method variant of {@link #getWithStatusNoAuth(String)}: sends {@code method} with no
+     * credentials of any kind (no token, API key, credential-like custom header, cookie or Basic
+     * Auth retry).
+     *
+     * @param contentType content type of {@code body}; ignored for GET, HEAD and DELETE
+     * @param body        request body; ignored for GET, HEAD and DELETE
+     */
+    public HttpResponse sendWithStatusNoAuth(String method, String url, String contentType, String body)
+            throws IOException {
+        return executeRequestWithStatus(buildBareRequest(method, url, contentType, body, Map.of()), noAuthClient);
     }
 
     /** String-body GET variant of {@link #getWithStatusNoAuth(String)}, for callers that only need the response body. */
