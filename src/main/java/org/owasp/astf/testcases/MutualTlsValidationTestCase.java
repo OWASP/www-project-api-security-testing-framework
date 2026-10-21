@@ -77,62 +77,125 @@ public class MutualTlsValidationTestCase implements TestCase {
     /**
      * Confirms the valid certificate is accepted, then presents the deliberately invalid/untrusted
      * certificate to the same endpoint. If the server accepts both identically, it isn't actually
-     * validating client certificates at all — the "Arbitrary mTLS" class of vulnerability.
+     * validating client certificates at all: the "Arbitrary mTLS" class of vulnerability.
+     *
+     * <p>The first pair carries the certificate as its only credential. When the valid certificate
+     * alone is not accepted and the scan has credentials (an API that needs a certificate AND a
+     * token), the pair is sent again with the same configured credentials on both requests, so the
+     * only difference between them is still the certificate. A result from that pair says so in
+     * its title and evidence.</p>
      */
     private List<Finding> testArbitraryCertificateAccepted(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
         if (!httpClient.hasInvalidClientCert()) {
-            logger.debug("Skipping arbitrary-certificate check — no --invalid-client-cert configured");
+            logger.debug("Skipping arbitrary-certificate check: no --invalid-client-cert configured");
             return findings;
         }
 
         String url = endpoint.getFullUrl();
+        HttpResponse certOnlyValid = null;
         try {
-            HttpResponse validCertResponse = httpClient.getWithClientCert(
+            certOnlyValid = httpClient.getWithClientCert(
                     url, Map.of(), httpClient.getClientCertPath(), httpClient.getClientCertPassword());
-
-            if (validCertResponse == null || !validCertResponse.isSuccess()) {
-                // Can't establish a baseline of "the valid cert works" — nothing to compare against.
-                logger.debug("Valid client certificate was not accepted at {}; skipping comparison", endpoint);
-                return findings;
-            }
-
-            HttpResponse invalidCertResponse;
-            try {
-                invalidCertResponse = httpClient.getWithClientCert(
-                        url, Map.of(), httpClient.getInvalidClientCertPath(), httpClient.getInvalidClientCertPassword());
-            } catch (IOException tlsRejected) {
-                // The TLS handshake itself failing for the invalid cert is the correct, secure
-                // behavior — nothing to report.
-                logger.debug("Invalid client certificate correctly rejected at TLS handshake for {}: {}",
-                        endpoint, tlsRejected.getMessage());
-                return findings;
-            }
-
-            if (invalidCertResponse != null && invalidCertResponse.isSuccess()) {
-                Finding finding = new Finding(
-                        UUID.randomUUID().toString(),
-                        "Arbitrary Client Certificate Accepted (mTLS)",
-                        "The server accepted a deliberately invalid/untrusted client certificate and " +
-                        "responded identically to how it responded with a valid certificate. This " +
-                        "indicates the server is not actually validating client certificates against " +
-                        "a trusted certificate authority, defeating the purpose of mutual TLS.",
-                        Severity.CRITICAL,
-                        getId(),
-                        endpoint.getMethod() + " " + endpoint.getPath(),
-                        "Configure the TLS server to require and verify that the client certificate " +
-                        "chains to a trusted CA (mTLS with client certificate verification enabled), " +
-                        "and reject connections presenting untrusted or self-signed certificates."
-                );
-                finding.setEvidence("Valid cert: HTTP " + validCertResponse.getStatusCode() +
-                        "; Invalid/untrusted cert: HTTP " + invalidCertResponse.getStatusCode());
-                findings.add(finding);
-            }
         } catch (Exception e) {
-            logger.debug("Error testing mTLS arbitrary-certificate acceptance on {}: {}", endpoint, e.getMessage());
+            logger.debug("Valid client certificate request failed at {}: {}", endpoint, e.getMessage());
+        }
+
+        if (certOnlyValid != null && certOnlyValid.isSuccess()) {
+            compare(endpoint, httpClient, certOnlyValid, false, null).ifPresent(findings::add);
+            return findings;
+        }
+
+        if (!httpClient.hasConfiguredCredentials()) {
+            // Can't establish a baseline of "the valid cert works", and there are no credentials
+            // that could make it work: nothing to compare against.
+            logger.debug("Valid client certificate was not accepted at {}; no credentials configured, " +
+                    "so no comparison", endpoint);
+            return findings;
+        }
+
+        try {
+            HttpResponse credentialedValid = httpClient.getWithClientCertAndCredentials(
+                    url, Map.of(), httpClient.getClientCertPath(), httpClient.getClientCertPassword());
+            if (credentialedValid == null || !credentialedValid.isSuccess()) {
+                logger.debug("Valid client certificate was not accepted at {} even with the configured " +
+                        "credentials; no comparison", endpoint);
+                return findings;
+            }
+            compare(endpoint, httpClient, credentialedValid, true, certOnlyValid).ifPresent(findings::add);
+        } catch (Exception e) {
+            logger.debug("Error testing mTLS arbitrary-certificate acceptance with credentials on {}: {}",
+                    endpoint, e.getMessage());
         }
 
         return findings;
+    }
+
+    /**
+     * Sends the invalid certificate the same way the accepted valid-certificate request was sent
+     * (certificate only, or with the configured credentials) and reports if it is accepted too.
+     */
+    private java.util.Optional<Finding> compare(EndpointInfo endpoint, HttpClient httpClient,
+                                                HttpResponse validResponse, boolean withCredentials,
+                                                HttpResponse certOnlyValid) {
+        String url = endpoint.getFullUrl();
+        HttpResponse invalidResponse;
+        try {
+            invalidResponse = withCredentials
+                    ? httpClient.getWithClientCertAndCredentials(url, Map.of(),
+                            httpClient.getInvalidClientCertPath(), httpClient.getInvalidClientCertPassword())
+                    : httpClient.getWithClientCert(url, Map.of(),
+                            httpClient.getInvalidClientCertPath(), httpClient.getInvalidClientCertPassword());
+        } catch (IOException tlsRejected) {
+            // The TLS handshake itself failing for the invalid cert is the correct, secure
+            // behavior: nothing to report.
+            logger.debug("Invalid client certificate correctly rejected at TLS handshake for {}: {}",
+                    endpoint, tlsRejected.getMessage());
+            return java.util.Optional.empty();
+        } catch (Exception e) {
+            logger.debug("Error testing mTLS arbitrary-certificate acceptance on {}: {}", endpoint, e.getMessage());
+            return java.util.Optional.empty();
+        }
+
+        if (invalidResponse == null || !invalidResponse.isSuccess()) {
+            return java.util.Optional.empty();
+        }
+
+        String title = "Arbitrary Client Certificate Accepted (mTLS)";
+        String description = "The server accepted a deliberately invalid/untrusted client certificate and " +
+                "responded identically to how it responded with a valid certificate. This " +
+                "indicates the server is not actually validating client certificates against " +
+                "a trusted certificate authority, defeating the purpose of mutual TLS.";
+        Severity severity = Severity.CRITICAL;
+        String evidence = "Valid cert: HTTP " + validResponse.getStatusCode() +
+                "; Invalid/untrusted cert: HTTP " + invalidResponse.getStatusCode();
+        if (withCredentials) {
+            title = "Arbitrary Client Certificate Accepted (mTLS, with the configured credentials)";
+            description = "With the scan's configured credentials on both requests, the server accepted a " +
+                    "deliberately invalid/untrusted client certificate just as it accepted the valid one. " +
+                    "The credentials are still needed, but the client certificate is not being validated " +
+                    "against a trusted certificate authority, so it adds no assurance of the caller's identity.";
+            severity = Severity.HIGH;
+            String certOnly = certOnlyValid != null
+                    ? "HTTP " + certOnlyValid.getStatusCode()
+                    : "request failed";
+            evidence = "Valid cert alone (no other credentials): " + certOnly +
+                    ". Comparison made with the configured credentials on both requests: " + evidence;
+        }
+
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                title,
+                description,
+                severity,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Configure the TLS server to require and verify that the client certificate " +
+                "chains to a trusted CA (mTLS with client certificate verification enabled), " +
+                "and reject connections presenting untrusted or self-signed certificates."
+        );
+        finding.setEvidence(evidence);
+        return java.util.Optional.of(finding);
     }
 }

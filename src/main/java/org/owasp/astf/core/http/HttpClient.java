@@ -83,6 +83,8 @@ public class HttpClient {
 
     // Lazily-built, per-keystore-path clients for mTLS testing — see getWithClientCert().
     private final Map<String, OkHttpClient> clientCertClients = new ConcurrentHashMap<>();
+    // Same, but built on the credentialed client: see getWithClientCertAndCredentials().
+    private final Map<String, OkHttpClient> credentialedClientCertClients = new ConcurrentHashMap<>();
 
     /**
      * Creates a new HTTP client with the specified configuration.
@@ -326,8 +328,32 @@ public class HttpClient {
     public HttpResponse getWithClientCert(String url, Map<String, String> headers,
                                            String certPath, String certPassword) throws IOException {
         OkHttpClient certClient = clientCertClients.computeIfAbsent(certPath,
-                path -> buildClientCertClient(path, certPassword));
+                path -> buildClientCertClient(noAuthClient, path, certPassword));
         Request request = buildBareRequest("GET", url, null, null, headers);
+        return executeClientCertRequest(certClient, request);
+    }
+
+    /**
+     * Like {@link #getWithClientCert}, but the request also carries the scan's primary
+     * credentials: the bearer token, API key, custom headers and the Basic Auth retry, kept on the
+     * target host as for any other request. For APIs that need a client certificate AND a token,
+     * where the certificate alone is never accepted, so two certificates can only be compared when
+     * both requests carry the same credentials.
+     * <p>
+     * Cookies are not sent and responses do not store any, so a session cookie set by one
+     * certificate's response cannot ride along on the next request: two calls with different
+     * certificates differ only in the certificate.
+     */
+    public HttpResponse getWithClientCertAndCredentials(String url, Map<String, String> headers,
+                                                         String certPath, String certPassword) throws IOException {
+        OkHttpClient certClient = credentialedClientCertClients.computeIfAbsent(certPath,
+                path -> buildClientCertClient(client.newBuilder().cookieJar(CookieJar.NO_COOKIES).build(),
+                        path, certPassword));
+        Request request = createRequest(url, "GET", headers, null, null);
+        return executeClientCertRequest(certClient, request);
+    }
+
+    private HttpResponse executeClientCertRequest(OkHttpClient certClient, Request request) throws IOException {
         try (Response response = certClient.newCall(request).execute()) {
             String body = response.body() != null ? response.body().string() : "";
             Map<String, List<String>> responseHeaders = extractHeaders(response);
@@ -335,7 +361,7 @@ public class HttpClient {
         }
     }
 
-    private OkHttpClient buildClientCertClient(String certPath, String certPassword) {
+    private OkHttpClient buildClientCertClient(OkHttpClient base, String certPath, String certPassword) {
         try {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
             try (FileInputStream in = new FileInputStream(certPath)) {
@@ -358,7 +384,7 @@ public class HttpClient {
             sslContext.init(keyManagerFactory.getKeyManagers(),
                     new X509TrustManager[]{trustAllServerCerts}, new SecureRandom());
 
-            return noAuthClient.newBuilder()
+            return base.newBuilder()
                     .sslSocketFactory(sslContext.getSocketFactory(), trustAllServerCerts)
                     .hostnameVerifier((hostname, session) -> true)
                     .build();
