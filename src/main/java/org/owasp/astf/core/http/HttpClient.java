@@ -92,6 +92,15 @@ public class HttpClient {
      * @param config The scan configuration
      */
     public HttpClient(ScanConfig config) {
+        this(config, builder -> { });
+    }
+
+    /**
+     * Test seam: {@code transport} may adjust how connections are made (socket factory, TLS
+     * trust) before the client is built. It runs after every scan setting has been applied, and
+     * the no-auth client is derived from the result, so both share the same transport.
+     */
+    HttpClient(ScanConfig config, java.util.function.Consumer<OkHttpClient.Builder> transport) {
         this.config = config;
         this.defaultHeaders = new HashMap<>(config.getHeaders());
 
@@ -118,6 +127,7 @@ public class HttpClient {
             configureBasicAuth(builder);
         }
 
+        transport.accept(builder);
         this.client = builder.build();
         this.noAuthClient = this.client.newBuilder()
                 .authenticator(Authenticator.NONE)
@@ -1001,22 +1011,31 @@ public class HttpClient {
     // them as custom headers: removing them would change how the request is framed or decoded.
     private static final Set<String> NEVER_STRIPPED = Set.of(
             "accept", "accept-encoding", "accept-language", "content-type", "content-length",
-            "content-encoding", "transfer-encoding", "user-agent", "host", "connection",
-            "proxy-authorization");
+            "content-encoding", "transfer-encoding", "user-agent", "host", "connection");
+
+    // host:port values whose requests have already had credentials stripped and been reported
+    // at WARN, so the warning appears once per host rather than once per request.
+    private final Set<String> warnedOutOfScopeHosts = ConcurrentHashMap.newKeySet();
 
     /**
      * Network interceptor that keeps the scan's credentials on the target. A request to any
-     * host:port other than the target (or a {@code scopeHosts} entry) is still sent, so discovery
+     * host:port other than the target (or a {@code scopeHosts} entry, or the target's own host
+     * reached by an http to https upgrade between the default ports) is still sent, so discovery
      * and redirect handling are not reduced, but without the Authorization header, the API-key
-     * header, any user-configured custom header, and cookies.
+     * header, every user-configured custom header except the protocol headers in
+     * {@link #NEVER_STRIPPED}, a Proxy-Authorization header meant for the origin, and cookies.
      */
     private Response pinCredentialsToScope(Interceptor.Chain chain) throws IOException {
         Request request = chain.request();
         HttpUrl url = request.url();
         if (isInCredentialScope(url)) {
-            // OkHttp itself drops Authorization when a redirect changes host. A host the user
-            // listed in scopeHosts is allowed to receive it, so put back the caller's value.
-            if (request.header("Authorization") == null && !isTargetHost(url)) {
+            // OkHttp drops Authorization on a redirect that changes scheme, host or port, and
+            // builds every later hop from that reduced request, so on a chain such as
+            // target -> scopeHost -> target it would also be missing on the way back. Every
+            // in-scope hop may receive it, so put back the caller's value wherever it is missing.
+            // A request the caller sent without Authorization (the no-auth variants) has
+            // nothing to restore and stays bare.
+            if (request.header("Authorization") == null) {
                 String original = chain.call().request().header("Authorization");
                 if (original != null) {
                     request = request.newBuilder().header("Authorization", original).build();
@@ -1025,19 +1044,43 @@ public class HttpClient {
             return chain.proceed(request);
         }
 
+        boolean viaPlainHttpProxy = isSentThroughPlainHttpProxy(chain, url);
         Request.Builder stripped = request.newBuilder();
         List<String> removed = new ArrayList<>();
         for (String name : request.headers().names()) {
-            if (isCredentialForScope(name)) {
+            if ("Proxy-Authorization".equalsIgnoreCase(name)) {
+                // Through an HTTPS tunnel, OkHttp puts the real proxy credential on the CONNECT
+                // request, which this interceptor never sees, so a Proxy-Authorization here would
+                // travel inside the tunnel to the origin. Only a plain-http request through a
+                // configured HTTP proxy is read by the proxy itself, so it keeps the header.
+                if (!viaPlainHttpProxy) {
+                    stripped.removeHeader(name);
+                    removed.add(name);
+                }
+            } else if (isCredentialForScope(name)) {
                 stripped.removeHeader(name);
                 removed.add(name);
             }
         }
         if (!removed.isEmpty()) {
-            logger.debug("Request to {}:{} is outside the scan scope; sent without {}",
-                    url.host(), url.port(), removed);
+            String hostPort = url.host() + ":" + url.port();
+            if (warnedOutOfScopeHosts.add(hostPort.toLowerCase(java.util.Locale.ROOT))) {
+                logger.warn("Request to {} is outside the scan scope; it was sent without {}. "
+                        + "Add it to scopeHosts if it should receive the scan's credentials "
+                        + "(further requests to this host are logged at DEBUG).", hostPort, removed);
+            } else {
+                logger.debug("Request to {} is outside the scan scope; sent without {}", hostPort, removed);
+            }
         }
         return chain.proceed(stripped.build());
+    }
+
+    private static boolean isSentThroughPlainHttpProxy(Interceptor.Chain chain, HttpUrl url) {
+        if (url.isHttps()) {
+            return false;
+        }
+        okhttp3.Connection connection = chain.connection();
+        return connection != null && connection.route().proxy().type() == Proxy.Type.HTTP;
     }
 
     private boolean isCredentialForScope(String headerName) {
@@ -1055,8 +1098,9 @@ public class HttpClient {
     }
 
     /**
-     * @return true if the URL's host and port are the configured target's, or match an entry in
-     *     {@code scopeHosts} ({@code host} for any port, {@code host:port} for that port only).
+     * @return true if the URL's host and port are the configured target's, or the target's own
+     *     host reached by an upgrade from http on port 80 to https on port 443, or match an entry
+     *     in {@code scopeHosts} ({@code host} for any port, {@code host:port} for that port only).
      *     With no parseable target URL there is nothing to pin to, and every host is in scope.
      */
     boolean isInCredentialScope(HttpUrl url) {
@@ -1064,7 +1108,7 @@ public class HttpClient {
         if (target == null) {
             return true;
         }
-        if (isTargetHost(url)) {
+        if (isTargetHost(url) || isSameHostSchemeUpgrade(target, url)) {
             return true;
         }
         for (String entry : config.getScopeHosts()) {
@@ -1078,6 +1122,19 @@ public class HttpClient {
     private boolean isTargetHost(HttpUrl url) {
         HttpUrl target = config.getTargetUrl() != null ? HttpUrl.parse(config.getTargetUrl()) : null;
         return target != null && target.host().equalsIgnoreCase(url.host()) && target.port() == url.port();
+    }
+
+    /**
+     * A target given as {@code http://host} (port 80) that redirects to {@code https://host}
+     * (port 443) is the same service moving to TLS, the most common redirect there is; treating
+     * it as another host would strip credentials from the whole scan. Only the default ports
+     * count, and a downgrade from https to http is not admitted.
+     */
+    private static boolean isSameHostSchemeUpgrade(HttpUrl target, HttpUrl url) {
+        return !target.isHttps() && url.isHttps()
+                && target.host().equalsIgnoreCase(url.host())
+                && target.port() == HttpUrl.defaultPort("http")
+                && url.port() == HttpUrl.defaultPort("https");
     }
 
     private static boolean scopeEntryMatches(String entry, HttpUrl url) {
