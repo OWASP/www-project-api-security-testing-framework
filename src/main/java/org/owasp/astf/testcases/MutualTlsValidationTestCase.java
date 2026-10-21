@@ -124,6 +124,24 @@ public class MutualTlsValidationTestCase implements TestCase {
                 return findings;
             }
             compare(endpoint, httpClient, credentialedValid, true, certOnlyValid).ifPresent(findings::add);
+        } catch (javax.net.ssl.SSLException e) {
+            // The credentialed comparison validates the server certificate, because it sends a token or
+            // API key. A self-signed server certificate therefore stops it, and it must not be silent.
+            Finding notMade = new Finding(
+                    UUID.randomUUID().toString(),
+                    "mTLS Certificate Comparison With Credentials Not Made (server certificate not trusted)",
+                    "The client certificate alone was not accepted, so the comparison of a valid and an invalid " +
+                    "client certificate needs the scan's credentials as well. Those are only sent over a " +
+                    "connection whose server certificate validates, and this server's certificate is not trusted " +
+                    "by this JVM, so the comparison was not made and no credential was sent.",
+                    Severity.INFO,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Add the server's certificate authority to the Java trust store (or test a deployment with a " +
+                    "certificate from a trusted authority) to run this comparison."
+            );
+            notMade.setEvidence("TLS error: " + e.getMessage());
+            findings.add(notMade);
         } catch (Exception e) {
             logger.debug("Error testing mTLS arbitrary-certificate acceptance with credentials on {}: {}",
                     endpoint, e.getMessage());

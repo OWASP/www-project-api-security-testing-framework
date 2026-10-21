@@ -209,7 +209,7 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                 // Each response is compared with an unknown-path baseline fetched the same way
                 // (anonymous or with credentials), so a login wall's sign-in page is not
                 // mistaken for an admin endpoint.
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, testUrl,
                         () -> httpClient.getWithStatusNoAuth(testUrl),
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && isApiResponse(r)
@@ -235,19 +235,19 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                                     "Consider placing admin interfaces on a separate network or VPN.")
                             : new Finding(
                                     UUID.randomUUID().toString(),
-                                    "Administrative Endpoint Accessible" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    "Administrative Endpoint Accessible" + probe.suffix(),
                                     String.format("The administrative endpoint '%s' rejected a request without " +
-                                            "credentials but returned HTTP %d with the scan's configured " +
-                                            "credentials. If the scanning identity is not meant to have " +
-                                            "administrative rights, this is a function-level authorization flaw.",
-                                            adminPath, response.getStatusCode()),
+                                            "credentials but returned HTTP %d to one sent %s. If the scanning " +
+                                            "identity is not meant to have administrative rights, this is a " +
+                                            "function-level authorization flaw.",
+                                            adminPath, response.getStatusCode(), probe.sentWith()),
                                     Severity.MEDIUM,
                                     getId(),
                                     "GET " + adminPath,
                                     "Confirm the scanning identity's role. Administrative endpoints must check the " +
                                     "caller's privilege level, not only that the caller is authenticated.");
                     finding.setRequestDetails("GET " + testUrl +
-                            (probe.anonymous() ? " (no credentials)" : " (with the configured credentials)"));
+                            (probe.anonymous() ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; body length: " + response.getBody().length());
                     findings.add(finding);
@@ -293,7 +293,7 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                 }
                 // The state-changing request is sent without credentials first, since the
                 // finding claims no authorization was needed for it.
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, fullUrl,
                         () -> httpClient.sendWithStatusNoAuth(method, fullUrl, "application/json", "{}"),
                         () -> switch (method) {
                             case "PUT"    -> httpClient.putWithStatus(fullUrl, Map.of(), "application/json", "{}");
@@ -323,18 +323,18 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                                     "require appropriate authorization even when the GET counterpart is public.")
                             : new Finding(
                                     UUID.randomUUID().toString(),
-                                    "HTTP Method Escalation - " + method + " Allowed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    "HTTP Method Escalation - " + method + " Allowed" + probe.suffix(),
                                     String.format("The endpoint rejected a %s request without credentials but " +
-                                            "accepted it with the scan's configured credentials. If the scanning " +
-                                            "identity is only meant to read this resource, it can also modify or " +
-                                            "delete it.", method),
+                                            "accepted it when sent %s. If the scanning identity is only meant to " +
+                                            "read this resource, it can also modify or delete it.",
+                                            method, probe.sentWith()),
                                     Severity.MEDIUM,
                                     getId(),
                                     endpoint.getMethod() + " " + endpoint.getPath(),
                                     "Check that state-changing methods (PUT, DELETE, PATCH) require a privilege " +
                                     "level of their own, not only the one that allows GET.");
                     finding.setRequestDetails(method + " " + fullUrl +
-                            (probe.anonymous() ? " (no credentials)" : " (with the configured credentials)"));
+                            (probe.anonymous() ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     finding.setResponseDetails("HTTP " + testResponse.getStatusCode());
                     findings.add(finding);
                 }

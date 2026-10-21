@@ -385,6 +385,10 @@ class GraphQLSecurityTestCaseTest {
 
         // The target answers the same without credentials as with them.
         OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+        // The comparison request is anonymous too (it must differ from the baseline only by the cookie).
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && url.endsWith("/graphiql")),
+                argThat(h -> h != null && h.containsKey("Cookie"))))
+                .thenReturn(new HttpResponse(200, "<html><title>GraphiQL</title></html>", Map.of()));
 
         List<Finding> findings = testCase.testGraphiQLExposure(endpoint, httpClient);
 

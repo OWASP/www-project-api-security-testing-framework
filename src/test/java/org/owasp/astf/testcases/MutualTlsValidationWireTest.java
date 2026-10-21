@@ -75,6 +75,31 @@ class MutualTlsValidationWireTest {
         if (server != null) {
             server.shutdown();
         }
+        System.clearProperty("javax.net.ssl.trustStore");
+        System.clearProperty("javax.net.ssl.trustStorePassword");
+        System.clearProperty("javax.net.ssl.trustStoreType");
+    }
+
+    /**
+     * Makes the JVM's default trust store contain the test server's certificate. The credentialed
+     * comparison validates the server certificate (it sends a token), so tests that exercise it
+     * need a server the JVM trusts, as a real deployment would have.
+     */
+    private static void trustTestServer() throws Exception {
+        KeyStore serverStore = KeyStore.getInstance("PKCS12");
+        try (FileInputStream in = new FileInputStream(serverP12.toFile())) {
+            serverStore.load(in, PASSWORD.toCharArray());
+        }
+        KeyStore trust = KeyStore.getInstance("PKCS12");
+        trust.load(null, null);
+        trust.setCertificateEntry("test-server", serverStore.getCertificate("test"));
+        Path trustFile = dir.resolve("truststore-" + System.nanoTime() + ".p12");
+        try (java.io.FileOutputStream out = new java.io.FileOutputStream(trustFile.toFile())) {
+            trust.store(out, PASSWORD.toCharArray());
+        }
+        System.setProperty("javax.net.ssl.trustStore", trustFile.toString());
+        System.setProperty("javax.net.ssl.trustStorePassword", PASSWORD);
+        System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
     }
 
     private void startServer(Function<RecordedRequest, Integer> status) throws Exception {
@@ -157,6 +182,7 @@ class MutualTlsValidationWireTest {
     @DisplayName("Certificate alone rejected but certificate plus token accepted: the comparison still runs")
     void certificateOnlyRejectedButCertificateWithTokenAccepted() throws Exception {
         // Server needs the token and does not check the client certificate at all.
+        trustTestServer();
         startServer(r -> hasToken(r) ? 200 : 401);
 
         List<Finding> findings = run(client(true));
@@ -184,6 +210,7 @@ class MutualTlsValidationWireTest {
     @Test
     @DisplayName("Certificate plus token: no finding when the server rejects the untrusted certificate")
     void certificateWithTokenUntrustedRejected() throws Exception {
+        trustTestServer();
         startServer(r -> !hasToken(r) ? 401 : UNTRUSTED_CN.equals(clientCn(r)) ? 403 : 200);
 
         List<Finding> findings = run(client(true));
@@ -194,6 +221,21 @@ class MutualTlsValidationWireTest {
         assertTrue(hasToken(received.get(2)));
         assertEquals(UNTRUSTED_CN, clientCn(received.get(2)));
         assertTrue(findings.isEmpty(), "untrusted certificate was rejected; nothing to report");
+    }
+
+    @Test
+    @DisplayName("Server certificate the JVM does not trust: no token is sent, and the comparison not being made is reported")
+    void untrustedServerCertificateNeverReceivesCredentials() throws Exception {
+        startServer(r -> hasToken(r) ? 200 : 401);   // the JVM trust store does not contain this server
+
+        List<Finding> findings = run(client(true));
+
+        assertTrue(received.stream().noneMatch(MutualTlsValidationWireTest::hasToken),
+                "no request carrying the token may reach a server whose certificate does not validate");
+        assertTrue(received.stream().noneMatch(r -> r.getHeader("X-API-Key") != null));
+        assertEquals(1, findings.size(), findings.toString());
+        assertEquals(Severity.INFO, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getTitle().contains("Not Made"), findings.get(0).getTitle());
     }
 
     @Test

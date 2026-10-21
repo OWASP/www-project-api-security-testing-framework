@@ -134,7 +134,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
             String shadowUrl = cleanBase + shadowPath;
             try {
                 // Sent without credentials first, since the finding says "publicly accessible".
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, shadowUrl,
                         () -> httpClient.getWithStatusNoAuth(shadowUrl),
                         () -> httpClient.getWithStatus(shadowUrl, Map.of()),
                         r -> r.isSuccess() && isApiResponse(r));
@@ -144,13 +144,14 @@ public class ImproperInventoryManagementTestCase implements TestCase {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             anonymous ? "Shadow/Non-Production API Endpoint Accessible"
-                                    : "Shadow/Non-Production API Endpoint Accessible" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    : "Shadow/Non-Production API Endpoint Accessible" + probe.suffix(),
                             anonymous
                                     ? String.format("A non-production API endpoint '%s' is publicly accessible. " +
                                             "Shadow endpoints often bypass production security controls.", shadowPath)
                                     : String.format("A non-production API endpoint '%s' rejected a request without " +
-                                            "credentials but answered one with the scan's configured credentials. " +
-                                            "Shadow endpoints often bypass production security controls.", shadowPath),
+                                            "credentials but answered one sent %s. " +
+                                            "Shadow endpoints often bypass production security controls.",
+                                            shadowPath, probe.sentWith()),
                             anonymous ? Severity.HIGH : Severity.MEDIUM,
                             getId(),
                             endpoint.getMethod() + " " + endpoint.getPath(),
@@ -158,7 +159,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
                             "Ensure all API environments enforce equivalent security controls."
                     );
                     finding.setRequestDetails("GET " + shadowUrl +
-                            (anonymous ? " (no credentials)" : " (with the configured credentials)"));
+                            (anonymous ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     findings.add(finding);
                 }
             } catch (Exception e) {
@@ -196,7 +197,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
         for (String docPath : EXPOSED_DOC_ENDPOINTS) {
             String testUrl = cleanBase + docPath;
             try {
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, testUrl,
                         () -> httpClient.getWithStatusNoAuth(testUrl),
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && !r.getBody().isEmpty() && !r.getBody().equals(anonymousFallbackBody));
@@ -223,13 +224,13 @@ public class ImproperInventoryManagementTestCase implements TestCase {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             anonymous ? "API Documentation Publicly Exposed"
-                                    : "API Documentation Exposed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    : "API Documentation Exposed" + probe.suffix(),
                             String.format("API documentation %s at '%s'. " +
                                     "Exposed API documentation reveals all endpoints, parameters, " +
                                     "data models, and authentication methods to potential attackers%s.",
                                     anonymous ? "is publicly accessible"
-                                            : "rejected a request without credentials but was served with the " +
-                                              "scan's configured credentials",
+                                            : "rejected a request without credentials but was served to one sent " +
+                                              probe.sentWith(),
                                     docPath,
                                     isApiSpec ? " (confirmed API specification detected)" : ""),
                             anonymous ? Severity.LOW : Severity.INFO,
@@ -240,7 +241,7 @@ public class ImproperInventoryManagementTestCase implements TestCase {
                             "At minimum, ensure documentation does not include production credentials or examples."
                     );
                     finding.setRequestDetails("GET " + testUrl +
-                            (anonymous ? " (no credentials)" : " (with the configured credentials)"));
+                            (anonymous ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; API spec detected: " + isApiSpec);
                     findings.add(finding);

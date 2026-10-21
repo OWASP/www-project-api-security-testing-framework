@@ -564,7 +564,9 @@ public class ScanConfig {
      * <p>
      * An entry is either {@code host} (any port on that host) or {@code host:port}. Requests to
      * any other host are still sent, but without the Authorization header, the API-key header,
-     * the configured custom headers or cookies.
+     * cookies, Proxy-Authorization (except on a plain-http request through an HTTP proxy) and every
+     * configured custom header except the protocol headers listed in {@code HttpClient}. A hop from
+     * https to plain http never carries credentials, even to a listed host.
      *
      * @return the scope allowlist, never null
      */

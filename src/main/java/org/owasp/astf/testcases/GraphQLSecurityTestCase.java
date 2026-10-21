@@ -758,7 +758,7 @@ public class GraphQLSecurityTestCase implements TestCase {
             try {
                 String url = baseUrl + path;
                 // Sent without credentials first, since the finding says "publicly accessible".
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, url,
                         () -> httpClient.getWithStatusNoAuth(url),
                         () -> httpClient.getWithStatus(url, Map.of()),
                         r -> r.isSuccess() && looksLikeGraphQLIde(r.getBody()));
@@ -769,30 +769,36 @@ public class GraphQLSecurityTestCase implements TestCase {
                     Finding f = new Finding(
                             UUID.randomUUID().toString(),
                             anonymous ? "GraphQL IDE Exposed in Production"
-                                    : "GraphQL IDE Exposed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    : "GraphQL IDE Exposed" + probe.suffix(),
                             anonymous
                                     ? String.format("A GraphQL IDE/explorer interface is publicly accessible at '%s'. " +
                                             "These developer tools expose the full schema and a live query console " +
                                             "to anyone who finds the path, and should never be reachable outside " +
                                             "development environments.", path)
                                     : String.format("A GraphQL IDE/explorer interface at '%s' rejected a request " +
-                                            "without credentials but was served with the scan's configured " +
-                                            "credentials. It gives any holder of such credentials a live query " +
-                                            "console and should not be deployed outside development environments.", path),
+                                            "without credentials but was served to one sent %s. It gives anyone " +
+                                            "who can send such a request a live query console and should not be " +
+                                            "deployed outside development environments.", path, probe.sentWith()),
                             anonymous ? Severity.MEDIUM : Severity.LOW,
                             getId(),
                             "GET " + path,
                             "Disable the GraphQL IDE/playground in production builds, or restrict it to " +
                             "internal networks / behind real authentication."
                     );
-                    f.setEvidence("GET " + url + (anonymous ? " without credentials" : " with the configured credentials") +
+                    f.setEvidence("GET " + url + (anonymous ? " without credentials" : " " + probe.sentWith()) +
                             " returned HTTP " + response.getStatusCode() + " with IDE markup");
                     findings.add(f);
                     continue;
                 }
 
                 if (response != null && !response.isSuccess()) {
-                    HttpResponse withCookie = httpClient.getWithStatus(url, DEBUG_COOKIE_HEADERS);
+                    // Compare like with like: when the response being compared against came from the
+                    // anonymous request, the cookie request must differ from it only by that cookie, so
+                    // it is sent without the scan's credentials and without cookies the jar holds (a jar
+                    // cookie would replace the guessed Cookie header).
+                    HttpResponse withCookie = probe.anonymous()
+                            ? httpClient.getWithStatusNoAuth(url, DEBUG_COOKIE_HEADERS)
+                            : httpClient.getWithStatus(url, DEBUG_COOKIE_HEADERS);
                     if (withCookie != null && withCookie.isSuccess() && looksLikeGraphQLIde(withCookie.getBody())) {
                         Finding f = new Finding(
                                 UUID.randomUUID().toString(),

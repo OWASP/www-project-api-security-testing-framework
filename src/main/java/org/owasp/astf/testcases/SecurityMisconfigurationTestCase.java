@@ -221,7 +221,7 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                 // Each response is compared with an unknown-path baseline fetched the same way
                 // (anonymous or with credentials), so a login wall that answers every anonymous
                 // request with the same sign-in page is not read as 30 exposed endpoints.
-                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient,
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, testUrl,
                         () -> httpClient.getWithStatusNoAuth(testUrl),
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && !r.getBody().isEmpty()
@@ -240,13 +240,13 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
                             anonymous ? "Debug/Diagnostic Endpoint Exposed"
-                                    : "Debug/Diagnostic Endpoint Exposed" + AnonymousFirstProbe.CREDENTIALED_SUFFIX,
+                                    : "Debug/Diagnostic Endpoint Exposed" + probe.suffix(),
                             String.format("The debug or diagnostic endpoint '%s' %s " +
                                     "and returned a non-empty response.%s",
                                     debugPath,
                                     anonymous ? "is publicly accessible"
-                                            : "rejected a request without credentials but answered one with the " +
-                                              "scan's configured credentials",
+                                            : "rejected a request without credentials but answered one sent " +
+                                              probe.sentWith(),
                                     conventionallyPublic
                                             ? " This path is conventionally public (e.g. container " +
                                               "orchestration health checks) — verify it doesn't leak " +
@@ -264,7 +264,7 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                                       "restrict access to internal networks or VPN only."
                     );
                     finding.setRequestDetails("GET " + testUrl +
-                            (anonymous ? " (no credentials)" : " (with the configured credentials)"));
+                            (anonymous ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; body length: " + response.getBody().length());
                     findings.add(finding);
