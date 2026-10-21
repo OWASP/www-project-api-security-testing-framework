@@ -226,9 +226,23 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         true, Mode.ANONYMOUS);
                 findings.addAll(anonymous);
                 boolean anonymousBypass = anonymous.stream().anyMatch(f -> f.getTitle().contains("Bypass"));
+                // On a path only one of the 2.0.2 and the word classifications calls login-like,
+                // 2.0.2 may have sent these probes as an ordinary credentialed request. With no
+                // configured credentials that request can still differ from the anonymous one (a
+                // cookie the target set during the scan), so it is sent as 2.0.2 sent it and
+                // reported with 2.0.2's title.
+                Mode retry = null;
                 if (!anonymousBypass && httpClient.hasConfiguredCredentials()) {
+                    retry = Mode.CREDENTIALED_AFTER_ANONYMOUS;
+                } else if (!anonymousBypass && PathKeywordMatcher.isSqlAuthLikeAmbiguous(endpoint.getPath())) {
+                    retry = Mode.CREDENTIALED;
+                }
+                if (retry != null) {
+                    boolean retryAuthLike = retry == Mode.CREDENTIALED
+                            ? PathKeywordMatcher.legacyIsSqlAuthLikePath(endpoint.getPath())
+                            : true;
                     for (Finding f : testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
-                            true, Mode.CREDENTIALED_AFTER_ANONYMOUS)) {
+                            retryAuthLike, retry)) {
                         if (findings.stream().noneMatch(existing -> existing.getTitle().equals(f.getTitle()))) {
                             findings.add(f);
                         }
@@ -363,9 +377,10 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private boolean isAuthLikeEndpoint(EndpointInfo endpoint) {
-        // Same classification as BrokenAuthenticationTestCase, so /api/authenticate or
-        // /api/userlogin get the anonymous-first bypass probes like /api/login does.
-        return PathKeywordMatcher.isAuthPath(endpoint.getPath());
+        // The word classification BrokenAuthenticationTestCase uses (so /api/authenticate or
+        // /api/userlogin get the anonymous-first bypass probes like /api/login does), or 2.0.2's
+        // substring list, so a path 2.0.2 treated as login-like still is.
+        return PathKeywordMatcher.isSqlAuthLike(endpoint.getPath());
     }
 
     private List<Finding> testSqlInjection(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,

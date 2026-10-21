@@ -120,8 +120,13 @@ public class BrokenAuthenticationTestCase implements TestCase {
         // Always check for credential leakage in URLs (applies to all endpoint types)
         findings.addAll(checkTokenInUrl(endpoint));
 
-        boolean isAuth  = isAuthEndpoint(endpoint);
-        boolean is2FA   = is2FAEndpoint(endpoint);
+        // Whole-word classification keeps /api/tokens or /api/authors from being taken for a
+        // login endpoint, but 2.0.2 classified by substring. Where the two disagree the path
+        // gets both the login/2FA checks and the generic checks, so no path gets fewer checks
+        // than it did in 2.0.2.
+        PathKeywordMatcher.Classification kind = PathKeywordMatcher.classify(endpoint.getPath());
+        boolean isAuth = kind.runAuthChecks();
+        boolean is2FA  = kind.runTwoFactorChecks();
 
         // Session-cookie checks apply to auth and 2FA endpoints (they set cookies on success)
         if (isAuth || is2FA) {
@@ -135,23 +140,14 @@ public class BrokenAuthenticationTestCase implements TestCase {
             findings.addAll(testTwoFactorBypass(endpoint, httpClient));
         } else if (is2FA) {
             findings.addAll(testTwoFactorBypass(endpoint, httpClient));
-        } else {
+        }
+        if (kind.runGenericChecks()) {
             findings.addAll(testMissingAuthentication(endpoint, httpClient));
             findings.addAll(testJwtNoneAlgorithm(endpoint, httpClient));
             findings.addAll(testJwtAnalysis(endpoint, httpClient));
         }
 
         return findings;
-    }
-
-    // Whole-segment matching: /api/tokens or /api/authors must not be taken for a login
-    // endpoint, or the missing-auth and JWT checks below would never run on them.
-    private boolean isAuthEndpoint(EndpointInfo endpoint) {
-        return PathKeywordMatcher.isAuthPath(endpoint.getPath());
-    }
-
-    private boolean is2FAEndpoint(EndpointInfo endpoint) {
-        return PathKeywordMatcher.isTwoFactorPath(endpoint.getPath());
     }
 
     /**

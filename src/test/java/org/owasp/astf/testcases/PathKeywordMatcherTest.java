@@ -64,6 +64,92 @@ class PathKeywordMatcherTest {
         assertFalse(PathKeywordMatcher.isTwoFactorPath(path), path);
     }
 
+    @ParameterizedTest(name = "{0} is an auth path to the word matcher")
+    @ValueSource(strings = {
+            // 2.0.2 matched these by substring; acronym runs, glued words and "authn"/"authorize"
+            // must not lose them.
+            "/api/v1/authn", "/api/authtoken", "/api/reauth", "/api/v1/authorize", "/api/authorization",
+            "/api/APIToken", "/api/gettoken", "/api/refreshtoken", "/api/idtoken", "/api/authorize",
+            "/api/oauth2token", "/api/AuthToken", "/api/IDToken"
+    })
+    void reviewerAuthPaths(String path) {
+        assertTrue(PathKeywordMatcher.isAuthPath(path), path);
+    }
+
+    @ParameterizedTest(name = "{0} is a 2FA path to the word matcher")
+    @ValueSource(strings = {
+            "/api/OTPVerify", "/api/MFAChallenge", "/api/TOTPSetup", "/api/sendotp", "/api/verifyotp",
+            "/api/2faVerify", "/api/mfa2"
+    })
+    void reviewerTwoFactorPaths(String path) {
+        assertTrue(PathKeywordMatcher.isTwoFactorPath(path), path);
+    }
+
+    @ParameterizedTest(name = "{0} gets the login/2FA checks")
+    @ValueSource(strings = {
+            "/api/v1/authn", "/api/authtoken", "/api/reauth", "/api/v1/authorize", "/api/authorization",
+            "/api/OTPVerify", "/api/MFAChallenge", "/api/TOTPSetup", "/api/APIToken", "/api/gettoken",
+            "/api/refreshtoken", "/api/idtoken", "/api/sendotp", "/api/verifyotp", "/api/authorize"
+    })
+    void reviewerPathsGetLoginOr2faChecks(String path) {
+        PathKeywordMatcher.Classification c = PathKeywordMatcher.classify(path);
+        assertTrue(c.runAuthChecks() || c.runTwoFactorChecks(), path);
+    }
+
+    @ParameterizedTest(name = "{0}: generic checks and the 2.0.2 login/2FA checks both run")
+    @ValueSource(strings = {"/api/tokens", "/api/authors", "/api/authorities", "/api/authorization-rules"})
+    void substringOnlyAuthPathsGetBoth(String path) {
+        PathKeywordMatcher.Classification c = PathKeywordMatcher.classify(path);
+        assertTrue(c.ambiguous(), path);
+        assertTrue(c.runGenericChecks(), path + " must keep the missing-auth/JWT checks");
+        assertTrue(c.runAuthChecks(), path + " got the login checks in 2.0.2 and must keep them");
+    }
+
+    @ParameterizedTest(name = "{0}: generic checks and the 2.0.2 2FA checks both run")
+    @ValueSource(strings = {"/api/discount-codes", "/api/otpauth-free-paths", "/api/barcodes"})
+    void substringOnly2faPathsGetBoth(String path) {
+        PathKeywordMatcher.Classification c = PathKeywordMatcher.classify(path);
+        assertTrue(c.ambiguous(), path);
+        assertTrue(c.runGenericChecks(), path);
+        assertTrue(c.runTwoFactorChecks(), path + " got the 2FA checks in 2.0.2 and must keep them");
+    }
+
+    @ParameterizedTest(name = "{0}: new-only auth path also keeps the 2.0.2 generic checks")
+    @ValueSource(strings = {"/api/logon", "/api/jwt", "/sso/saml", "/users/signon"})
+    void newOnlyAuthPathsGetBoth(String path) {
+        PathKeywordMatcher.Classification c = PathKeywordMatcher.classify(path);
+        assertTrue(c.ambiguous(), path);
+        assertTrue(c.runAuthChecks(), path);
+        assertTrue(c.runGenericChecks(), path + " got the generic checks in 2.0.2 and must keep them");
+    }
+
+    @Test
+    @DisplayName("Paths both classifiers agree on are not ambiguous")
+    void agreementIsNotAmbiguous() {
+        PathKeywordMatcher.Classification login = PathKeywordMatcher.classify("/api/v1/auth/login");
+        assertFalse(login.ambiguous());
+        assertTrue(login.runAuthChecks());
+        assertFalse(login.runGenericChecks());
+
+        PathKeywordMatcher.Classification users = PathKeywordMatcher.classify("/api/users");
+        assertFalse(users.ambiguous());
+        assertFalse(users.runAuthChecks());
+        assertFalse(users.runTwoFactorChecks());
+        assertTrue(users.runGenericChecks());
+    }
+
+    @Test
+    @DisplayName("The 2.0.2 substring lists are reproduced exactly")
+    void legacySubstringClassification() {
+        assertTrue(PathKeywordMatcher.legacyIsAuthPath("/api/AUTHORS"));
+        assertTrue(PathKeywordMatcher.legacyIsAuthPath("/api/tokens"));
+        assertFalse(PathKeywordMatcher.legacyIsAuthPath("/api/logon"));
+        assertTrue(PathKeywordMatcher.legacyIsTwoFactorPath("/api/discount-codes"));
+        assertTrue(PathKeywordMatcher.legacyIsSqlAuthLikePath("/api/authors"));
+        assertFalse(PathKeywordMatcher.legacyIsSqlAuthLikePath("/api/token"),
+                "the 2.0.2 NoSQL list had no token keyword");
+    }
+
     @Test
     @DisplayName("Matching is case-insensitive and keyword lists are honoured")
     void customKeywords() {
