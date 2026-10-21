@@ -48,6 +48,7 @@ followRedirects: true
 # and Connection. A warning is logged the first time this happens for each host:port.
 # A redirect from http://host to https://host on the target's own host (port 80 to
 # 443) counts as the target and keeps credentials; any other port change does not.
+# A redirect from https to plain http never carries credentials, even to a listed host.
 # List extra hosts that may receive them here: "host" allows any port on that host,
 # "host:port" only that port. An OpenAPI spec served from another host is fetched
 # without credentials unless that host is listed here.
