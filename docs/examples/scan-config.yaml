@@ -4,7 +4,8 @@
 # Every key is optional except targetUrl (or pass -u on the command line).
 # Command-line flags override what is written here.
 #
-# Credentials are NOT read from this file. Pass them on the command line,
+# Bearer tokens, API keys and client certificates are NOT read from this file
+# (HTTP Basic and proxy credentials can be, below). Pass them on the command line,
 # ideally from environment variables so they stay out of shell history:
 #   --token "$API_TOKEN"            Bearer token
 #   --secondary-token "$TOKEN_B"    second identity, enables cross-user BOLA checks

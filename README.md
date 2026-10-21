@@ -3,7 +3,6 @@
 [![OWASP Incubator](https://img.shields.io/badge/owasp-incubator-blue.svg)](https://owasp.org/www-project-api-security-testing-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
-[![CI](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/OWASP/www-project-api-security-testing-framework/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/OWASP/www-project-api-security-testing-framework?include_prereleases&label=latest)](https://github.com/OWASP/www-project-api-security-testing-framework/releases/latest)
 
 A comprehensive automated testing framework for detecting API security vulnerabilities based on the **OWASP API Security Top 10 2023**.
@@ -25,7 +24,7 @@ Download the latest pre-built JAR directly from the [GitHub Releases page](https
 
 ```bash
 # Download a specific release (pinned, so the filename always matches)
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
+curl -fsSLO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
 ```
 
 Or build from source. Maven itself must run on JDK 21 or newer. `java -version` and `mvn -v` can report different JDKs, and it is the one shown by `mvn -v` that compiles the code:
@@ -104,7 +103,7 @@ outputFile: "results.html"
 verbose: true
 ```
 
-Credentials are **not** read from the config file. Pass them on the command line, preferably from environment variables so they stay out of shell history:
+Bearer tokens, API keys and client certificates are **not** read from the config file. Pass them on the command line, preferably from environment variables so they stay out of shell history (HTTP Basic and proxy credentials can also go in the file under `basicAuth` and `proxy`, but flags are preferred):
 
 ```bash
 java -jar astf-v2.0.2.jar -c scan.yaml --token "$API_TOKEN"
@@ -303,7 +302,7 @@ jobs:
 
       - name: Download ASTF (pinned release)
         run: |
-          curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
+          curl -fsSLO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
 
       - name: Run ASTF scan
         id: scan
@@ -336,11 +335,16 @@ Exit code `1` means findings of **any** severity were found. To fail only on HIG
 ### Gate on HIGH/CRITICAL only (not every finding)
 
 ```bash
-java -jar astf-v2.0.2.jar \
-  -u $API_URL --token $TOKEN -f JSON -o results.json
-
+set +e
+java -jar astf-v2.0.2.jar -u "$API_URL" --token "$TOKEN" -f JSON -o results.json
+rc=$?
+set -e
+if [ "$rc" -ge 2 ] || [ ! -s results.json ]; then
+  echo "ASTF scan error (exit $rc)"
+  exit 1
+fi
 HIGH_CRIT=$(jq '[.findings[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' results.json)
-if [ "$HIGH_CRIT" -gt "0" ]; then
+if [ "$HIGH_CRIT" -gt 0 ]; then
   echo "Build failed: $HIGH_CRIT HIGH/CRITICAL findings detected"
   exit 1
 fi

@@ -57,7 +57,7 @@ ASTF has been validated against real, intentionally-vulnerable API targets — [
 
 ```bash
 # Download the latest release
-curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
+curl -fsSLO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
 
 # Run against your API
 java -jar astf-v2.0.2.jar -u https://api.example.com --token "YOUR_TOKEN" -f HTML -o report.html
@@ -82,7 +82,7 @@ Add ASTF to your GitHub Actions pipeline to scan on every pull request:
 
 ```yaml
 - name: Download ASTF
-  run: curl -LO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
+  run: curl -fsSLO https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.2/astf-v2.0.2.jar
 
 - name: Run security scan
   run: java -jar astf-v2.0.2.jar -u ${{ secrets.API_URL }} --token ${{ secrets.API_TOKEN }} -f SARIF -o results.sarif
