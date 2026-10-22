@@ -91,7 +91,8 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         }
 
         String baseUrl = endpoint.getFullUrl();
-        Set<String> baselineIndicators = fetchBaselineIndicators(endpoint, httpClient);
+        String baselineBody = fetchBaselineBody(endpoint, httpClient);
+        Set<String> baselineIndicators = indicatorsIn(baselineBody);
 
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
@@ -100,15 +101,36 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                 try {
                     HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
 
-                    if (response != null && containsNewSsrfIndicator(response.getBody(), baselineIndicators)) {
+                    String indicator = response == null ? null
+                            : newSsrfIndicator(response.getBody(), payload, baselineBody, baselineIndicators);
+                    if (indicator != null) {
+                        // Content can change during a scan (another check posts data that the endpoint
+                        // then lists). If the endpoint's normal response now contains the same
+                        // indicator, it is not attributable to the payload: refresh the baseline and
+                        // keep testing.
+                        String freshBaseline = fetchBaselineBody(endpoint, httpClient);
+                        if (freshBaseline.toLowerCase().contains(indicator.toLowerCase())) {
+                            logger.debug("SSRF indicator '{}' on {} also appears in a fresh baseline, not reporting",
+                                    indicator, endpoint);
+                            baselineBody = freshBaseline;
+                            baselineIndicators = indicatorsIn(freshBaseline);
+                            continue;
+                        }
+                    }
+                    if (indicator != null) {
+                        // A non-2xx body with new metadata content is usually a validation error that
+                        // mentions an indicator word, but a proxy that relays the upstream status can
+                        // also return real metadata with a 4xx/5xx. Report it as possible, not drop it.
+                        boolean confirmed = response.isSuccess();
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
-                                "Server Side Request Forgery (SSRF) via Query Parameter",
+                                confirmed ? "Server Side Request Forgery (SSRF) via Query Parameter"
+                                        : "Possible Server Side Request Forgery (SSRF) via Query Parameter (non-2xx response)",
                                 String.format("The API parameter '%s' appears to be vulnerable to SSRF. " +
                                         "The server fetched the URL '%s' and returned content that matches " +
                                         "known internal/metadata service response patterns.",
                                         param, payload),
-                                Severity.CRITICAL,
+                                confirmed ? Severity.CRITICAL : Severity.MEDIUM,
                                 getId(),
                                 endpoint.getMethod() + " " + endpoint.getPath(),
                                 "Validate and sanitize all user-supplied URLs. Use an allowlist of permitted " +
@@ -116,7 +138,8 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                                 "endpoints. Disable unnecessary URL-fetching functionality."
                         );
                         finding.setRequestDetails("GET " + testUrl);
-                        finding.setEvidence("Response contained SSRF indicator from payload: " + payload);
+                        finding.setEvidence("Response contained '" + indicator + "', which is not part of the payload " +
+                                "and not in the endpoint's normal response (checked again before reporting). Payload: " + payload);
                         findings.add(finding);
                         return findings; // One confirmed SSRF is enough
                     }
@@ -137,7 +160,8 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
             return findings;
         }
 
-        Set<String> baselineIndicators = fetchBaselineIndicators(endpoint, httpClient);
+        String baselineBody = fetchBaselineBody(endpoint, httpClient);
+        Set<String> baselineIndicators = indicatorsIn(baselineBody);
 
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
@@ -150,22 +174,44 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                         default      -> null;
                     };
 
-                    if (response != null && containsNewSsrfIndicator(response.getBody(), baselineIndicators)) {
+                    String indicator = response == null ? null
+                            : newSsrfIndicator(response.getBody(), payload, baselineBody, baselineIndicators);
+                    if (indicator != null) {
+                        // Content can change during a scan (another check posts data that the endpoint
+                        // then lists). If the endpoint's normal response now contains the same
+                        // indicator, it is not attributable to the payload: refresh the baseline and
+                        // keep testing.
+                        String freshBaseline = fetchBaselineBody(endpoint, httpClient);
+                        if (freshBaseline.toLowerCase().contains(indicator.toLowerCase())) {
+                            logger.debug("SSRF indicator '{}' on {} also appears in a fresh baseline, not reporting",
+                                    indicator, endpoint);
+                            baselineBody = freshBaseline;
+                            baselineIndicators = indicatorsIn(freshBaseline);
+                            continue;
+                        }
+                    }
+                    if (indicator != null) {
+                        // A non-2xx body with new metadata content is usually a validation error that
+                        // mentions an indicator word, but a proxy that relays the upstream status can
+                        // also return real metadata with a 4xx/5xx. Report it as possible, not drop it.
+                        boolean confirmed = response.isSuccess();
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
-                                "Server Side Request Forgery (SSRF) via Request Body",
+                                confirmed ? "Server Side Request Forgery (SSRF) via Request Body"
+                                        : "Possible Server Side Request Forgery (SSRF) via Request Body (non-2xx response)",
                                 String.format("The API body parameter '%s' appears to be vulnerable to SSRF. " +
                                         "The server fetched the URL '%s' and returned content that matches " +
                                         "known internal/metadata service response patterns.",
                                         param, payload),
-                                Severity.CRITICAL,
+                                confirmed ? Severity.CRITICAL : Severity.MEDIUM,
                                 getId(),
                                 endpoint.getMethod() + " " + endpoint.getPath(),
                                 "Validate and sanitize all user-supplied URLs in request bodies. " +
                                 "Use a URL allowlist and block requests to internal network ranges."
                         );
                         finding.setRequestDetails(method + " " + endpoint.getFullUrl() + "\nBody: " + body);
-                        finding.setEvidence("Response contained SSRF indicator from payload: " + payload);
+                        finding.setEvidence("Response contained '" + indicator + "', which is not part of the payload " +
+                                "and not in the endpoint's normal response (checked again before reporting). Payload: " + payload);
                         findings.add(finding);
                         return findings;
                     }
@@ -179,39 +225,63 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
     }
 
     /**
-     * Fetches the endpoint's normal (un-injected) response and returns the set of SSRF
-     * indicators that already appear in it. Some indicators (notably the generic environment
-     * words "docker"/"kubernetes"/"k8s") can legitimately appear in an API's ordinary response —
-     * without this baseline, every probe against such an endpoint would be a false positive.
+     * Fetches the endpoint's normal (un-injected) response body. Some indicators (notably the
+     * generic environment words "docker"/"kubernetes"/"k8s") can legitimately appear in an API's
+     * ordinary response; without this baseline every probe against such an endpoint would be a
+     * false positive.
      */
-    private Set<String> fetchBaselineIndicators(EndpointInfo endpoint, HttpClient httpClient) {
+    private String fetchBaselineBody(EndpointInfo endpoint, HttpClient httpClient) {
         try {
             HttpResponse baseline = httpClient.getWithStatus(endpoint.getFullUrl(), Map.of());
-            if (baseline == null || baseline.getBody() == null) {
-                return Set.of();
-            }
-            String lower = baseline.getBody().toLowerCase();
-            return SSRF_INDICATORS.stream()
-                    .filter(indicator -> lower.contains(indicator.toLowerCase()))
-                    .collect(Collectors.toUnmodifiableSet());
+            return baseline == null || baseline.getBody() == null ? "" : baseline.getBody();
         } catch (Exception e) {
             logger.debug("Error fetching SSRF baseline for {}: {}", endpoint, e.getMessage());
-            return Set.of();
+            return "";
         }
     }
 
-    /**
-     * Returns true only when the response contains an SSRF indicator that was NOT already
-     * present in the endpoint's baseline (un-injected) response — i.e. the indicator's
-     * appearance is actually attributable to the injected payload, not just how this API
-     * normally talks.
-     */
-    private boolean containsNewSsrfIndicator(String body, Set<String> baselineIndicators) {
-        if (body == null || body.isEmpty()) return false;
+    private Set<String> indicatorsIn(String body) {
         String lower = body.toLowerCase();
         return SSRF_INDICATORS.stream()
+                .filter(indicator -> lower.contains(indicator.toLowerCase()))
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    /**
+     * Returns the first SSRF indicator in the response that is attributable to the
+     * injected payload actually being fetched. The payload itself can contain an indicator
+     * (e.g. "computeMetadata"), so an API that merely echoes its input would reproduce it; the
+     * payload text is therefore removed before matching. An indicator already present in the
+     * baseline response, or a body identical to the baseline, is not evidence either.
+     */
+    private String newSsrfIndicator(String body, String payload, String baselineBody,
+                                    Set<String> baselineIndicators) {
+        if (body == null || body.isEmpty()) return null;
+        if (body.equals(baselineBody)) return null;
+        String lower = stripPayloadEchoes(body, payload).toLowerCase();
+        return SSRF_INDICATORS.stream()
                 .filter(indicator -> !baselineIndicators.contains(indicator))
-                .anyMatch(indicator -> lower.contains(indicator.toLowerCase()));
+                .filter(indicator -> lower.contains(indicator.toLowerCase()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Removes the payload from the body in its raw, URL-encoded, JSON-escaped and scheme-less forms. */
+    private String stripPayloadEchoes(String body, String payload) {
+        String schemeLess = payload.replaceFirst("^[a-zA-Z]+://", "");
+        List<String> echoes = new ArrayList<>();
+        for (String form : List.of(payload, schemeLess)) {
+            echoes.add(form);
+            echoes.add(form.replace("/", "\\/"));
+            echoes.add(urlEncode(form));
+            echoes.add(java.net.URLEncoder.encode(form, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        String result = body;
+        // Longest first so a scheme-less form never leaves a partial remainder of a longer one
+        for (String echo : echoes.stream().sorted((x, y) -> y.length() - x.length()).toList()) {
+            result = result.replace(echo, "");
+        }
+        return result;
     }
 
     private String urlEncode(String value) {

@@ -14,6 +14,9 @@ import org.owasp.astf.core.result.Severity;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Set;
+import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -419,6 +422,80 @@ class SqlNoSqlInjectionTestCaseTest {
         assertTrue(findings.stream().anyMatch(f -> f.getRequestDetails().contains("Field: voucher")));
     }
 
+    // ── reproducibility and transient re-check errors (follow-up to #142) ───
+
+    @Test
+    @DisplayName("A one-off success that turns into 'already exists' is reported only as a MEDIUM possible " +
+            "bypass, never CRITICAL (VAmPI /users/v1/register)")
+    void testOneOffStateChangeIsNotCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"email\":\"alice@example.com\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        // Each distinct body creates its user the first time and fails with "already exists" after that.
+        Set<String> seen = new HashSet<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value") || !seen.add(body)) {
+                return new HttpResponse(200, "{ \"status\": \"fail\", \"message\": \"User already exists.\" }", Map.of());
+            }
+            return new HttpResponse(200, "{\"message\":\"Successfully registered. Login to receive an auth token.\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL),
+                "a one-off state change must never be reported as a CRITICAL bypass");
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Possible Bypass (not reproducible)")
+                && f.getSeverity() == Severity.MEDIUM), "it is still reported, at MEDIUM, so nothing is dropped");
+    }
+
+    @Test
+    @DisplayName("A bypass that succeeds again when the payload is re-sent is reported as CRITICAL")
+    void testReproducibleBypassIsCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv ->
+                ((String) inv.getArgument(3)).contains("\"coupon_code\":\"$ne\"")
+                        ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                        : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getTitle().contains("Authorization/Logic Bypass"));
+    }
+
+    @Test
+    @DisplayName("A transient error on the baseline re-check keeps the finding instead of dropping it")
+    void testTransientBaselineRecheckErrorKeepsFinding() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        AtomicInteger baselines = new AtomicInteger();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value")) {
+                if (baselines.incrementAndGet() == 2) {
+                    throw new IOException("Connection reset");   // the re-check fails once
+                }
+                return new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+            }
+            return body.contains("\"coupon_code\":\"$ne\"")
+                    ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                    : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size(), "a real bypass must not be dropped because one re-check request failed");
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+    }
+
     @Test
     @DisplayName("A NoSQL error disclosure on one field does not mask a bypass on a sibling field")
     void testNoSqlErrorOnOneFieldDoesNotMaskBypassOnAnother() throws IOException {
@@ -591,5 +668,57 @@ class SqlNoSqlInjectionTestCaseTest {
         List<Finding> findings = testCase.execute(endpoint, httpClient);
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Bypass")),
                 "errors: [] and error: null mean no error, so the success must not be discarded");
+    }
+
+    @Test
+    @DisplayName("When a fresh baseline no longer fails, the result is reported as INFO inconclusive, not dropped")
+    void testChangedBaselineIsReportedAsInconclusive() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/redeem", "POST", "application/json",
+                "{\"coupon_code\":\"WELCOME10\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+
+        AtomicInteger baselines = new AtomicInteger();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value")) {
+                return baselines.incrementAndGet() == 1
+                        ? new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of())
+                        : new HttpResponse(200, "{\"credit\":75}", Map.of());   // behaviour changed
+            }
+            return body.contains("\"coupon_code\":\"$ne\"")
+                    ? new HttpResponse(200, "{\"credit\":75}", Map.of())
+                    : new HttpResponse(400, "{\"message\":\"Code not found\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertEquals(Severity.INFO, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getTitle().contains("Inconclusive"));
+    }
+
+    @Test
+    @DisplayName("A baseline that answers with a server error cannot establish a bypass: INFO inconclusive, never CRITICAL")
+    void testServerErrorBaselineIsInconclusive() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"id\":\"1\"}", false);
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("astf-nosql-baseline-value")) {
+                return new HttpResponse(500, "<html>Internal Server Error</html>", Map.of());
+            }
+            return body.contains("$") || body.contains("return true")
+                    ? new HttpResponse(200, "{\"message\":\"ok\"}", Map.of())
+                    : new HttpResponse(400, "{\"message\":\"bad\"}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL || f.getSeverity() == Severity.MEDIUM
+                && f.getTitle().contains("NoSQL")), "a 5xx baseline must not produce a bypass finding");
+        assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.INFO
+                && f.getTitle().contains("server error")), "it is still reported, as INFO");
     }
 }

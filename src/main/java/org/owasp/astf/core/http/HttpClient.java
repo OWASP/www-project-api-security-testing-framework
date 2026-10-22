@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -74,7 +75,7 @@ public class HttpClient {
     private final OkHttpClient noAuthClient;
     private final ScanConfig config;
     private final Map<String, String> defaultHeaders;
-    private final Map<String, List<Cookie>> cookieStore = new HashMap<>();
+    private final Map<String, List<Cookie>> cookieStore = new ConcurrentHashMap<>();
 
     // Lazily-built client for HTTP/2 cleartext (h2c) prior-knowledge requests — see postH2c().
     private volatile OkHttpClient h2cClient;
@@ -728,6 +729,23 @@ public class HttpClient {
      */
     private void configureBasicAuth(OkHttpClient.Builder builder) {
         Authenticator authenticator = (route, response) -> {
+            // Never replace an Authorization header the caller set explicitly (e.g. forged-token probes).
+            if (response.request().header("Authorization") != null) {
+                return null;
+            }
+            // Retry at most once: give up if an earlier attempt in this chain already got a 401.
+            for (Response prior = response.priorResponse(); prior != null; prior = prior.priorResponse()) {
+                if (prior.code() == 401) {
+                    return null;
+                }
+            }
+            // Only send the credentials to the configured target host and port, never to a redirect target.
+            HttpUrl target = HttpUrl.parse(config.getTargetUrl());
+            HttpUrl requestUrl = response.request().url();
+            if (target == null || !target.host().equalsIgnoreCase(requestUrl.host())
+                    || target.port() != requestUrl.port()) {
+                return null;
+            }
             String credential = Credentials.basic(config.getBasicAuthUsername(), config.getBasicAuthPassword());
             return response.request().newBuilder()
                     .header("Authorization", credential)
@@ -745,18 +763,18 @@ public class HttpClient {
         public void saveFromResponse(HttpUrl url, List<Cookie> cookies) {
             String domain = url.host();
 
-            if (!cookieStore.containsKey(domain)) {
-                cookieStore.put(domain, new ArrayList<>());
-            }
+            List<Cookie> domainCookies = cookieStore.computeIfAbsent(domain, d -> new CopyOnWriteArrayList<>());
 
-            // Replace existing cookies with the same name
-            List<Cookie> domainCookies = cookieStore.get(domain);
-            for (Cookie cookie : cookies) {
-                // Remove existing cookie with same name if present
-                domainCookies.removeIf(existingCookie -> existingCookie.name().equals(cookie.name()));
+            // Replace existing cookies with the same name. Locked so the remove+add pair is atomic
+            // between writers; readers iterate the copy-on-write snapshot without locking.
+            synchronized (domainCookies) {
+                for (Cookie cookie : cookies) {
+                    // Remove existing cookie with same name if present
+                    domainCookies.removeIf(existingCookie -> existingCookie.name().equals(cookie.name()));
 
-                // Add the new cookie
-                domainCookies.add(cookie);
+                    // Add the new cookie
+                    domainCookies.add(cookie);
+                }
             }
 
             logger.debug("Cookies for {}: {}", domain, domainCookies.size());

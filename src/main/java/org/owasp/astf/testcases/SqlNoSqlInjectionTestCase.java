@@ -540,19 +540,60 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         // response look like a bypass (#142). Re-send it right before reporting,
                         // at most once per reported finding, and treat a baseline that no longer
                         // fails as inconclusive.
-                        if (baselineFailed && baselineStillFails(endpoint, httpClient, fields, fieldValues,
-                                field, baselineResponseByField)) {
+                        boolean stillFails = baselineFailed && baselineStillFails(endpoint, httpClient, fields,
+                                fieldValues, field, baselineResponseByField);
+                        if (baselineFailed && !stillFails) {
+                            // The target answers the invalid baseline differently now than earlier in
+                            // the scan, so this result cannot be attributed to the operator. Report it
+                            // as inconclusive instead of dropping it silently.
+                            findings.add(buildNoSqlFinding(endpoint, field, payload,
+                                    "Request succeeded (HTTP " + response.getStatusCode() + ") with a NoSQL " +
+                                    "operator in the '" + field + "' field, but a fresh ordinary invalid value on " +
+                                    "the same field no longer fails, so the target's behaviour changed during the " +
+                                    "scan (for example it degraded, or a session from an earlier request now " +
+                                    "applies). Re-test this field on its own to confirm or rule out a bypass",
+                                    Severity.INFO, "NoSQL Injection — Inconclusive (target behaviour changed during scan)"));
+                            continue nextField;
+                        }
+                        HttpResponse decidingBaseline = baselineResponseByField.get(field);
+                        if (stillFails && decidingBaseline != null && decidingBaseline.getStatusCode() >= 500) {
+                            // A server error is not a rejection of the invalid value: the target is
+                            // failing (seen on VAmPI under scan load), so the comparison proves nothing.
+                            findings.add(buildNoSqlFinding(endpoint, field, payload,
+                                    "Request succeeded (HTTP " + response.getStatusCode() + ") with a NoSQL " +
+                                    "operator in the '" + field + "' field, but the ordinary invalid value it is " +
+                                    "compared with got a server error (HTTP " + decidingBaseline.getStatusCode() +
+                                    ") rather than a rejection, so the result cannot show a bypass. Re-test this " +
+                                    "field when the target is healthy",
+                                    Severity.INFO, "NoSQL Injection — Inconclusive (baseline answered with a server error)"));
+                            continue nextField;
+                        }
+                        if (stillFails) {
                             boolean isCredentialField =
                                     CREDENTIAL_FIELD_NAMES.stream().anyMatch(field::equalsIgnoreCase);
                             String title = (isAuthLike && isCredentialField)
                                     ? "NoSQL Injection — Authentication Bypass"
                                     : "NoSQL Injection — Authorization/Logic Bypass";
-                            findings.add(buildNoSqlFinding(endpoint, field, payload,
-                                    "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
+                            String evidence = "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
                                     field + "' field was replaced with a NoSQL query operator, while an " +
                                     "ordinary invalid value on the same field failed (HTTP " +
-                                    (baseline != null ? baseline.getStatusCode() : "?") + ")", Severity.CRITICAL,
-                                    title));
+                                    (decidingBaseline != null ? decidingBaseline.getStatusCode() : "?") + ")";
+                            // A real operator bypass succeeds again when the same payload is re-sent. A
+                            // one-off success is often a state change instead: the first request creates
+                            // a record (a registration, say) and later ones fail with "already exists",
+                            // and the fresh baseline still fails because the record now exists. That
+                            // depends on request order, so it is reported as a possible bypass at MEDIUM,
+                            // not CRITICAL. Nothing is dropped.
+                            if (payloadSucceedsAgain(endpoint, httpClient, body)) {
+                                findings.add(buildNoSqlFinding(endpoint, field, payload, evidence,
+                                        Severity.CRITICAL, title));
+                            } else {
+                                findings.add(buildNoSqlFinding(endpoint, field, payload, evidence +
+                                        ". Re-sending the same payload did not succeed again, so this may be a " +
+                                        "one-off state change (for example a record created by the first request) " +
+                                        "and not an injection; verify manually",
+                                        Severity.MEDIUM, "NoSQL Injection — Possible Bypass (not reproducible)"));
+                            }
                             continue nextField;
                         }
                     }
@@ -683,8 +724,9 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     /**
      * Sends the invalid-value baseline for {@code field} again and reports whether it still looks
      * like a failure. The fresh response replaces the cached one, so later payloads on the same
-     * field compare against the target's current behaviour. A baseline that cannot be sent, or
-     * that no longer fails, makes the bypass inconclusive.
+     * field compare against the target's current behaviour. Only a fresh baseline that
+     * was received and no longer fails makes the bypass inconclusive; if the re-check cannot be
+     * obtained, the earlier decision stands.
      */
     private boolean baselineStillFails(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
                                        Map<String, JsonNode> fieldValues, String field,
@@ -694,13 +736,16 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             fresh = sendRequest(endpoint, httpClient,
                     buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
         } catch (Exception e) {
-            logger.debug("Could not re-send NoSQL baseline on {} field {}: {}", endpoint, field, e.getMessage());
-            return false;
+            // No new evidence: keep the decision from the cached baseline, so a transient error on
+            // this extra request never drops a real result.
+            logger.debug("Could not re-send NoSQL baseline on {} field {}, keeping the earlier result: {}",
+                    endpoint, field, e.getMessage());
+            return true;
+        }
+        if (fresh == null || fresh.getBody() == null) {
+            return true;
         }
         baselineResponseByField.put(field, fresh);
-        if (fresh == null || fresh.getBody() == null) {
-            return false;
-        }
         boolean stillFails = !fresh.isSuccess() || containsFailureMarker(fresh.getBody());
         if (!stillFails) {
             logger.debug("NoSQL bypass on {} field {} not reported: a fresh invalid-value baseline no longer " +
@@ -708,6 +753,21 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                     endpoint, field, fresh.getStatusCode());
         }
         return stillFails;
+    }
+
+    /**
+     * Whether re-sending the same payload request still gets a success with no failure signal.
+     * Called only when a bypass is about to be reported, so at most one extra request per finding.
+     */
+    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody) {
+        try {
+            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody);
+            String againBody = again != null ? again.getBody() : null;
+            return again != null && againBody != null && again.isSuccess() && !containsFailureMarker(againBody);
+        } catch (Exception e) {
+            logger.debug("Could not re-send NoSQL payload on {}: {}", endpoint, e.getMessage());
+            return false;
+        }
     }
 
     /** Concatenates the text of every field named like {@link #MESSAGE_FIELD_NAMES}, anywhere in

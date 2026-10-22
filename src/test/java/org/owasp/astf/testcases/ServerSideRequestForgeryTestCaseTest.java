@@ -9,6 +9,7 @@ import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
@@ -156,5 +157,117 @@ class ServerSideRequestForgeryTestCaseTest {
 
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+
+    @Test
+    @DisplayName("Should NOT flag a GET endpoint that echoes the injected URL (payload contains 'computeMetadata')")
+    void testNoFindingWhenGetEndpointEchoesPayload() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        // Reflect the (URL-encoded) query value back, as an echo API would.
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String value = url.substring(url.indexOf('=') + 1);
+                    String decoded = java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+                    return new HttpResponse(200, "{\"you_sent\":\"" + decoded + "\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "An API that only reflects the payload must not be reported as SSRF");
+    }
+
+    @Test
+    @DisplayName("Should NOT flag a POST endpoint that echoes the JSON body (incl. escaped slashes)")
+    void testNoFindingWhenPostEndpointEchoesPayload() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "POST");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> new HttpResponse(200,
+                        "{\"received\":" + ((String) inv.getArgument(3)).replace("/", "\\/") + "}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(), "A body echo must not be reported as SSRF");
+    }
+
+    @Test
+    @DisplayName("A non-2xx response with an indicator is never CRITICAL, only a MEDIUM possible SSRF (not dropped)")
+    void testNon2xxIndicatorIsOnlyPossibleSsrf() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(400, "{\"error\":\"bad instance-id\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL));
+        assertTrue(findings.stream().allMatch(f -> f.getSeverity() == Severity.MEDIUM
+                && f.getTitle().startsWith("Possible Server Side Request Forgery")));
+    }
+
+    @Test
+    @DisplayName("Metadata relayed with a 502 by a proxy is still reported (as possible SSRF), not dropped")
+    void testRelayedMetadataWithNon2xxIsReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(502, "ami-id\nami-launch-index\nhostname\ninstance-id\n", Map.of()));
+
+        assertFalse(testCase.execute(endpoint, httpClient).isEmpty());
+    }
+
+    @Test
+    @DisplayName("Should still flag genuine metadata content that is not part of the payload, even when the payload is echoed too")
+    void testStillDetectsRealMetadataAlongsideEcho() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String value = url.substring(url.indexOf('=') + 1);
+                    String decoded = java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+                    return new HttpResponse(200, "{\"url\":\"" + decoded + "\",\"body\":"
+                            + "{\"instance-id\":\"i-0abc123\",\"iam\":{\"AccessKeyId\":\"ASIA...\"}}}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+    }
+
+    @Test
+    @DisplayName("Content that changes during the scan (crAPI recent posts) is not reported; a later real hit still is")
+    void testContentChangedDuringScanIsNotSsrf() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/community/posts/recent", "GET");
+        java.util.concurrent.atomic.AtomicInteger baselineCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger payloadCalls = new java.util.concurrent.atomic.AtomicInteger();
+
+        // First baseline: no indicator. Later baselines: another check has posted text containing "docker".
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap())).thenAnswer(inv ->
+                baselineCalls.incrementAndGet() == 1
+                        ? new HttpResponse(200, "{\"posts\":[\"hello\"]}", Map.of())
+                        : new HttpResponse(200, "{\"posts\":[\"hello\",\"we run docker\"]}", Map.of()));
+        // First probe sees the new post; a later probe gets real metadata back.
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap())).thenAnswer(inv ->
+                payloadCalls.incrementAndGet() == 1
+                        ? new HttpResponse(200, "{\"posts\":[\"hello\",\"we run docker\"]}", Map.of())
+                        : new HttpResponse(200, "ami-id\ninstance-id\n", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size(), "the changed content is skipped, the later metadata hit is reported");
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getEvidence().contains("'ami-id'"), findings.get(0).getEvidence());
     }
 }

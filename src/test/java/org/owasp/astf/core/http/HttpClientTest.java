@@ -6,11 +6,21 @@ import okhttp3.mockwebserver.RecordedRequest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import okhttp3.Cookie;
+import okhttp3.CookieJar;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
 import org.junit.jupiter.api.Test;
 import org.owasp.astf.core.config.ScanConfig;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,6 +47,60 @@ class HttpClientTest {
     @AfterEach
     void tearDown() throws Exception {
         server.shutdown();
+    }
+
+    @Test
+    @DisplayName("Cookie jar must be safe under concurrent saveFromResponse/loadForRequest")
+    void testCookieJarConcurrentAccess() throws Exception {
+        Field f = HttpClient.class.getDeclaredField("client");
+        f.setAccessible(true);
+        CookieJar jar = ((OkHttpClient) f.get(client)).cookieJar();
+
+        int threads = 32;
+        int iterations = 500;
+        int hosts = 4;
+        HttpUrl[] urls = new HttpUrl[hosts];
+        for (int h = 0; h < hosts; h++) {
+            urls[h] = HttpUrl.get("http://host" + h + ".test/");
+        }
+
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> futures = new ArrayList<>();
+        for (int t = 0; t < threads; t++) {
+            final int id = t;
+            futures.add(pool.submit(() -> {
+                start.await();
+                for (int i = 0; i < iterations; i++) {
+                    HttpUrl url = urls[(id + i) % hosts];
+                    // Shared cookie name forces replace-in-place contention; unique name must never be lost.
+                    jar.saveFromResponse(url, List.of(
+                            new Cookie.Builder().name("shared").value("v" + id + "-" + i).domain(url.host()).build(),
+                            new Cookie.Builder().name("t" + id + "-" + i).value("x").domain(url.host()).build()));
+                    jar.loadForRequest(url);
+                }
+                return null;
+            }));
+        }
+        start.countDown();
+        for (Future<?> fu : futures) {
+            fu.get(60, TimeUnit.SECONDS);
+        }
+        pool.shutdown();
+
+        for (int h = 0; h < hosts; h++) {
+            List<Cookie> loaded = jar.loadForRequest(urls[h]);
+            long shared = loaded.stream().filter(c -> c.name().equals("shared")).count();
+            assertEquals(1, shared, "exactly one 'shared' cookie expected for " + urls[h].host());
+            // Each (thread, iteration) pair maps to exactly one host, so count the unique cookies expected here.
+            int expected = 0;
+            for (int t = 0; t < threads; t++) {
+                for (int i = 0; i < iterations; i++) {
+                    if ((t + i) % hosts == h) expected++;
+                }
+            }
+            assertEquals(expected + 1, loaded.size(), "no cookie may be lost for " + urls[h].host());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -470,5 +534,79 @@ class HttpClientTest {
         assertTrue(latch.await(5, TimeUnit.SECONDS), "Async callback should fire within 5 seconds");
         assertTrue(successCalled.get());
         assertEquals(200, capturedStatus.get());
+    }
+
+    // -------------------------------------------------------------------------
+    // Basic Auth authenticator
+    // -------------------------------------------------------------------------
+
+    private HttpClient basicAuthClient() {
+        ScanConfig c = new ScanConfig();
+        c.setTargetUrl(server.url("/").toString());
+        c.setBasicAuthUsername("user");
+        c.setBasicAuthPassword("pass");
+        return new HttpClient(c);
+    }
+
+    @Test
+    @DisplayName("Basic Auth should not replace an explicit Authorization header on 401")
+    void testBasicAuthDoesNotReplaceExplicitAuthorization() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401));
+        server.enqueue(new MockResponse().setResponseCode(200));
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(),
+                Map.of("Authorization", "Bearer forged"));
+
+        assertEquals(401, response.getStatusCode());
+        assertEquals(1, server.getRequestCount());
+        assertEquals("Bearer forged", server.takeRequest().getHeader("Authorization"));
+    }
+
+    @Test
+    @DisplayName("Basic Auth should retry at most once against an always-401 server")
+    void testBasicAuthRetriesAtMostOnce() throws Exception {
+        for (int i = 0; i < 30; i++) {
+            server.enqueue(new MockResponse().setResponseCode(401));
+        }
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+        assertEquals(401, response.getStatusCode());
+        assertTrue(server.getRequestCount() <= 2, "requests: " + server.getRequestCount());
+    }
+
+    @Test
+    @DisplayName("Basic Auth credentials should not be sent to a different host after a redirect")
+    void testBasicAuthNotForwardedAfterRedirect() throws Exception {
+        MockWebServer other = new MockWebServer();
+        other.start();
+        try {
+            other.enqueue(new MockResponse().setResponseCode(401));
+            other.enqueue(new MockResponse().setResponseCode(200));
+            server.enqueue(new MockResponse().setResponseCode(302)
+                    .setHeader("Location", other.url("/stolen").toString()));
+
+            HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+            assertEquals(401, response.getStatusCode());
+            assertEquals(1, other.getRequestCount());
+            assertNull(other.takeRequest().getHeader("Authorization"));
+        } finally {
+            other.shutdown();
+        }
+    }
+
+    @Test
+    @DisplayName("Basic Auth should succeed against a server that challenges once")
+    void testBasicAuthSucceedsAfterChallenge() throws Exception {
+        server.enqueue(new MockResponse().setResponseCode(401).setHeader("WWW-Authenticate", "Basic realm=\"t\""));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("ok"));
+
+        HttpResponse response = basicAuthClient().getWithStatus(server.url("/api/x").toString(), Map.of());
+
+        assertEquals(200, response.getStatusCode());
+        assertEquals(2, server.getRequestCount());
+        server.takeRequest();
+        assertEquals("Basic dXNlcjpwYXNz", server.takeRequest().getHeader("Authorization"));
     }
 }

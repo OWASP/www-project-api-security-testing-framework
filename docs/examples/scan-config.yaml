@@ -1,130 +1,73 @@
-# OWASP API Security Testing Framework — Example Configuration
-# Pass this file to the CLI with: astf scan --config scan-config.yaml
+# OWASP API Security Testing Framework: example configuration
+# Pass this file to the CLI with: java -jar astf-v2.0.2.jar -c scan-config.yaml
 #
-# Every field listed here is optional; the CLI can also supply individual
-# values via flags which override what is written in this file.
-
-# ── Target ──────────────────────────────────────────────────────────────────
-target:
-  # Base URL of the API under test (trailing slash is added automatically).
-  url: "https://api.example.com"
-
-  # Enable automatic endpoint discovery (OpenAPI spec, common paths, etc.).
-  # Set to false if you provide an explicit endpoints list below.
-  discoveryEnabled: true
-
-
-# ── Manual endpoint input (all three methods are optional — use at most one) ──
+# Every key is optional except targetUrl (or pass -u on the command line).
+# Command-line flags override what is written here.
 #
-# OPTION A — Inline endpoint list (highest config-file precedence)
-# Discovery is skipped automatically when endpoints are provided here.
+# Bearer tokens, API keys and client certificates are NOT read from this file
+# (HTTP Basic and proxy credentials can be, below). Pass them on the command line,
+# ideally from environment variables so they stay out of shell history:
+#   --token "$API_TOKEN"            Bearer token
+#   --secondary-token "$TOKEN_B"    second identity, enables cross-user BOLA checks
+#   --api-key "$KEY" --api-key-header X-API-Key
+#   --username u --password p       HTTP Basic (or use basicAuth below)
+#
+# Only scan systems you are authorized to test. Some checks send bursts of
+# requests and state-changing calls, so use a staging environment.
+
+# Base URL of the API under test.
+targetUrl: "https://api.example.com"
+
+# Automatic endpoint discovery (OpenAPI/Swagger probing, common paths).
+# Skipped automatically when `endpoints` or `endpointsFile` is given.
+discoveryEnabled: true
+
+# Concurrency and time limit.
+threads: 10
+timeoutMinutes: 30
+
+# Output: JSON, HTML, SARIF or XML.
+outputFormat: "JSON"
+outputFile: "astf-results.json"
+verbose: false
+
+# Extra request headers sent with every request.
+headers:
+  Accept: "application/json"
+  # X-Custom-Header: "value"
+
+# HTTP Basic credentials (alternative to --username / --password).
+# basicAuth:
+#   username: "admin"
+#   password: "change-me"
+
+# Outbound proxy.
+# proxy:
+#   host: "127.0.0.1"
+#   port: 8080
+#   username: "proxyuser"      # only if the proxy requires auth
+#   password: "proxypass"
+
+# Test case selection by ID (leave both out to run everything).
+# enableTestCases:
+#   - "ASTF-API1-2023"
+# disableTestCases:
+#   - "ASTF-API10-2023"
+
+# Manual endpoints. Use ONE of `endpoints` (inline) or `endpointsFile`;
+# if both are set, the inline list wins.
+#
 # endpoints:
 #   - path: "/api/v1/users"
 #     method: "GET"
-#   - path: "/api/v1/users/{id}"
-#     method: "GET"
 #   - path: "/api/v1/users"
 #     method: "POST"
-#     # Optional sample body. A string is sent as-is; a mapping is serialized to JSON.
-#     # Injection test cases use these real field names instead of guessed ones.
+#     # Optional sample body: a string is sent as-is, a mapping is serialized to
+#     # JSON. Injection checks use these real field names instead of guessing.
 #     requestBody:
 #       username: "alice"
 #       email: "alice@example.com"
 #   - path: "/api/v1/users/{id}"
 #     method: "DELETE"
 #
-# OPTION B — Load endpoints from an external text file (lower precedence than inline)
-# File format: one endpoint per line — METHOD /path
-# Lines starting with # are comments; blank lines are ignored.
-# endpointsFile: "/path/to/endpoints.txt"
-#
-# OPTION C — CLI flag (highest overall precedence, overrides both options above)
-# Pass --endpoints-file /path/to/endpoints.txt when running astf
-
-  # URL path patterns to skip during scanning (regex supported).
-  excludePatterns:
-    - "/health"
-    - "/metrics"
-    - "/actuator/.*"
-
-
-# ── Authentication ───────────────────────────────────────────────────────────
-auth:
-  # Bearer token — automatically added as "Authorization: Bearer <token>"
-  # bearerToken: "eyJhbGciOiJIUzI1NiJ9..."
-
-  # API key authentication
-  # apiKey: "my-api-key-value"
-  # apiKeyHeader: "X-API-Key"   # default header name
-
-  # HTTP Basic authentication
-  # basicAuthUsername: "admin"
-  # basicAuthPassword: "s3cr3t"
-
-
-# ── Custom request headers ───────────────────────────────────────────────────
-headers:
-  Accept: "application/json"
-  # X-Custom-Header: "value"
-
-
-# ── Proxy ────────────────────────────────────────────────────────────────────
-# proxy:
-#   host: "127.0.0.1"
-#   port: 8080
-#   username: "proxyuser"      # optional — only if proxy requires auth
-#   password: "proxypass"
-
-
-# ── Test case selection ──────────────────────────────────────────────────────
-tests:
-  # Run only the listed test case IDs (leave empty to run all enabled tests).
-  # enabled:
-  #   - "ASTF-API1-2023"
-  #   - "ASTF-API2-2023"
-
-  # Exclude specific test case IDs.
-  # disabled:
-  #   - "ASTF-API10-2023"
-
-  # Suppress findings of these severities from the final report.
-  # excludeSeverities:
-  #   - "INFO"
-  #   - "LOW"
-
-  # Stop after this many total findings (0 = unlimited).
-  maxFindings: 0
-
-
-# ── Execution ────────────────────────────────────────────────────────────────
-execution:
-  # Number of concurrent virtual threads used for scanning.
-  threads: 10
-
-  # Overall scan timeout in minutes.
-  timeoutMinutes: 30
-
-  # Milliseconds to sleep between successive requests (0 = no delay).
-  # Useful when scanning production systems to avoid triggering rate limits.
-  requestDelayMs: 0
-
-  # Hard cap on requests per second (0 = unlimited).
-  maxRequestsPerSecond: 0
-
-  # Follow HTTP redirects.
-  followRedirects: true
-
-  # Validate TLS/SSL certificates. Set to false only in controlled lab environments.
-  validateCertificates: true
-
-
-# ── Output ───────────────────────────────────────────────────────────────────
-output:
-  # Report format: JSON | XML | HTML | SARIF
-  format: "JSON"
-
-  # Write the report to a file (omit to print to stdout).
-  # file: "astf-report.json"
-
-  # Print verbose progress and debug information.
-  verbose: false
+# endpointsFile: "/path/to/endpoints.txt"   # one "METHOD /path" per line

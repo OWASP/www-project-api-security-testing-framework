@@ -42,6 +42,22 @@ cat astf-scan.log | grep "ERROR\|WARN"
 
 ## Common Errors
 
+### Build and launch problems
+
+**`Error: Could not find or load main class org.owasp.astf.cli.ASTFCli`** (with `Caused by: java.lang.ClassNotFoundException: org.owasp.astf.cli.ASTFCli`)
+
+The jar does not contain the compiled CLI, which means the build did not finish compiling. The usual cause is Maven running on a JDK older than 21: the project targets Java 21, so the compile step fails and leaves no `cli` classes. `java -version` can show 21 while Maven uses another JDK, so check the "Java version" line of:
+
+```bash
+mvn -v
+```
+
+If it is below 21, point `JAVA_HOME` at a JDK 21 and rebuild with `mvn clean package -DskipTests`. A successful build contains `target/classes/org/owasp/astf/cli/ASTFCli.class`, and `java -jar target/api-security-testing-framework-<version>.jar --version` prints the version.
+
+**`no main manifest attribute, in target/original-api-security-testing-framework-<version>.jar`**
+
+That is the intermediate jar without dependencies. Run `target/api-security-testing-framework-<version>.jar` instead.
+
 ### `maven-resources-plugin:3.4.0` not found
 
 ```
@@ -140,17 +156,17 @@ The `release.yml` workflow only fires on tags pushed to the remote — a local t
 
 ### Release workflow failed at the test step
 
-The release workflow runs the full test suite before building the JAR. If any of the 371 tests fail, the release is aborted — no JAR is published and no GitHub Release is created.  
+The release workflow runs the full test suite before building the JAR. If any test fails, the release is aborted — no JAR is published and no GitHub Release is created.  
 **Fix:** Check the failed Actions run for the test failure, fix it on `main`, delete the tag, and re-tag:
 
 ```bash
 # Delete tag locally and remotely, then re-push after the fix
-git tag -d v2.0.1
-git push origin :refs/tags/v2.0.1
+git tag -d v2.0.2
+git push origin :refs/tags/v2.0.2
 
 # After fixing and merging to main:
-git tag v2.0.1
-git push origin v2.0.1
+git tag v2.0.2
+git push origin v2.0.2
 ```
 
 ---
@@ -187,7 +203,7 @@ We actively want your feedback.
 
 ### Bug Reports
 Use the [Bug Report template](../.github/ISSUE_TEMPLATE/bug_report.md). Include:
-- ASTF version (`java -jar astf-v2.0.1.jar -V`)
+- ASTF version (`java -jar astf-v2.0.2.jar -V`)
 - Java version (`java -version`)
 - The exact command you ran (redact any tokens)
 - Relevant output from `astf-scan.log`

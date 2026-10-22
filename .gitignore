@@ -7,6 +7,7 @@ target/
 dependency-reduced-pom.xml
 *.sarif
 crapi-results.*
+astf-results.*
 crapi-scan.yaml
 astf-scan.log
 .idea/

@@ -19,6 +19,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.result.EvidenceMasking;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
@@ -972,7 +973,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
                             endpoint.getMethod() + " " + endpoint.getPath(),
                             "Set the HttpOnly, Secure, and SameSite=Strict (or Lax) attributes on all session cookies."
                     );
-                    finding.setEvidence("Set-Cookie: " + cookieHeader +
+                    finding.setEvidence("Set-Cookie: " + EvidenceMasking.maskSetCookie(cookieHeader) +
                             " — missing flag(s): " + flagList);
                     findings.add(finding);
                 }
