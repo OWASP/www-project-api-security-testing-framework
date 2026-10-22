@@ -136,7 +136,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // codes, discount tokens, ...), not just credentials.
     //
     // Split into two tiers rather than one flat list scanned against the whole response body:
-    // unambiguous structured JSON key:value syntax (STRUCTURED_FAILURE_MARKERS) is safe to match
+    // unambiguous structured JSON key:value syntax (STRUCTURED_FAILURE_PATTERNS) is safe to match
     // anywhere in the body, but generic words (TEXT_FAILURE_MARKERS) like "invalid" or "expired"
     // are common enough to appear in unrelated response content (a product name, an unrelated
     // nested field, ...) that scanning the whole body for them risks a false negative — the
@@ -145,14 +145,25 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // is instead only checked against text pulled from fields that actually carry human-readable
     // status text (see MESSAGE_FIELD_NAMES / containsFailureMarker), falling back to a whole-body
     // scan when there is no such text — non-JSON, or JSON with no recognised message field.
-    private static final List<String> STRUCTURED_FAILURE_MARKERS = List.of(
-            "\"status\":\"fail\"", "\"success\":false"
+    //
+    // Matched as patterns, not literal substrings: the literal text "status":"fail" never matches
+    // a pretty-printed body such as { "status": "fail" } (VAmPI's actual login response), so a
+    // failed request read as a success (#142).
+    private static final List<Pattern> STRUCTURED_FAILURE_PATTERNS = List.of(
+            Pattern.compile("\"status\"\\s*:\\s*\"(?:fail|failed|failure|error)\"", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\"(?:success|ok)\"\\s*:\\s*false", Pattern.CASE_INSENSITIVE)
     );
+
+    // Top-level JSON fields that signal failure when they carry a value. An empty string, null,
+    // false or an empty container means "no error", so a successful body with "errors": [] is
+    // not mistaken for a failure.
+    private static final List<String> ERROR_FIELD_NAMES = List.of("error", "errors");
 
     private static final List<String> TEXT_FAILURE_MARKERS = List.of(
             "incorrect", "invalid credentials", "invalid username", "invalid password",
             "authentication failed", "unauthorized", "not found", "does not exist", "invalid",
-            "expired", "already used", "already applied", "denied", "rejected"
+            "expired", "already used", "already applied", "denied", "rejected",
+            "error occurred", "went wrong"
     );
 
     // JSON field names that conventionally carry human-readable status/error text — the only
@@ -522,7 +533,15 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         boolean baselineFailed = baseline != null && baselineBody != null &&
                                 (!baseline.isSuccess() || containsFailureMarker(baselineBody));
 
-                        if (baselineFailed) {
+                        // The cached baseline may be stale: a target that degrades mid-scan (for
+                        // example after a ReDoS probe) starts answering every request, including
+                        // a plain wrong value, with the same generic failure or success-shaped
+                        // body, and a baseline taken while it was healthy then makes any such
+                        // response look like a bypass (#142). Re-send it right before reporting,
+                        // at most once per reported finding, and treat a baseline that no longer
+                        // fails as inconclusive.
+                        if (baselineFailed && baselineStillFails(endpoint, httpClient, fields, fieldValues,
+                                field, baselineResponseByField)) {
                             boolean isCredentialField =
                                     CREDENTIAL_FIELD_NAMES.stream().anyMatch(field::equalsIgnoreCase);
                             String title = (isAuthLike && isCredentialField)
@@ -604,7 +623,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      * Whether {@code responseBody} carries an explicit failure/rejection signal, used to avoid
      * treating a 2xx response that actually represents a business-logic failure as a real bypass.
      * <p>
-     * {@link #STRUCTURED_FAILURE_MARKERS} (unambiguous JSON key:value syntax) is checked against
+     * {@link #STRUCTURED_FAILURE_PATTERNS} and a top-level {@code error}/{@code errors} value are checked against
      * the whole body. {@link #TEXT_FAILURE_MARKERS} (generic words like "invalid" or "expired")
      * is checked only against text pulled from fields conventionally used for human-readable
      * status/error messages ({@link #MESSAGE_FIELD_NAMES}) — scanning the whole body for words
@@ -616,7 +635,8 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      */
     private boolean containsFailureMarker(String responseBody) {
         String lower = responseBody.toLowerCase();
-        if (STRUCTURED_FAILURE_MARKERS.stream().anyMatch(lower::contains)) {
+        if (STRUCTURED_FAILURE_PATTERNS.stream().anyMatch(p -> p.matcher(responseBody).find())
+                || hasTopLevelErrorField(responseBody)) {
             return true;
         }
 
@@ -625,6 +645,69 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             return TEXT_FAILURE_MARKERS.stream().anyMatch(messageText.toLowerCase()::contains);
         }
         return TEXT_FAILURE_MARKERS.stream().anyMatch(lower::contains);
+    }
+
+    /**
+     * Whether the body is a JSON object whose top-level {@code error} or {@code errors} field
+     * carries a value: a non-blank string, a non-empty object or array, or {@code true}. A null,
+     * empty or {@code false} value means no error. Top level only: a nested {@code error} field
+     * in an otherwise successful payload must not turn a genuine bypass into an apparent failure.
+     */
+    private boolean hasTopLevelErrorField(String responseBody) {
+        try {
+            JsonNode root = objectMapper.readTree(responseBody);
+            if (root == null || !root.isObject()) {
+                return false;
+            }
+            for (String name : ERROR_FIELD_NAMES) {
+                JsonNode value = root.get(name);
+                if (value == null || value.isNull()) {
+                    continue;
+                }
+                if (value.isTextual() && !value.asText().isBlank()) {
+                    return true;
+                }
+                if (value.isContainerNode() && value.size() > 0) {
+                    return true;
+                }
+                if (value.isBoolean() && value.asBoolean()) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * Sends the invalid-value baseline for {@code field} again and reports whether it still looks
+     * like a failure. The fresh response replaces the cached one, so later payloads on the same
+     * field compare against the target's current behaviour. A baseline that cannot be sent, or
+     * that no longer fails, makes the bypass inconclusive.
+     */
+    private boolean baselineStillFails(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
+                                       Map<String, JsonNode> fieldValues, String field,
+                                       Map<String, HttpResponse> baselineResponseByField) {
+        HttpResponse fresh;
+        try {
+            fresh = sendRequest(endpoint, httpClient,
+                    buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
+        } catch (Exception e) {
+            logger.debug("Could not re-send NoSQL baseline on {} field {}: {}", endpoint, field, e.getMessage());
+            return false;
+        }
+        baselineResponseByField.put(field, fresh);
+        if (fresh == null || fresh.getBody() == null) {
+            return false;
+        }
+        boolean stillFails = !fresh.isSuccess() || containsFailureMarker(fresh.getBody());
+        if (!stillFails) {
+            logger.debug("NoSQL bypass on {} field {} not reported: a fresh invalid-value baseline no longer " +
+                    "fails (HTTP {}), so the target's behaviour changed during the scan",
+                    endpoint, field, fresh.getStatusCode());
+        }
+        return stillFails;
     }
 
     /** Concatenates the text of every field named like {@link #MESSAGE_FIELD_NAMES}, anywhere in
