@@ -340,6 +340,9 @@ public class BrokenAuthenticationTestCase implements TestCase {
                 if (lastResponse == null) {
                     return findings;
                 }
+                if (looksLikeMissingPath(lastResponse)) {
+                    return findings; // the path is not served, so no login was ever attempted
+                }
                 if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
                     return findings; // lockout/rate-limiting is working correctly
                 }
@@ -366,6 +369,20 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /**
+     * Whether a response says the path itself is not served by the target: 404 Not Found,
+     * 405 Method Not Allowed, 410 Gone, or 501 Not Implemented.
+     *
+     * <p>Brute-force attempts are sent to paths guessed from {@link #AUTH_PATH_PATTERNS}, and a
+     * target may not serve them at all. A response like that carries no evidence about lockout
+     * because no login was processed, so reporting "no lockout signal" would describe the
+     * missing path as a missing control (#144).</p>
+     */
+    static boolean looksLikeMissingPath(HttpResponse response) {
+        int status = response.getStatusCode();
+        return status == 404 || status == 405 || status == 410 || status == 501;
     }
 
     private List<Finding> testMissingAuthentication(EndpointInfo endpoint, HttpClient httpClient) {
