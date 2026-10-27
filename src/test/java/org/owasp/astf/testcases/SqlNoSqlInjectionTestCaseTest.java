@@ -65,6 +65,10 @@ class SqlNoSqlInjectionTestCaseTest {
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(500, "sqlite3::OperationalError near \"'\"", Map.of()));
 
+        // the ordinary value in the same place gets no database error, as on a really vulnerable endpoint
+        when(httpClient.getWithStatus(contains("astf-baseline-value"), anyMap()))
+                .thenReturn(new HttpResponse(404, "{\"error\":\"user not found\"}", Map.of()));
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertFalse(findings.isEmpty(), "Should detect SQL injection via the path parameter");
@@ -81,6 +85,10 @@ class SqlNoSqlInjectionTestCaseTest {
 
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(500, "sqlite3::OperationalError near \"'\"", Map.of()));
+
+        // the ordinary value in the same place gets no database error, as on a really vulnerable endpoint
+        when(httpClient.getWithStatus(contains("astf-baseline-value"), anyMap()))
+                .thenReturn(new HttpResponse(404, "{\"error\":\"user not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -112,6 +120,8 @@ class SqlNoSqlInjectionTestCaseTest {
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(500,
                         "{\"error\":\"You have an error in your SQL syntax near '''"+"\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("astf-baseline-value")))
+                .thenReturn(new HttpResponse(200, "{\"results\":[]}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -133,6 +143,10 @@ class SqlNoSqlInjectionTestCaseTest {
                 .thenReturn(new HttpResponse(500,
                         "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) unrecognized token: \"'''\"",
                         Map.of()));
+
+        // the ordinary value in the same place gets no database error, as on a really vulnerable endpoint
+        when(httpClient.getWithStatus(contains("astf-baseline-value"), anyMap()))
+                .thenReturn(new HttpResponse(404, "{\"error\":\"user not found\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -723,5 +737,127 @@ class SqlNoSqlInjectionTestCaseTest {
                 && f.getTitle().contains("NoSQL")), "a 5xx baseline must not produce a bypass finding");
         assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.INFO
                 && f.getTitle().contains("server error")), "it is still reported, as INFO");
+    }
+
+    // --- Re-checking a database error before calling it SQL injection ---
+
+    private static final String DB_ERROR =
+            "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: users";
+
+    private EndpointInfo registerEndpoint() {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"name1\",\"password\":\"pass1\",\"email\":\"a@b.c\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+        return endpoint;
+    }
+
+    @Test
+    @DisplayName("A database error that does not reproduce is MEDIUM 'not reproducible', never CRITICAL (VAmPI register, live)")
+    void testDatabaseErrorThatDoesNotReproduceIsNotCritical() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        // Only the very first request lands during a table reset; everything after is a normal answer.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> calls.getAndIncrement() == 0
+                        ? new HttpResponse(500, DB_ERROR, Map.of())
+                        : new HttpResponse(400, "{\"status\":\"fail\",\"message\":\"User already exists.\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL),
+                "an error that the payload cannot reproduce must not be reported as CRITICAL: " + findings);
+        Finding f = findings.stream().filter(x -> x.getTitle().equals("Possible SQL Injection (not reproducible)"))
+                .findFirst().orElseThrow(() -> new AssertionError("the signal must be kept, not dropped: " + findings));
+        assertEquals(Severity.MEDIUM, f.getSeverity());
+        assertTrue(f.getEvidence().contains("not reproduced"));
+    }
+
+    @Test
+    @DisplayName("A database error on an ordinary value too is INFO 'inconclusive', not CRITICAL")
+    void testDatabaseErrorOnOrdinaryValueIsInconclusive() throws IOException {
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(500, DB_ERROR, Map.of()));
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL), findings.toString());
+        Finding f = findings.stream().filter(x -> x.getTitle().equals("SQL Injection Check Inconclusive"))
+                .findFirst().orElseThrow(() -> new AssertionError(findings.toString()));
+        assertEquals(Severity.INFO, f.getSeverity());
+    }
+
+    @Test
+    @DisplayName("A reproducible database error with a clean ordinary value stays CRITICAL and says so in the evidence")
+    void testReproducibleDatabaseErrorIsCritical() throws IOException {
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(500, DB_ERROR, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("astf-baseline-value")))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"success\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        assertEquals(1, findings.size(), findings.toString());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertEquals("SQL Injection Vulnerability", findings.get(0).getTitle());
+        assertTrue(findings.get(0).getEvidence().contains("reproduced on a second request"));
+    }
+
+    @Test
+    @DisplayName("If the re-check request itself fails, the CRITICAL finding is kept, not dropped")
+    void testRecheckFailureKeepsCriticalFinding() throws IOException {
+        AtomicInteger calls = new AtomicInteger();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    if (calls.getAndIncrement() == 0) {
+                        return new HttpResponse(500, DB_ERROR, Map.of());
+                    }
+                    throw new IOException("connection reset");
+                });
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        Finding f = findings.stream().filter(x -> x.getSeverity() == Severity.CRITICAL).findFirst()
+                .orElseThrow(() -> new AssertionError(findings.toString()));
+        assertTrue(f.getEvidence().contains("re-check request failed"));
+    }
+
+    @Test
+    @DisplayName("A path-parameter error that does not reproduce is replaced by a later payload that does")
+    void testPathParameterUnreproducedThenConfirmed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/name1", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        endpoint.setResolvedFromTemplate(true);
+        AtomicInteger payloadCalls = new AtomicInteger();
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            String url = inv.getArgument(0);
+            if (url.contains("astf-baseline-value")) {
+                return new HttpResponse(404, "{\"error\":\"user not found\"}", Map.of());
+            }
+            // payload 1: one-off error, its repeat: clean; from payload 2 on: a real, repeatable error
+            int n = payloadCalls.getAndIncrement();
+            return n == 1 ? new HttpResponse(404, "{\"error\":\"user not found\"}", Map.of())
+                          : new HttpResponse(500, DB_ERROR, Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size(), "the confirmed finding replaces the unconfirmed one: " + findings);
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Fields not under test are filled with a non-credential value, never \"test\"")
+    void testFillerIsNotACredential() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/register", "POST"); // no body: common-field fallback
+        endpoint.setBaseUrl("https://example.com");
+        List<String> bodies = new java.util.ArrayList<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            bodies.add(inv.getArgument(3));
+            return new HttpResponse(200, "{}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodies.isEmpty());
+        assertTrue(bodies.stream().noneMatch(b -> b.contains("\"test\"")), "a body still used \"test\": " + bodies);
     }
 }
