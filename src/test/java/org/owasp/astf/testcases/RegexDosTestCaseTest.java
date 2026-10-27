@@ -272,4 +272,22 @@ class RegexDosTestCaseTest {
 
         assertEquals(fastPayloads - 1, slowPayloads, "only the payload after the slow check is skipped");
     }
+
+    @Test
+    @DisplayName("Fields not under test are filled with a non-credential value, never \"test\" (no test/test account created)")
+    void testFillerIsNotACredential() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"name1\",\"password\":\"pass1\",\"email\":\"a@b.c\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+        java.util.List<String> bodies = new java.util.ArrayList<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            bodies.add(inv.getArgument(3));
+            return new HttpResponse(200, "{}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodies.isEmpty());
+        assertTrue(bodies.stream().noneMatch(b -> b.contains("\"test\"")), "a body still used \"test\": " + bodies);
+    }
 }
