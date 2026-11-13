@@ -116,6 +116,27 @@ auth:
   apiKeyHeader: "X-API-Key"   # defaults to X-API-Key if omitted
 ```
 
+### Environment variables in config files
+
+String values in YAML, JSON and `.properties` config files can reference environment variables as `$(NAME)`, so one file can serve several environments:
+
+```yaml
+targetUrl: "$(API_BASE_URL)"
+headers:
+  Authorization: "Bearer $(API_TOKEN)"
+```
+
+```bash
+export API_BASE_URL="https://staging.example.com"
+export API_TOKEN="..."
+java -jar astf-v2.0.1.jar -c config.yaml
+```
+
+- A variable that is not set aborts the scan with an error naming the variable and the config key that uses it. The values themselves are never printed.
+- A variable set to an empty string is valid and resolves to an empty string.
+- Write `$$(NAME)` to keep the literal text `$(NAME)`.
+- Only values are substituted, not keys, and resolved values are not expanded again.
+
 See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for the full reference covering proxy, custom headers, thread count, rate limiting, test selection, and output options.
 
 ---
