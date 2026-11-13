@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -37,21 +38,37 @@ public class ConfigLoader {
 
     private final ObjectMapper jsonMapper;
     private final ObjectMapper yamlMapper;
+    private final EnvironmentSubstitutor substitutor;
 
     /**
-     * Creates a new configuration loader.
+     * Creates a new configuration loader that resolves {@code $(NAME)} placeholders
+     * from the process environment.
      */
     public ConfigLoader() {
+        this(System::getenv);
+    }
+
+    /**
+     * Creates a configuration loader with a custom variable source.
+     *
+     * @param environment Resolves a variable name to its value, or null when it is not set
+     */
+    ConfigLoader(Function<String, String> environment) {
+        this.substitutor = new EnvironmentSubstitutor(environment);
         this.jsonMapper = new ObjectMapper();
         this.yamlMapper = new ObjectMapper(new YAMLFactory());
     }
 
     /**
-     * Loads a configuration from a YAML or JSON file.
+     * Loads a configuration from a YAML, JSON or properties file.
+     * <p>
+     * String values may reference environment variables as {@code $(NAME)}. A reference to a
+     * variable that is not set fails the load; write {@code $$(NAME)} for a literal {@code $(NAME)}.
+     * </p>
      *
      * @param filePath The path to the configuration file
      * @return The scan configuration
-     * @throws IOException If the file cannot be read or parsed
+     * @throws IOException If the file cannot be read or parsed, or references an unset variable
      */
     public ScanConfig loadFromFile(String filePath) throws IOException {
         File file = new File(filePath);
@@ -64,14 +81,19 @@ public class ConfigLoader {
         // Determine file type by extension
         if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
             JsonNode root = yamlMapper.readTree(file);
+            substitutor.substitute(root);
             parseJsonConfig(root, config);
         } else if (filePath.endsWith(".json")) {
             JsonNode root = jsonMapper.readTree(file);
+            substitutor.substitute(root);
             parseJsonConfig(root, config);
         } else if (filePath.endsWith(".properties")) {
             Properties props = new Properties();
             try (FileInputStream fis = new FileInputStream(file)) {
                 props.load(fis);
+            }
+            for (String key : props.stringPropertyNames()) {
+                props.setProperty(key, substitutor.substitute(props.getProperty(key), key));
             }
             parsePropertiesConfig(props, config);
         } else {
