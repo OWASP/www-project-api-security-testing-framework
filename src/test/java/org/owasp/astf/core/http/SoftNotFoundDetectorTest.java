@@ -297,6 +297,55 @@ class SoftNotFoundDetectorTest {
     }
 
     // -------------------------------------------------------------------------
+    // Near-identical body comparison
+    // -------------------------------------------------------------------------
+
+    private boolean suppressedAgainstBaseline(String baselineBody, String responseBody) throws IOException {
+        targetServesCatchAll(baselineBody, "application/json");
+        // Baselines are cached per detector, so each comparison needs a fresh one.
+        detector = new SoftNotFoundDetector();
+        return detector.looksLikeUnknownPath(BASE_URL, httpClient, ok(responseBody, "application/json"));
+    }
+
+    @Test
+    @DisplayName("Short bodies that differ by one character are not treated as the catch-all")
+    void testShortBodiesDifferingByOneCharacterAreNotSuppressed() throws IOException {
+        assertFalse(suppressedAgainstBaseline("a", "b"), "1-character bodies that differ are different");
+        assertFalse(suppressedAgainstBaseline("ab", "ac"), "2-character bodies that differ are different");
+        assertFalse(suppressedAgainstBaseline("abcdefghijklmnopqrs", "abcdefghijklmnopqrt"),
+                "19-character bodies that differ in one character are different");
+    }
+
+    @Test
+    @DisplayName("A real payload that merely adds a few characters to an empty-shaped baseline is not suppressed")
+    void testSmallInsertionsAreNotSuppressed() throws IOException {
+        assertFalse(suppressedAgainstBaseline("{}", "{\"a\":1}"));
+        assertFalse(suppressedAgainstBaseline("[]", "[{\"id\":1}]"));
+    }
+
+    @Test
+    @DisplayName("Identical short bodies still match the catch-all")
+    void testIdenticalShortBodiesStillSuppressed() throws IOException {
+        assertTrue(suppressedAgainstBaseline("a", "a"));
+        assertTrue(suppressedAgainstBaseline("{}", "{}"));
+    }
+
+    @Test
+    @DisplayName("A large catch-all template differing only by an echoed path is still detected")
+    void testLargeTemplateWithEchoedPathStillSuppressed() throws IOException {
+        String head = "<html><head><title>App</title></head><body>"
+                + "<div class=\"shell\">welcome to the portal, please use the navigation menu</div>".repeat(8)
+                + "<p>You requested ";
+        String tail = "</p>" + "<div class=\"footer\">copyright the portal operators, all rights reserved</div>"
+                .repeat(8) + "</body></html>";
+        targetServesCatchAll(head + "/astf-unknown-path-probe-zz" + tail, "text/html");
+
+        assertTrue(detector.looksLikeUnknownPath(BASE_URL, httpClient,
+                        ok(head + "/admin/panel" + tail, "text/html")),
+                "The same large page with only the echoed path changed is the catch-all answering again");
+    }
+
+    // -------------------------------------------------------------------------
     // Body normalisation
     // -------------------------------------------------------------------------
 

@@ -11,6 +11,7 @@ import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
+import org.owasp.astf.core.result.EvidenceMasking;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
@@ -216,7 +217,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
                                 "Use relative paths for redirects where possible."
                         );
                         finding.setRequestDetails("GET " + testUrl);
-                        finding.setEvidence("Location header: " + location);
+                        finding.setEvidence("Location header: " + EvidenceMasking.maskLocation(location));
                         findings.add(finding);
                         break;
                     }

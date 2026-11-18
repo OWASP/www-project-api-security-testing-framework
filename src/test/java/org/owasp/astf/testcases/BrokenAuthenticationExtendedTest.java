@@ -164,6 +164,22 @@ class BrokenAuthenticationExtendedTest {
         assertTrue(f.getEvidence().contains("SameSite"), "Evidence should mention SameSite");
     }
 
+    @Test
+    @DisplayName("testSessionCookieSecurity: evidence keeps the cookie name but not its value")
+    void testCookieValueIsMaskedInEvidence() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/auth/login", "POST", "application/json", null, false);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(okWithCookie("session=abc123; Path=/"));
+
+        List<Finding> findings = testCase.testSessionCookieSecurity(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty());
+        String evidence = findings.get(0).getEvidence();
+        assertTrue(evidence.contains("session="), "Cookie name should stay in evidence");
+        assertFalse(evidence.contains("abc123"), "Cookie value must not appear in evidence");
+        assertTrue(evidence.contains("Path=/"), "Attributes should stay in evidence");
+    }
+
     /**
      * A properly secured cookie should not produce any finding.
      */

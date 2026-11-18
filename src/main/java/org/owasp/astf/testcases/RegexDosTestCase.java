@@ -1,6 +1,8 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -95,19 +97,43 @@ public class RegexDosTestCase implements TestCase {
 
         for (String field : fields) {
             for (String payload : REDOS_PAYLOADS) {
+                // Health is checked BEFORE the payload, never after: a genuine ReDoS leaves a
+                // single-threaded server busy, so a re-probe after the payload would fail for
+                // exactly the targets that are vulnerable. A target that is already unhealthy cannot
+                // tell us anything about the payload, so only this payload is skipped.
+                if (!targetHealthy(endpoint, httpClient, fields, slowThreshold)) {
+                    logger.debug("Target not answering the baseline normally before the ReDoS payload on {} field {}, "
+                            + "not testing this payload", endpoint, field);
+                    if (Thread.currentThread().isInterrupted()) {
+                        return findings;
+                    }
+                    continue;
+                }
+
                 boolean timedOut = false;
                 long elapsed;
                 long start = System.currentTimeMillis();
                 try {
                     sendRequest(endpoint, httpClient, buildJsonBody(fields, field, payload));
-                } catch (IOException e) {
-                    // A connect/read timeout while processing this specific payload is itself
-                    // strong evidence of a hang — treat it as the slowest possible signal rather
-                    // than silently swallowing it like other test cases' generic catch blocks do.
+                } catch (SocketTimeoutException e) {
+                    // A socket timeout (OkHttp raises it for connect, read and write timeouts) right
+                    // after a normal baseline answer is evidence that the payload caused a hang.
                     timedOut = true;
+                } catch (InterruptedIOException e) {
+                    // Scan-level cancellation, not a hang: stop quietly and keep the interrupt flag.
+                    Thread.currentThread().interrupt();
+                    return findings;
+                } catch (IOException e) {
+                    // Connection refused/reset and similar say the target is unreachable, not that
+                    // a regex is backtracking.
+                    logger.debug("Network error testing ReDoS on {} field {}: {}", endpoint, field, e.getMessage());
+                    continue;
                 } catch (Exception e) {
                     logger.debug("Error testing ReDoS on {} field {}: {}", endpoint, field, e.getMessage());
                     continue;
+                }
+                if (Thread.currentThread().isInterrupted()) {
+                    return findings;
                 }
                 elapsed = System.currentTimeMillis() - start;
 
@@ -140,6 +166,26 @@ public class RegexDosTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /** True when the baseline request is answered normally and within the slow threshold. */
+    private boolean targetHealthy(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
+                                  long slowThreshold) {
+        long start = System.currentTimeMillis();
+        try {
+            sendRequest(endpoint, httpClient, buildJsonBody(fields, null, null));
+        } catch (SocketTimeoutException e) {
+            // A slow or unresponsive target, not a cancellation. SocketTimeoutException is a
+            // subclass of InterruptedIOException, so it must be caught first.
+            return false;
+        } catch (InterruptedIOException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
+        return !Thread.currentThread().isInterrupted()
+                && System.currentTimeMillis() - start <= slowThreshold;
     }
 
     private List<String> extractBodyFieldNames(EndpointInfo endpoint) {

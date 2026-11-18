@@ -125,7 +125,7 @@ Running ASTF against the public OWASP crAPI demo (`http://crapi.apisec.ai`) with
 
 Command used:
 ```bash
-java -jar target/api-security-testing-framework-1.0-SNAPSHOT.jar \
+java -jar target/api-security-testing-framework-2.0.2.jar \
   -u http://crapi.apisec.ai -f HTML -o crapi-report.html --timeout 3
 ```
 

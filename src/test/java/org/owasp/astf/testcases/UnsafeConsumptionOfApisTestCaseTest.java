@@ -151,6 +151,22 @@ class UnsafeConsumptionOfApisTestCaseTest {
     }
 
     @Test
+    @DisplayName("Open redirect evidence masks token-like query values in the Location header")
+    void testOpenRedirectEvidenceMasksTokens() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        HttpResponse redirectResponse = new HttpResponse(302, "",
+                Map.of("Location", List.of("https://evil-attacker.example.com/cb?access_token=s3cr3tvalue&next=/home")));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(redirectResponse);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding f = findings.stream().filter(x -> x.getTitle().contains("Redirect")).findFirst().orElseThrow();
+        assertFalse(f.getEvidence().contains("s3cr3tvalue"), "Token value must not appear in evidence");
+        assertTrue(f.getEvidence().contains("evil-attacker.example.com"), "Redirect target should stay");
+        assertTrue(f.getEvidence().contains("next=/home"), "Non-token parameters should stay");
+    }
+
+    @Test
     @DisplayName("Should NOT report open redirect when server returns 200 with no attacker Location header")
     void testNoOpenRedirectWhenLocationIsSafe() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");

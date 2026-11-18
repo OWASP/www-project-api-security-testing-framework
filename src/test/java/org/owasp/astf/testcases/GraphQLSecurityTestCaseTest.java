@@ -13,6 +13,7 @@ import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -20,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -50,6 +52,8 @@ class GraphQLSecurityTestCaseTest {
     void setUp() {
         MockitoAnnotations.openMocks(this);
         testCase = new GraphQLSecurityTestCase();
+        testCase.recoveryAttempts = 2;
+        testCase.recoveryPollMillis = 1;
     }
 
     // ── metadata ──────────────────────────────────────────────────────────────
@@ -861,6 +865,136 @@ class GraphQLSecurityTestCaseTest {
         assertTrue(findings.isEmpty());
     }
 
+    // ── once-per-URL coverage, crash handling, DB error disclosure ───────────
+
+    @Test
+    @DisplayName("Runs the suite once per GraphQL URL per scan, not once per endpoint (duplicate-findings bug)")
+    void testSuiteRunsOncePerGraphQLUrlPerClient() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400, "{\"errors\":[{\"message\":\"Bad request\"}]}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+        org.mockito.Mockito.clearInvocations(httpClient);
+        List<Finding> second = testCase.execute(endpoint, httpClient);
+
+        assertTrue(second.isEmpty(), "same URL, same scan: findings already reported once");
+        verifyNoInteractions(httpClient);
+
+        // a new scan builds a new HttpClient, which must be tested again
+        HttpClient otherScanClient = org.mockito.Mockito.mock(HttpClient.class);
+        when(otherScanClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400, "{}", Map.of()));
+        testCase.execute(endpoint, otherScanClient);
+        verify(otherScanClient, atLeastOnce()).postWithStatus(anyString(), anyMap(), anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("Circular fragment probe runs after the checks it could otherwise crash")
+    void testCircularFragmentRunsLast() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        List<String> bodies = new ArrayList<>();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            bodies.add(inv.getArgument(3));
+            return new HttpResponse(400, "{}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        int stackProbe = -1;
+        int circular = -1;
+        for (int i = 0; i < bodies.size(); i++) {
+            if (stackProbe < 0 && bodies.get(i).contains("__type(name:123)")) {
+                stackProbe = i;
+            }
+            if (circular < 0 && bodies.get(i).contains("fragment")) {
+                circular = i;
+            }
+        }
+        assertTrue(stackProbe >= 0 && circular >= 0, "both probes must still run");
+        assertTrue(stackProbe < circular, "stack-trace probe must run before the circular-fragment probe");
+    }
+
+    @Test
+    @DisplayName("Circular fragment finding records that the target stopped answering afterwards")
+    void testCircularFragmentEvidenceWhenTargetStaysDown() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenThrow(new IOException("Connection refused"));
+
+        List<Finding> findings = testCase.testCircularFragmentAttack(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertTrue(findings.get(0).getEvidence().contains("may have crashed"), findings.get(0).getEvidence());
+    }
+
+    @Test
+    @DisplayName("Circular fragment finding records recovery when the target comes back")
+    void testCircularFragmentEvidenceWhenTargetRecovers() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenThrow(new IOException("Connection reset"))
+                .thenReturn(ok("{\"data\":{\"__typename\":\"Query\"}}"));
+
+        List<Finding> findings = testCase.testCircularFragmentAttack(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertTrue(findings.get(0).getEvidence().contains("answered a trivial query again"),
+                findings.get(0).getEvidence());
+    }
+
+    @Test
+    @DisplayName("Flags a raw database error leaked by a resolver when a quote reaches a string argument (#117, DVGA pastes(filter))")
+    void testResolverErrorDisclosureDetectsSqlLeak() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    { "name": "pastes", "type": { "name": "PasteObject", "kind": "OBJECT" },
+                      "args": [ { "name": "filter", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("queryType{fields")) {
+                return ok(introspection);
+            }
+            if (body.contains("x'")) {
+                return ok("{\"errors\":[{\"message\":\"(sqlite3.OperationalError) near \\\"x''\\\": syntax error\\n" +
+                        "[SQL: SELECT pastes.id FROM pastes WHERE title = 'x'' ]\"}]}");
+            }
+            return new HttpResponse(400, "{\"errors\":[{\"message\":\"Bad request\"}]}", Map.of());
+        });
+
+        List<Finding> findings = testCase.testStackTraceDisclosure(endpoint, httpClient);
+
+        assertEquals(1, findings.size());
+        assertEquals("GraphQL Stack Trace / Debug Error Disclosure", findings.get(0).getTitle());
+        assertTrue(findings.get(0).getEvidence().contains("sqlite3.operationalerror"));
+        assertTrue(findings.get(0).getEndpoint().contains("pastes"));
+    }
+
+    @Test
+    @DisplayName("No resolver error disclosure finding when the resolver returns a generic error")
+    void testResolverErrorDisclosureQuietWhenGeneric() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    { "name": "pastes", "type": { "name": "PasteObject", "kind": "OBJECT" },
+                      "args": [ { "name": "filter", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv ->
+                ((String) inv.getArgument(3)).contains("queryType{fields")
+                        ? ok(introspection)
+                        : new HttpResponse(200, "{\"errors\":[{\"message\":\"Internal error\"}]}", Map.of()));
+
+        assertTrue(testCase.testStackTraceDisclosure(endpoint, httpClient).isEmpty());
+    }
+
     // ── login mutation brute-force ───────────────────────────────────────────
 
     private static final String LOGIN_MUTATION_INTROSPECTION = """
@@ -932,5 +1066,57 @@ class GraphQLSecurityTestCaseTest {
 
         List<Finding> findings = testCase.testLoginMutationBruteForce(endpoint, httpClient);
         assertTrue(findings.isEmpty(), "Should not run brute-force testing without a login mutation to target");
+    }
+
+    @Test
+    @DisplayName("One query field failing does not stop the resolver error probe on the other fields")
+    void testResolverErrorProbeContinuesAfterOneFieldFails() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    { "name": "slow", "type": { "name": "String", "kind": "SCALAR" },
+                      "args": [ { "name": "q", "type": { "name": "String", "kind": "SCALAR" } } ] },
+                    { "name": "pastes", "type": { "name": "String", "kind": "SCALAR" },
+                      "args": [ { "name": "filter", "type": { "name": "String", "kind": "SCALAR" } } ] }
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("queryType{fields")) {
+                return ok(introspection);
+            }
+            if (body.contains("slow(")) {
+                throw new java.net.SocketTimeoutException("Read timed out");
+            }
+            if (body.contains("pastes(") && body.contains("x'")) {
+                return ok("{\"errors\":[{\"message\":\"(sqlite3.OperationalError) near x: syntax error [SQL: SELECT 1]\"}]}");
+            }
+            return new HttpResponse(400, "{\"errors\":[{\"message\":\"Bad request\"}]}", Map.of());
+        });
+
+        List<Finding> findings = testCase.testStackTraceDisclosure(endpoint, httpClient);
+
+        assertEquals(1, findings.size(), "the second field must still be probed after the first one timed out");
+        assertTrue(findings.get(0).getEndpoint().contains("pastes"));
+    }
+
+    @Test
+    @DisplayName("Waiting for recovery is bounded by wall-clock time even when every attempt blocks")
+    void testRecoveryWaitIsBoundedByTime() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        testCase.recoveryAttempts = 50;
+        testCase.recoveryPollMillis = 10;   // 500 ms budget
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            Thread.sleep(300);              // a hung server: each attempt blocks
+            throw new java.net.SocketTimeoutException("Read timed out");
+        });
+
+        long start = System.currentTimeMillis();
+        List<Finding> findings = testCase.testCircularFragmentAttack(endpoint, httpClient);
+        long elapsed = System.currentTimeMillis() - start;
+
+        assertEquals(1, findings.size());
+        assertTrue(elapsed < 3000, "50 attempts x 300 ms would be 15 s; the time budget must stop it early (took " + elapsed + " ms)");
     }
 }
