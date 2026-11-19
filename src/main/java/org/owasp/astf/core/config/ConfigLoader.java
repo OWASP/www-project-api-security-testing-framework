@@ -200,6 +200,10 @@ public class ConfigLoader {
             config.setDiscoveryEnabled(root.get("discoveryEnabled").asBoolean());
         }
 
+        if (root.has("openApiSpec") && !root.get("openApiSpec").asText().isBlank()) {
+            config.setOpenApiSpec(root.get("openApiSpec").asText().trim());
+        }
+
         if (root.has("verbose")) {
             config.setVerbose(root.get("verbose").asBoolean());
         }

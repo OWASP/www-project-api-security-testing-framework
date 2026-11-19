@@ -20,6 +20,7 @@ public class ScanConfig {
     private String targetUrl;
     private List<EndpointInfo> endpoints;
     private boolean discoveryEnabled = true;
+    private String openApiSpec;
     private List<String> excludePatterns;
     private Map<String, String> headers;
 
@@ -153,6 +154,24 @@ public class ScanConfig {
      */
     public void setDiscoveryEnabled(boolean discoveryEnabled) {
         this.discoveryEnabled = discoveryEnabled;
+    }
+
+    /**
+     * Gets the OpenAPI/Swagger specification to take endpoints from: a URL or a local file.
+     *
+     * @return the specification location, or null to search for one automatically
+     */
+    public String getOpenApiSpec() {
+        return openApiSpec;
+    }
+
+    /**
+     * Sets the OpenAPI/Swagger specification to take endpoints from.
+     *
+     * @param openApiSpec an http(s) URL or a local file path (JSON or YAML)
+     */
+    public void setOpenApiSpec(String openApiSpec) {
+        this.openApiSpec = openApiSpec;
     }
 
     /**

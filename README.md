@@ -159,7 +159,8 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--timeout` | | Scan timeout in minutes | `30` |
 | `--test-cases` | | Comma-separated test case IDs to run | all |
 | `--exclude-tests` | | Comma-separated test case IDs to skip | none |
-| `--no-discovery` | | Disable auto endpoint discovery | false |
+| `--openapi` | | OpenAPI/Swagger spec to take endpoints from: an `http(s)` URL or a local file (JSON or YAML). Replaces the search for a spec; if it cannot be read, automatic discovery runs instead. A URL on another host is fetched without credentials unless the host is in `scopeHosts`. Ignored with `--endpoints-file`. | — |
+| `--no-discovery` | | Disable auto endpoint discovery (an explicit `--openapi` is still read) | false |
 | `--verbose` | `-v` | Verbose output | false |
 | `--version` | `-V` | Print version | — |
 | `--help` | `-h` | Show help | — |
@@ -189,8 +190,9 @@ When multiple endpoint sources are configured, ASTF uses this order (highest win
 | 1 | `--endpoints-file` CLI flag | Overrides everything |
 | 2 | `endpoints:` inline YAML block | In config file |
 | 3 | `endpointsFile:` YAML key | In config file |
-| 4 | Automatic discovery | OpenAPI probing + common paths |
-| 5 | Fallback hardcoded paths | When discovery finds nothing |
+| 4 | `--openapi` / `openApiSpec:` | The spec you name; if it cannot be read, discovery below runs |
+| 5 | Automatic discovery | OpenAPI probing + common paths |
+| 6 | Fallback hardcoded paths | When discovery finds nothing |
 
 ```bash
 # Scan only specific endpoints from a file

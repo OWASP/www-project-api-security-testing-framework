@@ -22,6 +22,11 @@ targetUrl: "https://api.example.com"
 # Skipped automatically when `endpoints` or `endpointsFile` is given.
 discoveryEnabled: true
 
+# Take endpoints from an OpenAPI/Swagger spec you name instead of searching the target for one:
+# an http(s) URL or a local JSON/YAML file. If it cannot be read, discovery runs instead.
+# A URL on another host is fetched without credentials unless the host is in scopeHosts.
+# openApiSpec: "./specs/openapi.yaml"
+
 # Concurrency and time limit.
 threads: 10
 timeoutMinutes: 30
