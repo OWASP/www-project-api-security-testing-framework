@@ -320,13 +320,15 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                 String injectedPath = path.replace(segmentToReplace, "/" + encodedPayload);
                 String url = buildUrl(endpoint, injectedPath);
 
-                String indicator = findSqlErrorIndicator(sendRequestToUrl(endpoint, httpClient, url));
+                HttpResponse injected = sendRequestToUrl(endpoint, httpClient, url);
+                String indicator = findSqlErrorIndicator(injected);
                 if (indicator == null) {
                     continue;
                 }
-                SqlErrorRecheck recheck = recheckSqlError(endpoint,
-                        () -> sendRequestToUrl(endpoint, httpClient, ordinaryUrl),
-                        () -> sendRequestToUrl(endpoint, httpClient, url));
+                SqlErrorRecheck recheck = isTargetFault(injected) ? SqlErrorRecheck.TARGET_FAULT
+                        : recheckSqlError(endpoint,
+                                () -> sendRequestToUrl(endpoint, httpClient, ordinaryUrl),
+                                () -> sendRequestToUrl(endpoint, httpClient, url));
                 Finding finding = buildSqlErrorFinding(endpoint, "'" + segmentLabel + "' path parameter",
                         indicator, recheck,
                         "Use parameterized queries or an ORM with proper escaping for all database " +
@@ -413,9 +415,10 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         continue;
                     }
                     String ordinaryBody = buildJsonBody(fields, fieldValues, field, "\"" + ORDINARY_VALUE + "\"");
-                    SqlErrorRecheck recheck = recheckSqlError(endpoint,
-                            () -> sendRequest(endpoint, httpClient, ordinaryBody),
-                            () -> sendRequest(endpoint, httpClient, body));
+                    SqlErrorRecheck recheck = isTargetFault(response) ? SqlErrorRecheck.TARGET_FAULT
+                            : recheckSqlError(endpoint,
+                                    () -> sendRequest(endpoint, httpClient, ordinaryBody),
+                                    () -> sendRequest(endpoint, httpClient, body));
                     Finding finding = buildSqlErrorFinding(endpoint, "'" + field + "' field", indicator, recheck,
                             "Use parameterized queries or an ORM with proper escaping for all " +
                             "database access. Never concatenate user input directly into SQL " +
@@ -445,7 +448,38 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     /** What re-checking a database error seen in a payload's response showed. */
-    private enum SqlErrorRecheck { REPRODUCED, NOT_REPRODUCED, ORDINARY_VALUE_ALSO_ERRORS, RECHECK_FAILED }
+    private enum SqlErrorRecheck { REPRODUCED, NOT_REPRODUCED, ORDINARY_VALUE_ALSO_ERRORS, RECHECK_FAILED, TARGET_FAULT }
+
+    // Database errors that describe the target's own state (a table missing or being recreated, a
+    // locked database, a duplicate record), not a query broken by the payload. Seen live on VAmPI,
+    // where another check resets the tables mid-scan: "no such table: users" matched the generic
+    // "sqlalchemy.exc" indicator, and both re-check requests landed inside the reset.
+    private static final List<Pattern> TARGET_FAULT_PATTERNS = List.of(
+            Pattern.compile("no such table"),
+            Pattern.compile("table \\S+ already exists"),
+            Pattern.compile("database is locked"),
+            Pattern.compile("unique constraint failed"),
+            Pattern.compile("duplicate (key|entry)"),
+            Pattern.compile("deadlock detected"),
+            Pattern.compile("(relation|table) \"?\\S+\"? does not exist"));
+
+    // Text that only a query broken by the payload produces. If any of it is present, the error is
+    // evidence of injection even when a fault pattern above also appears.
+    private static final List<String> SYNTAX_ERROR_MARKERS = List.of(
+            "syntax error", "unrecognized token", "unterminated", "unclosed quotation",
+            "you have an error in your sql syntax", "unexpected token");
+
+    private static boolean isTargetFault(HttpResponse response) {
+        String body = response != null ? response.getBody() : null;
+        if (body == null) {
+            return false;
+        }
+        String lower = body.toLowerCase();
+        if (SYNTAX_ERROR_MARKERS.stream().anyMatch(lower::contains)) {
+            return false;
+        }
+        return TARGET_FAULT_PATTERNS.stream().anyMatch(p -> p.matcher(lower).find());
+    }
 
     @FunctionalInterface
     private interface Probe {
@@ -502,6 +536,17 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         "returned no database error. The first error may have been caused by something else " +
                         "happening on the target at that moment. Re-test this input manually.", where);
                 evidence += "; not reproduced on a second request with the same payload";
+            }
+            case TARGET_FAULT -> {
+                title = "SQL Injection Check Inconclusive";
+                severity = Severity.INFO;
+                description = String.format("The target returned a database error for a SQL injection payload in " +
+                        "the %s, but the error describes the target's own state (a missing or locked table, or " +
+                        "a duplicate record) and not a query broken by the payload. The target may be resetting " +
+                        "or recreating its database while it is scanned. Re-run the scan against a stable " +
+                        "target.", where);
+                evidence += "; the error text is a missing or locked table or a duplicate record, not a syntax " +
+                        "error caused by the payload";
             }
             case ORDINARY_VALUE_ALSO_ERRORS -> {
                 title = "SQL Injection Check Inconclusive";

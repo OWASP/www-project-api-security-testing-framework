@@ -742,7 +742,7 @@ class SqlNoSqlInjectionTestCaseTest {
     // --- Re-checking a database error before calling it SQL injection ---
 
     private static final String DB_ERROR =
-            "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: users";
+            "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) unrecognized token: \"'''\"";
 
     private EndpointInfo registerEndpoint() {
         EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
@@ -859,5 +859,63 @@ class SqlNoSqlInjectionTestCaseTest {
 
         assertFalse(bodies.isEmpty());
         assertTrue(bodies.stream().noneMatch(b -> b.contains("\"test\"")), "a body still used \"test\": " + bodies);
+    }
+
+    // --- Database errors that describe the target's own state ---
+
+    private static final String FAULT_ERROR =
+            "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) no such table: users";
+
+    @Test
+    @DisplayName("'no such table' on every request is INFO inconclusive, even if it repeats and an ordinary value is clean")
+    void testMissingTableErrorIsNeverCritical() throws IOException {
+        // Both the payload and its repeat land inside the target's table reset; the ordinary value does not.
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> ((String) inv.getArgument(3)).contains("astf-baseline-value")
+                        ? new HttpResponse(200, "{\"status\":\"success\"}", Map.of())
+                        : new HttpResponse(500, FAULT_ERROR, Map.of()));
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL), findings.toString());
+        Finding f = findings.stream().filter(x -> x.getTitle().equals("SQL Injection Check Inconclusive"))
+                .findFirst().orElseThrow(() -> new AssertionError("the signal must be kept: " + findings));
+        assertEquals(Severity.INFO, f.getSeverity());
+        assertTrue(f.getEvidence().contains("not a syntax error"));
+    }
+
+    @Test
+    @DisplayName("'table already exists', 'database is locked' and a duplicate record are target faults too")
+    void testOtherTargetFaultsAreNotInjection() throws IOException {
+        for (String error : List.of(
+                "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) table users already exists",
+                "sqlalchemy.exc.OperationalError: (sqlite3.OperationalError) database is locked",
+                "sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: users.username")) {
+            org.mockito.Mockito.reset(httpClient);
+            when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                    .thenAnswer(inv -> ((String) inv.getArgument(3)).contains("astf-baseline-value")
+                            ? new HttpResponse(200, "{}", Map.of())
+                            : new HttpResponse(500, error, Map.of()));
+
+            List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+            assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.CRITICAL),
+                    error + " -> " + findings);
+        }
+    }
+
+    @Test
+    @DisplayName("A real syntax error still confirms injection even if a fault phrase appears in the same body")
+    void testSyntaxErrorStillConfirmsInjection() throws IOException {
+        String realError = DB_ERROR + " (hint: no such table users_old)";
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> ((String) inv.getArgument(3)).contains("astf-baseline-value")
+                        ? new HttpResponse(200, "{}", Map.of())
+                        : new HttpResponse(500, realError, Map.of()));
+
+        List<Finding> findings = testCase.execute(registerEndpoint(), httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.CRITICAL
+                && f.getTitle().equals("SQL Injection Vulnerability")), findings.toString());
     }
 }
