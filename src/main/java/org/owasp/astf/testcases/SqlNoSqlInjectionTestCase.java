@@ -55,7 +55,6 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     );
 
     private static final List<String> CREDENTIAL_FIELD_NAMES = List.of("password", "pass", "pwd");
-    private static final List<String> AUTH_PATH_PATTERNS = List.of("login", "auth", "signin", "session");
 
     // A deliberately bogus value used to establish a "this should fail" baseline for the
     // generalized bypass check below — works for any field shape (credential, coupon code,
@@ -67,6 +66,15 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     // "failed" purely because of our own sentinel — and turn any successful payload on that
     // permissive endpoint into a false-positive CRITICAL bypass.
     private static final String NOSQL_BASELINE_INVALID_VALUE = "astf-nosql-baseline-value";
+
+    // Ordinary value sent in place of a SQL payload to check whether a database error is caused
+    // by the payload or by the target itself.
+    private static final String ORDINARY_VALUE = "astf-baseline-value";
+
+    // Value for body fields that are not under test. Deliberately not a plausible credential: the
+    // old "test" filler made register endpoints create a real test/test account mid-scan, which the
+    // broken-authentication check then reported as "Weak Default Credentials Accepted".
+    static final String FILLER_VALUE = "astf-filler";
 
     // Matches an unresolved OpenAPI path template placeholder, e.g. "/{username}" — the literal
     // placeholder text, injected into directly rather than resolved to a real value first (unlike
@@ -199,7 +207,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
         logger.info("Executing {} test on {}", getId(), endpoint);
 
         findings.addAll(testPathParameterSqlInjection(endpoint, httpClient));
-        if (!findings.isEmpty()) {
+        if (hasConfirmedFinding(findings)) {
             return findings;
         }
 
@@ -213,10 +221,59 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
         boolean isAuthLike = isAuthLikeEndpoint(endpoint);
 
         findings.addAll(testSqlInjection(endpoint, httpClient, targetFields, fieldValues));
-        if (findings.isEmpty()) {
-            findings.addAll(testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues, isAuthLike));
+        if (!hasConfirmedFinding(findings)) {
+            if (!isAuthLike) {
+                findings.addAll(testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                        false, Mode.CREDENTIALED));
+            } else {
+                // An authentication bypass is a claim about an attacker with no credentials, so
+                // on a login-like endpoint the probes are sent without any. If that shows no
+                // bypass and the scan has credentials (for example a gateway that wants an API
+                // key even for login), they are repeated with them, and a bypass seen only then
+                // is reported as reachable with the configured credentials at a lower severity.
+                List<Finding> anonymous = testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                        true, Mode.ANONYMOUS);
+                findings.addAll(anonymous);
+                boolean anonymousBypass = anonymous.stream().anyMatch(f -> f.getTitle().contains("Bypass"));
+                // On a path only one of the 2.0.2 and the word classifications calls login-like,
+                // 2.0.2 may have sent these probes as an ordinary credentialed request. With no
+                // configured credentials that request can still differ from the anonymous one (a
+                // cookie the target set during the scan), so it is sent as 2.0.2 sent it and
+                // reported with 2.0.2's title.
+                Mode retry = null;
+                if (!anonymousBypass && httpClient.hasConfiguredCredentials()) {
+                    retry = Mode.CREDENTIALED_AFTER_ANONYMOUS;
+                } else if (!anonymousBypass && PathKeywordMatcher.isSqlAuthLikeAmbiguous(endpoint.getPath())) {
+                    retry = Mode.CREDENTIALED;
+                }
+                if (retry != null) {
+                    boolean retryAuthLike = retry == Mode.CREDENTIALED
+                            ? PathKeywordMatcher.legacyIsSqlAuthLikePath(endpoint.getPath())
+                            : true;
+                    for (Finding f : testNoSqlInjection(endpoint, httpClient, targetFields, fieldValues,
+                            retryAuthLike, retry)) {
+                        if (findings.stream().noneMatch(existing -> existing.getTitle().equals(f.getTitle()))) {
+                            findings.add(f);
+                        }
+                    }
+                }
+            }
         }
         return findings;
+    }
+
+    /** How the NoSQL probes are sent, and how a bypass found that way is reported. */
+    private enum Mode {
+        /** With the scan's credentials; findings as before. */
+        CREDENTIALED,
+        /** Without any credentials (auth-like endpoints). */
+        ANONYMOUS,
+        /** With the scan's credentials after the anonymous pass found no bypass; bypass findings say so. */
+        CREDENTIALED_AFTER_ANONYMOUS
+    }
+
+    private static boolean hasConfirmedFinding(List<Finding> findings) {
+        return findings.stream().anyMatch(f -> f.getSeverity() == Severity.CRITICAL);
     }
 
     /**
@@ -255,44 +312,40 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             return findings; // no dynamic path segment to inject into at all
         }
 
+        String ordinaryUrl = buildUrl(endpoint, path.replace(segmentToReplace, "/" + ORDINARY_VALUE));
+        Finding unconfirmed = null;
         for (String payload : SQL_PAYLOADS) {
             try {
                 String encodedPayload = URLEncoder.encode(payload, StandardCharsets.UTF_8);
                 String injectedPath = path.replace(segmentToReplace, "/" + encodedPayload);
                 String url = buildUrl(endpoint, injectedPath);
 
-                HttpResponse response = sendRequestToUrl(endpoint, httpClient, url);
-                String body = response != null ? response.getBody() : null;
-                if (body == null) {
+                HttpResponse injected = sendRequestToUrl(endpoint, httpClient, url);
+                String indicator = findSqlErrorIndicator(injected);
+                if (indicator == null) {
                     continue;
                 }
-                String lower = body.toLowerCase();
-                for (String indicator : SQL_ERROR_INDICATORS) {
-                    if (lower.contains(indicator)) {
-                        Finding finding = new Finding(
-                                UUID.randomUUID().toString(),
-                                "SQL Injection Vulnerability",
-                                String.format("Submitting a SQL injection payload in the '%s' path parameter " +
-                                        "caused a database error message to appear in the response, " +
-                                        "indicating the value is passed into a SQL query without proper " +
-                                        "parameterization or sanitization.",
-                                        segmentLabel),
-                                Severity.CRITICAL,
-                                getId(),
-                                endpoint.getMethod() + " " + endpoint.getPath(),
-                                "Use parameterized queries or an ORM with proper escaping for all database " +
-                                "access, including path parameters. Never concatenate user input directly " +
-                                "into SQL statements, and disable verbose database error messages in production."
-                        );
-                        finding.setRequestDetails(endpoint.getMethod() + " " + url);
-                        finding.setEvidence("Database error pattern found: " + indicator);
-                        findings.add(finding);
-                        return findings;
-                    }
+                SqlErrorRecheck recheck = isTargetFault(injected) ? SqlErrorRecheck.TARGET_FAULT
+                        : recheckSqlError(endpoint,
+                                () -> sendRequestToUrl(endpoint, httpClient, ordinaryUrl),
+                                () -> sendRequestToUrl(endpoint, httpClient, url));
+                Finding finding = buildSqlErrorFinding(endpoint, "'" + segmentLabel + "' path parameter",
+                        indicator, recheck,
+                        "Use parameterized queries or an ORM with proper escaping for all database " +
+                        "access, including path parameters. Never concatenate user input directly " +
+                        "into SQL statements, and disable verbose database error messages in production.");
+                finding.setRequestDetails(endpoint.getMethod() + " " + url);
+                if (finding.getSeverity() == Severity.CRITICAL) {
+                    findings.add(finding);
+                    return findings;
                 }
+                unconfirmed = moreSevere(unconfirmed, finding);
             } catch (Exception e) {
                 logger.debug("Error testing path-parameter SQL injection on {}: {}", endpoint, e.getMessage());
             }
+        }
+        if (unconfirmed != null) {
+            findings.add(unconfirmed);
         }
         return findings;
     }
@@ -333,8 +386,10 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private boolean isAuthLikeEndpoint(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
-        return AUTH_PATH_PATTERNS.stream().anyMatch(path::contains);
+        // The word classification BrokenAuthenticationTestCase uses (so /api/authenticate or
+        // /api/userlogin get the anonymous-first bypass probes like /api/login does), or 2.0.2's
+        // substring list, so a path 2.0.2 treated as login-like still is.
+        return PathKeywordMatcher.isSqlAuthLike(endpoint.getPath());
     }
 
     private List<Finding> testSqlInjection(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
@@ -345,6 +400,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
         // it's sent below, so the behavioral fallback can reuse it instead of resending the exact
         // same request — avoids doubling live HTTP calls (and any side effects) per field.
         Map<String, HttpResponse> quoteResponseByField = new HashMap<>();
+        Finding unconfirmed = null;
 
         for (String field : fields) {
             for (String payload : SQL_PAYLOADS) {
@@ -354,46 +410,175 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                     if (payload.equals(SQL_PAYLOADS.get(0))) {
                         quoteResponseByField.put(field, response);
                     }
-                    String responseBody = response != null ? response.getBody() : null;
-
-                    if (responseBody != null) {
-                        String lower = responseBody.toLowerCase();
-                        for (String indicator : SQL_ERROR_INDICATORS) {
-                            if (lower.contains(indicator)) {
-                                Finding finding = new Finding(
-                                        UUID.randomUUID().toString(),
-                                        "SQL Injection Vulnerability",
-                                        String.format("Submitting a SQL injection payload in the '%s' field " +
-                                                "caused a database error message to appear in the response, " +
-                                                "indicating the value is passed into a SQL query without " +
-                                                "proper parameterization or sanitization.", field),
-                                        Severity.CRITICAL,
-                                        getId(),
-                                        endpoint.getMethod() + " " + endpoint.getPath(),
-                                        "Use parameterized queries or an ORM with proper escaping for all " +
-                                        "database access. Never concatenate user input directly into SQL " +
-                                        "statements, and disable verbose database error messages in production."
-                                );
-                                finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
-                                        "\nField: " + field + "\nPayload: " + payload);
-                                finding.setEvidence("Database error pattern found: " + indicator);
-                                findings.add(finding);
-                                return findings; // one confirmed injection is enough for this endpoint
-                            }
-                        }
+                    String indicator = findSqlErrorIndicator(response);
+                    if (indicator == null) {
+                        continue;
                     }
+                    String ordinaryBody = buildJsonBody(fields, fieldValues, field, "\"" + ORDINARY_VALUE + "\"");
+                    SqlErrorRecheck recheck = isTargetFault(response) ? SqlErrorRecheck.TARGET_FAULT
+                            : recheckSqlError(endpoint,
+                                    () -> sendRequest(endpoint, httpClient, ordinaryBody),
+                                    () -> sendRequest(endpoint, httpClient, body));
+                    Finding finding = buildSqlErrorFinding(endpoint, "'" + field + "' field", indicator, recheck,
+                            "Use parameterized queries or an ORM with proper escaping for all " +
+                            "database access. Never concatenate user input directly into SQL " +
+                            "statements, and disable verbose database error messages in production.");
+                    finding.setRequestDetails(endpoint.getMethod() + " " + endpoint.getFullUrl() +
+                            "\nField: " + field + "\nPayload: " + payload);
+                    if (finding.getSeverity() == Severity.CRITICAL) {
+                        findings.add(finding);
+                        return findings; // one confirmed injection is enough for this endpoint
+                    }
+                    unconfirmed = moreSevere(unconfirmed, finding);
                 } catch (Exception e) {
                     logger.debug("Error testing SQL injection on {} field {}: {}", endpoint, field, e.getMessage());
                 }
             }
         }
 
-        if (findings.isEmpty()) {
-            findings.addAll(testSqlInjectionBehavioral(endpoint, httpClient, fields, fieldValues,
-                    quoteResponseByField));
+        // No confirmed error-based injection: report the unconfirmed one (if any) and still run the
+        // behavioral check, so a weaker signal never hides a 500-only injection.
+        if (unconfirmed != null) {
+            findings.add(unconfirmed);
         }
+        findings.addAll(testSqlInjectionBehavioral(endpoint, httpClient, fields, fieldValues,
+                quoteResponseByField));
 
         return findings;
+    }
+
+    /** What re-checking a database error seen in a payload's response showed. */
+    private enum SqlErrorRecheck { REPRODUCED, NOT_REPRODUCED, ORDINARY_VALUE_ALSO_ERRORS, RECHECK_FAILED, TARGET_FAULT }
+
+    // Database errors that describe the target's own state (a table missing or being recreated, a
+    // locked database, a duplicate record), not a query broken by the payload. Seen live on VAmPI,
+    // where another check resets the tables mid-scan: "no such table: users" matched the generic
+    // "sqlalchemy.exc" indicator, and both re-check requests landed inside the reset.
+    private static final List<Pattern> TARGET_FAULT_PATTERNS = List.of(
+            Pattern.compile("no such table"),
+            Pattern.compile("table \\S+ already exists"),
+            Pattern.compile("database is locked"),
+            Pattern.compile("unique constraint failed"),
+            Pattern.compile("duplicate (key|entry)"),
+            Pattern.compile("deadlock detected"),
+            Pattern.compile("(relation|table) \"?\\S+\"? does not exist"));
+
+    // Text that only a query broken by the payload produces. If any of it is present, the error is
+    // evidence of injection even when a fault pattern above also appears.
+    private static final List<String> SYNTAX_ERROR_MARKERS = List.of(
+            "syntax error", "unrecognized token", "unterminated", "unclosed quotation",
+            "you have an error in your sql syntax", "unexpected token");
+
+    private static boolean isTargetFault(HttpResponse response) {
+        String body = response != null ? response.getBody() : null;
+        if (body == null) {
+            return false;
+        }
+        String lower = body.toLowerCase();
+        if (SYNTAX_ERROR_MARKERS.stream().anyMatch(lower::contains)) {
+            return false;
+        }
+        return TARGET_FAULT_PATTERNS.stream().anyMatch(p -> p.matcher(lower).find());
+    }
+
+    @FunctionalInterface
+    private interface Probe {
+        HttpResponse send() throws IOException;
+    }
+
+    private static String findSqlErrorIndicator(HttpResponse response) {
+        String body = response != null ? response.getBody() : null;
+        if (body == null) {
+            return null;
+        }
+        String lower = body.toLowerCase();
+        for (String indicator : SQL_ERROR_INDICATORS) {
+            if (lower.contains(indicator)) {
+                return indicator;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A database error in the response is not proof on its own that the payload caused it. A
+     * target whose tables are being reset answers every request with a database error for a
+     * moment (seen live: another check in the same scan calls VAmPI's {@code GET /createdb}, and a
+     * register request landing during the reset got "sqlalchemy.exc ... no such table: users",
+     * which was reported as a CRITICAL SQL injection that does not reproduce). Before calling it
+     * SQL injection, send an ordinary value in the same place, then the payload again.
+     */
+    private SqlErrorRecheck recheckSqlError(EndpointInfo endpoint, Probe ordinaryValue, Probe payloadAgain) {
+        try {
+            if (findSqlErrorIndicator(ordinaryValue.send()) != null) {
+                return SqlErrorRecheck.ORDINARY_VALUE_ALSO_ERRORS;
+            }
+            return findSqlErrorIndicator(payloadAgain.send()) != null
+                    ? SqlErrorRecheck.REPRODUCED : SqlErrorRecheck.NOT_REPRODUCED;
+        } catch (Exception e) {
+            logger.debug("SQL injection re-check failed on {}, keeping the finding: {}", endpoint, e.getMessage());
+            return SqlErrorRecheck.RECHECK_FAILED;
+        }
+    }
+
+    private Finding buildSqlErrorFinding(EndpointInfo endpoint, String where, String indicator,
+                                         SqlErrorRecheck recheck, String remediation) {
+        String title;
+        String description;
+        Severity severity;
+        String evidence = "Database error pattern found: " + indicator;
+        switch (recheck) {
+            case NOT_REPRODUCED -> {
+                title = "Possible SQL Injection (not reproducible)";
+                severity = Severity.MEDIUM;
+                description = String.format("A SQL injection payload in the %s produced a database error once, " +
+                        "but the same payload sent again did not, and an ordinary value in the same place " +
+                        "returned no database error. The first error may have been caused by something else " +
+                        "happening on the target at that moment. Re-test this input manually.", where);
+                evidence += "; not reproduced on a second request with the same payload";
+            }
+            case TARGET_FAULT -> {
+                title = "SQL Injection Check Inconclusive";
+                severity = Severity.INFO;
+                description = String.format("The target returned a database error for a SQL injection payload in " +
+                        "the %s, but the error describes the target's own state (a missing or locked table, or " +
+                        "a duplicate record) and not a query broken by the payload. The target may be resetting " +
+                        "or recreating its database while it is scanned. Re-run the scan against a stable " +
+                        "target.", where);
+                evidence += "; the error text is a missing or locked table or a duplicate record, not a syntax " +
+                        "error caused by the payload";
+            }
+            case ORDINARY_VALUE_ALSO_ERRORS -> {
+                title = "SQL Injection Check Inconclusive";
+                severity = Severity.INFO;
+                description = String.format("A database error appeared for a SQL injection payload in the %s, " +
+                        "but an ordinary value in the same place also produced a database error, so the error " +
+                        "cannot be attributed to the payload. The target may be failing for an unrelated reason " +
+                        "(for example, its database being reset). Re-run the scan against a stable target.", where);
+                evidence += "; an ordinary value (" + ORDINARY_VALUE + ") also returned a database error";
+            }
+            default -> {
+                title = "SQL Injection Vulnerability";
+                severity = Severity.CRITICAL;
+                description = String.format("Submitting a SQL injection payload in the %s caused a database " +
+                        "error message to appear in the response, indicating the value is passed into a SQL " +
+                        "query without proper parameterization or sanitization.", where);
+                evidence += recheck == SqlErrorRecheck.REPRODUCED
+                        ? "; reproduced on a second request, and an ordinary value returned no database error"
+                        : "; the re-check request failed, so the finding is kept as first observed";
+            }
+        }
+        Finding finding = new Finding(UUID.randomUUID().toString(), title, description, severity, getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(), remediation);
+        finding.setEvidence(evidence);
+        return finding;
+    }
+
+    private static Finding moreSevere(Finding current, Finding candidate) {
+        if (current == null || candidate.getSeverity().ordinal() < current.getSeverity().ordinal()) {
+            return candidate;
+        }
+        return current;
     }
 
     /**
@@ -460,7 +645,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
 
     private List<Finding> testNoSqlInjection(EndpointInfo endpoint, HttpClient httpClient,
                                               List<String> fields, Map<String, JsonNode> fieldValues,
-                                              boolean isAuthLike) {
+                                              boolean isAuthLike, Mode mode) {
         List<Finding> findings = new ArrayList<>();
 
         List<String> allPayloads = new ArrayList<>(NOSQL_OPERATOR_PAYLOADS.size() +
@@ -488,7 +673,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
             for (String payload : allPayloads) {
                 try {
                     String body = buildJsonBody(fields, fieldValues, field, payload);
-                    HttpResponse response = sendRequest(endpoint, httpClient, body);
+                    HttpResponse response = sendRequest(endpoint, httpClient, body, mode);
                     String responseBody = response != null ? response.getBody() : null;
                     if (response == null || responseBody == null) {
                         continue;
@@ -521,7 +706,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             try {
                                 baseline = sendRequest(endpoint, httpClient,
                                         buildJsonBody(fields, fieldValues, field,
-                                                "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
+                                                "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""), mode);
                             } catch (Exception e) {
                                 logger.debug("Error sending NoSQL baseline request on {} field {}: {}",
                                         endpoint, field, e.getMessage());
@@ -541,7 +726,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         // at most once per reported finding, and treat a baseline that no longer
                         // fails as inconclusive.
                         boolean stillFails = baselineFailed && baselineStillFails(endpoint, httpClient, fields,
-                                fieldValues, field, baselineResponseByField);
+                                fieldValues, field, baselineResponseByField, mode);
                         if (baselineFailed && !stillFails) {
                             // The target answers the invalid baseline differently now than earlier in
                             // the scan, so this result cannot be attributed to the operator. Report it
@@ -571,9 +756,11 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                         if (stillFails) {
                             boolean isCredentialField =
                                     CREDENTIAL_FIELD_NAMES.stream().anyMatch(field::equalsIgnoreCase);
-                            String title = (isAuthLike && isCredentialField)
+                            boolean credentialedOnly = mode == Mode.CREDENTIALED_AFTER_ANONYMOUS;
+                            String suffix = credentialedOnly ? AnonymousFirstProbe.CREDENTIALED_SUFFIX : "";
+                            String title = ((isAuthLike && isCredentialField)
                                     ? "NoSQL Injection — Authentication Bypass"
-                                    : "NoSQL Injection — Authorization/Logic Bypass";
+                                    : "NoSQL Injection — Authorization/Logic Bypass") + suffix;
                             String evidence = "Request succeeded (HTTP " + response.getStatusCode() + ") when the '" +
                                     field + "' field was replaced with a NoSQL query operator, while an " +
                                     "ordinary invalid value on the same field failed (HTTP " +
@@ -584,15 +771,22 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                             // and the fresh baseline still fails because the record now exists. That
                             // depends on request order, so it is reported as a possible bypass at MEDIUM,
                             // not CRITICAL. Nothing is dropped.
-                            if (payloadSucceedsAgain(endpoint, httpClient, body)) {
+                            if (credentialedOnly) {
+                                evidence += ". Requests without credentials were rejected; these requests carried " +
+                                        "the scan's configured credentials";
+                            } else if (mode == Mode.ANONYMOUS) {
+                                evidence += ". Requests were sent without any credentials";
+                            }
+                            if (payloadSucceedsAgain(endpoint, httpClient, body, mode)) {
                                 findings.add(buildNoSqlFinding(endpoint, field, payload, evidence,
-                                        Severity.CRITICAL, title));
+                                        credentialedOnly ? Severity.HIGH : Severity.CRITICAL, title));
                             } else {
                                 findings.add(buildNoSqlFinding(endpoint, field, payload, evidence +
                                         ". Re-sending the same payload did not succeed again, so this may be a " +
                                         "one-off state change (for example a record created by the first request) " +
                                         "and not an injection; verify manually",
-                                        Severity.MEDIUM, "NoSQL Injection — Possible Bypass (not reproducible)"));
+                                        credentialedOnly ? Severity.LOW : Severity.MEDIUM,
+                                        "NoSQL Injection — Possible Bypass (not reproducible)" + suffix));
                             }
                             continue nextField;
                         }
@@ -631,7 +825,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     /**
      * Builds a JSON body with {@code targetField} set to {@code rawValueJson} and every other
      * known field set to its original value from {@code originalValues} when available (falling
-     * back to a benign {@code "test"} string when the original type is unknown — e.g. the
+     * back to {@link #FILLER_VALUE} when the original type is unknown — e.g. the
      * {@code COMMON_BODY_FIELDS} fallback, which has no real request body to draw from).
      * <p>
      * Preserving sibling fields' real JSON type (rather than flattening every non-target field to
@@ -653,7 +847,7 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
                 // unknown" entry — same benign default either way. A real JSON null in the
                 // discovered body is a NullNode (non-null here), so it's preserved as null.
                 JsonNode original = originalValues.get(field);
-                sb.append(original != null ? original.toString() : "\"test\"");
+                sb.append(original != null ? original.toString() : "\"" + FILLER_VALUE + "\"");
             }
         }
         sb.append("}");
@@ -730,11 +924,11 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      */
     private boolean baselineStillFails(EndpointInfo endpoint, HttpClient httpClient, List<String> fields,
                                        Map<String, JsonNode> fieldValues, String field,
-                                       Map<String, HttpResponse> baselineResponseByField) {
+                                       Map<String, HttpResponse> baselineResponseByField, Mode mode) {
         HttpResponse fresh;
         try {
             fresh = sendRequest(endpoint, httpClient,
-                    buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""));
+                    buildJsonBody(fields, fieldValues, field, "\"" + NOSQL_BASELINE_INVALID_VALUE + "\""), mode);
         } catch (Exception e) {
             // No new evidence: keep the decision from the cached baseline, so a transient error on
             // this extra request never drops a real result.
@@ -759,9 +953,9 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
      * Whether re-sending the same payload request still gets a success with no failure signal.
      * Called only when a bypass is about to be reported, so at most one extra request per finding.
      */
-    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody) {
+    private boolean payloadSucceedsAgain(EndpointInfo endpoint, HttpClient httpClient, String payloadBody, Mode mode) {
         try {
-            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody);
+            HttpResponse again = sendRequest(endpoint, httpClient, payloadBody, mode);
             String againBody = again != null ? again.getBody() : null;
             return again != null && againBody != null && again.isSuccess() && !containsFailureMarker(againBody);
         } catch (Exception e) {
@@ -805,9 +999,22 @@ public class SqlNoSqlInjectionTestCase implements TestCase {
     }
 
     private HttpResponse sendRequest(EndpointInfo endpoint, HttpClient httpClient, String body) throws IOException {
+        return sendRequest(endpoint, httpClient, body, Mode.CREDENTIALED);
+    }
+
+    /** {@link Mode#ANONYMOUS} sends the request with no credentials of any kind. */
+    private HttpResponse sendRequest(EndpointInfo endpoint, HttpClient httpClient, String body, Mode mode)
+            throws IOException {
         String url = endpoint.getFullUrl();
         String contentType = endpoint.getContentType() != null ? endpoint.getContentType() : "application/json";
-        return switch (endpoint.getMethod().toUpperCase()) {
+        String method = endpoint.getMethod().toUpperCase();
+        if (mode == Mode.ANONYMOUS) {
+            return switch (method) {
+                case "POST", "PUT", "PATCH" -> httpClient.sendWithStatusNoAuth(method, url, contentType, body);
+                default -> null;
+            };
+        }
+        return switch (method) {
             case "POST"  -> httpClient.postWithStatus(url, Map.of(), contentType, body);
             case "PUT"   -> httpClient.putWithStatus(url, Map.of(), contentType, body);
             case "PATCH" -> httpClient.patchWithStatus(url, Map.of(), contentType, body);

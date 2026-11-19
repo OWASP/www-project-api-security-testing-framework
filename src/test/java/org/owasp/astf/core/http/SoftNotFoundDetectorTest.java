@@ -390,4 +390,25 @@ class SoftNotFoundDetectorTest {
     void testIsApiResponseNull() {
         assertFalse(SoftNotFoundDetector.isApiResponse(null));
     }
+
+    @Test
+    @DisplayName("Anonymous baseline is fetched without credentials and cached apart from the credentialed one")
+    void testAnonymousBaselineSeparate() throws IOException {
+        String signIn = "{\"message\":\"Please sign in to continue\"}";
+        // Login wall: anonymous callers get the sign-in page everywhere; authenticated callers 404.
+        when(httpClient.getWithStatusNoAuth(argThat(SoftNotFoundDetectorTest::isProbe)))
+                .thenReturn(ok(signIn, "application/json"));
+        targetAnswers404ForUnknownPaths();
+
+        HttpResponse anonymousHit = ok(signIn, "application/json");
+
+        assertTrue(detector.looksLikeUnknownPath(BASE_URL, httpClient, anonymousHit, true),
+                "an anonymous probe that got the sign-in page is the login wall answering");
+        assertFalse(detector.looksLikeUnknownPath(BASE_URL, httpClient, anonymousHit, false),
+                "the credentialed baseline (404s) must not be replaced by the anonymous one");
+        assertTrue(detector.looksLikeUnknownPath(BASE_URL, httpClient, anonymousHit, true));
+
+        verify(httpClient, times(2)).getWithStatusNoAuth(argThat(SoftNotFoundDetectorTest::isProbe));
+        verify(httpClient, times(2)).getWithStatus(argThat(SoftNotFoundDetectorTest::isProbe), anyMap());
+    }
 }

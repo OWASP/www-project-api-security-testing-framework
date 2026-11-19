@@ -212,30 +212,48 @@ public class SecurityMisconfigurationTestCase implements TestCase {
         for (String debugPath : DEBUG_ENDPOINTS) {
             String testUrl = cleanBase + debugPath;
             try {
-                HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
-
                 // A 2xx here only means the path is exposed if this target actually
                 // distinguishes real paths from unknown ones. An SPA/reverse-proxy catch-all
                 // answers 200 with the same app shell for all 30 of the paths probed below, and
                 // an API gateway default route answers 200 with a JSON "not found" envelope —
                 // either way every single probe would otherwise be reported, most of them HIGH.
+                // Sent without credentials first, since the finding says "publicly accessible".
+                // Each response is compared with an unknown-path baseline fetched the same way
+                // (anonymous or with credentials), so a login wall that answers every anonymous
+                // request with the same sign-in page is not read as 30 exposed endpoints.
+                AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, testUrl,
+                        () -> httpClient.getWithStatusNoAuth(testUrl),
+                        () -> httpClient.getWithStatus(testUrl, Map.of()),
+                        r -> r.isSuccess() && !r.getBody().isEmpty()
+                                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r, true));
+                HttpResponse response = probe.response();
+
                 if (response != null && response.isSuccess()
                         && !response.getBody().isEmpty()
-                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response)) {
+                        && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response,
+                                probe.anonymous())) {
                     boolean conventionallyPublic = CONVENTIONALLY_PUBLIC_ENDPOINTS.contains(debugPath);
+                    boolean anonymous = probe.anonymous();
+                    Severity severity = conventionallyPublic
+                            ? (anonymous ? Severity.LOW : Severity.INFO)
+                            : (anonymous ? Severity.HIGH : Severity.MEDIUM);
                     Finding finding = new Finding(
                             UUID.randomUUID().toString(),
-                            "Debug/Diagnostic Endpoint Exposed",
-                            String.format("The debug or diagnostic endpoint '%s' is publicly accessible " +
+                            anonymous ? "Debug/Diagnostic Endpoint Exposed"
+                                    : "Debug/Diagnostic Endpoint Exposed" + probe.suffix(),
+                            String.format("The debug or diagnostic endpoint '%s' %s " +
                                     "and returned a non-empty response.%s",
                                     debugPath,
+                                    anonymous ? "is publicly accessible"
+                                            : "rejected a request without credentials but answered one sent " +
+                                              probe.sentWith(),
                                     conventionallyPublic
                                             ? " This path is conventionally public (e.g. container " +
                                               "orchestration health checks) — verify it doesn't leak " +
                                               "internal details beyond a basic status."
                                             : " Debug endpoints can expose sensitive configuration, " +
                                               "environment variables, internal routes, and system internals."),
-                            conventionallyPublic ? Severity.LOW : Severity.HIGH,
+                            severity,
                             getId(),
                             "GET " + debugPath,
                             conventionallyPublic
@@ -245,7 +263,8 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                                       "If these endpoints are required, protect them with authentication and " +
                                       "restrict access to internal networks or VPN only."
                     );
-                    finding.setRequestDetails("GET " + testUrl);
+                    finding.setRequestDetails("GET " + testUrl +
+                            (anonymous ? " (no credentials)" : " (" + probe.sentWith() + ")"));
                     finding.setResponseDetails("HTTP " + response.getStatusCode() +
                             "; body length: " + response.getBody().length());
                     findings.add(finding);

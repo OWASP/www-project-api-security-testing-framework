@@ -130,6 +130,9 @@ class SecurityMisconfigurationTestCaseTest {
                     return new HttpResponse(404, "{}", Map.of());
                 });
 
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Debug") || f.getTitle().contains("Endpoint")),
@@ -150,6 +153,9 @@ class SecurityMisconfigurationTestCaseTest {
                     }
                     return new HttpResponse(404, "{}", Map.of());
                 });
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -248,6 +254,9 @@ class SecurityMisconfigurationTestCaseTest {
                     }
                     return catchAll;
                 });
+
+        // The target answers the same without credentials as with them.
+        OpenTargetStubs.answerNoAuthLikeCredentialed(httpClient);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 

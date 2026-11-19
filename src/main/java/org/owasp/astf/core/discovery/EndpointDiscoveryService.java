@@ -1,6 +1,9 @@
 package org.owasp.astf.core.discovery;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -20,6 +23,7 @@ import org.owasp.astf.core.http.SoftNotFoundDetector;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
 /**
  * Service responsible for discovering API endpoints through various methods.
@@ -127,6 +131,25 @@ public class EndpointDiscoveryService {
         Set<EndpointInfo> discoveredEndpoints = new HashSet<>();
 
         try {
+            // Strategy 0: a specification the user pointed at. It replaces the search for one, but if
+            // it cannot be read the scan carries on with automatic discovery, so a typo in the path
+            // never leaves the target untested.
+            String configuredSpec = config.getOpenApiSpec();
+            if (configuredSpec != null && !configuredSpec.isBlank()) {
+                List<EndpointInfo> configured = discoverFromConfiguredSpec(configuredSpec.trim());
+                if (!configured.isEmpty()) {
+                    logger.info("Found {} endpoints in the specification {}", configured.size(), configuredSpec);
+                    return configured;
+                }
+                if (!config.isDiscoveryEnabled()) {
+                    logger.warn("No endpoints could be read from the specification {} and discovery is " +
+                            "disabled, so there is nothing to scan.", configuredSpec);
+                    return new ArrayList<>();
+                }
+                logger.warn("No endpoints could be read from the specification {}; falling back to " +
+                        "automatic discovery.", configuredSpec);
+            }
+
             // Strategy 1: Try to find and parse OpenAPI/Swagger specifications
             logger.debug("Attempting to discover OpenAPI/Swagger specifications");
             List<EndpointInfo> specEndpoints = discoverFromSpecifications();
@@ -167,6 +190,73 @@ public class EndpointDiscoveryService {
         }
 
         return new ArrayList<>(discoveredEndpoints);
+    }
+
+    /**
+     * Reads endpoints from the specification the user named: a URL or a local file. A URL goes through the HTTP client, so the scan's credentials are only sent to the
+     * target (or a {@code scopeHosts} entry). Returns an empty list, with a warning saying why, when
+     * nothing usable can be read.
+     */
+    private List<EndpointInfo> discoverFromConfiguredSpec(String reference) {
+        String text;
+        try {
+            if (reference.startsWith("http://") || reference.startsWith("https://")) {
+                text = fetchSpec(reference);
+            } else {
+                Path file = Path.of(reference);
+                if (Files.isRegularFile(file)) {
+                    text = Files.readString(file, StandardCharsets.UTF_8);
+                } else {
+                    logger.warn("The specification file {} does not exist.", reference);
+                    return new ArrayList<>();
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Could not read the specification {}: {}", reference, e.getMessage());
+            return new ArrayList<>();
+        }
+        if (text == null || text.isBlank()) {
+            return new ArrayList<>();
+        }
+
+        String json = specToJson(text);
+        if (json == null) {
+            logger.warn("{} is not an OpenAPI or Swagger document (expected JSON or YAML with a top-level " +
+                    "\"openapi\" or \"swagger\" key).", reference);
+            return new ArrayList<>();
+        }
+        List<EndpointInfo> endpoints = parseOpenApiSpec(json);
+        if (endpoints.isEmpty()) {
+            logger.warn("The specification {} lists no endpoints.", reference);
+        }
+        return endpoints;
+    }
+
+    private String fetchSpec(String url) throws IOException {
+        HttpResponse response = httpClient.getWithStatus(url, Map.of());
+        if (response == null || !response.isSuccess() || response.getBody() == null) {
+            logger.warn("Could not fetch the specification {} (HTTP {}).", url,
+                    response == null ? "no response" : String.valueOf(response.getStatusCode()));
+            return null;
+        }
+        return response.getBody();
+    }
+
+    /** Returns the specification as JSON text, converting YAML, or null if it is not a specification. */
+    private String specToJson(String text) {
+        try {
+            String trimmed = text.trim();
+            JsonNode root = trimmed.startsWith("{")
+                    ? objectMapper.readTree(trimmed)
+                    : new ObjectMapper(new YAMLFactory()).readTree(trimmed);
+            if (root == null || !root.isObject() || !(root.has("openapi") || root.has("swagger"))) {
+                return null;
+            }
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            logger.debug("Specification is neither JSON nor YAML: {}", e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -279,13 +369,7 @@ public class EndpointDiscoveryService {
                             if (Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
                                     .contains(method)) {
 
-                                boolean requiresAuth = false;
-
-                                // Check for security requirements
-                                JsonNode security = methodEntry.getValue().path("security");
-                                if (!security.isMissingNode() && security.isArray() && security.size() > 0) {
-                                    requiresAuth = true;
-                                }
+                                boolean requiresAuth = resolveEffectiveSecurity(root, methodEntry.getValue());
 
                                 EndpointInfo endpoint = new EndpointInfo(
                                         path, method, "application/json", null, requiresAuth);
@@ -303,6 +387,35 @@ public class EndpointDiscoveryService {
         }
 
         return endpoints;
+    }
+
+    /**
+     * Resolves whether an OpenAPI 3.x operation requires authentication, following the
+     * specification's inheritance rules rather than looking at the operation alone (which made
+     * every operation of a spec with only root-level security look public, so the auth checks
+     * that only run on protected endpoints skipped all of them).
+     *
+     * <ol>
+     *   <li>The operation's own {@code security}, when present: a non-empty array requires auth,
+     *       an explicit empty array {@code []} marks it public.</li>
+     *   <li>Otherwise the root {@code security}, with the same meaning.</li>
+     *   <li>Otherwise it is public. Defining {@code components.securitySchemes} does not by itself
+     *       require anything: a scheme only applies where a {@code security} requirement names it,
+     *       so an operation that declares none is public (VAmPI marks only its protected
+     *       operations, and treating the rest as protected reported them as missing
+     *       authentication).</li>
+     * </ol>
+     */
+    static boolean resolveEffectiveSecurity(JsonNode root, JsonNode operation) {
+        JsonNode opSecurity = operation == null ? null : operation.get("security");
+        if (opSecurity != null && opSecurity.isArray()) {
+            return opSecurity.size() > 0;
+        }
+        JsonNode rootSecurity = root == null ? null : root.get("security");
+        if (rootSecurity != null && rootSecurity.isArray()) {
+            return rootSecurity.size() > 0;
+        }
+        return false;
     }
 
     /**

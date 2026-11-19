@@ -481,10 +481,12 @@ class HttpClientTest {
     }
 
     @Test
-    @DisplayName("getWithStatusNoAuth should still send non-credential default headers")
-    void testGetWithStatusNoAuthKeepsNonCredentialDefaultHeaders() throws Exception {
+    @DisplayName("getWithStatusNoAuth sends configured protocol headers but no other custom header")
+    void testGetWithStatusNoAuthKeepsOnlyProtocolDefaultHeaders() throws Exception {
         config.setBearerToken("secret-token");
-        config.addHeader("X-Custom-Static-Header", "keep-me");
+        config.addHeader("X-Custom-Static-Header", "drop-me");
+        config.addHeader("Accept", "application/json");
+        config.addHeader("Accept-Encoding", "identity");
         client = new HttpClient(config);
         server.enqueue(new MockResponse().setResponseCode(401));
 
@@ -492,8 +494,10 @@ class HttpClientTest {
 
         RecordedRequest recorded = server.takeRequest();
         assertNull(recorded.getHeader("Authorization"));
-        assertEquals("keep-me", recorded.getHeader("X-Custom-Static-Header"),
-                "non-credential default headers should still be sent on a NoAuth request");
+        assertNull(recorded.getHeader("X-Custom-Static-Header"),
+                "a user-configured custom header may identify the user, so a NoAuth request leaves it off");
+        assertEquals("application/json", recorded.getHeader("Accept"));
+        assertEquals("identity", recorded.getHeader("Accept-Encoding"));
     }
 
     // -------------------------------------------------------------------------
