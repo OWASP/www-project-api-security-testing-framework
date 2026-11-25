@@ -10,7 +10,7 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Fixed
 
-- **Open redirect detection never saw 3xx responses**. The default HTTP client followed redirects before `testOpenRedirect` could inspect them, so a 302 to an attacker `Location` produced zero findings. Open-redirect probes now use a dedicated non-following client; detection requires an absolute `Location` whose host is the injected external host (relative and same-host redirects are ignored).
+- **Open redirect detection never saw 3xx responses**. The default HTTP client followed redirects before `testOpenRedirect` could inspect them, so a 302 to an attacker `Location` produced zero findings. Open-redirect probes now use a dedicated non-following client; detection requires a `Location` that sends the browser to the injected external host: an absolute URL, or a scheme-relative one (`//host`, `/\host`, `\\host`) that browsers resolve to another host. Relative paths and same-host redirects are ignored.
 
 ## 2.0.2 (patch)
 
