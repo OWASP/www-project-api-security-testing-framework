@@ -2,11 +2,14 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -15,6 +18,10 @@ import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
  * Tests for API7:2023 Server Side Request Forgery (SSRF).
@@ -55,6 +62,24 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
             "root:x:", "www-data",                                  // /etc/passwd content
             "docker", "kubernetes", "k8s"                          // container environment
     );
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    // GCP/Azure metadata endpoints require a dedicated header; an error naming that header
+    // proves the server reached the metadata service even though the fetch itself failed.
+    private static final List<String> METADATA_HEADER_REQUIRED_INDICATORS = List.of(
+            "missing metadata-flavor: google header",
+            "missing metadata-flavor:google header",
+            "required metadata header not specified"
+    );
+
+    // Field names treated as URL-shaped when substituting into a discovered JSON body
+    private static final Set<String> URL_SHAPED_FIELD_NAMES = Set.of(
+            "url", "uri", "link", "href", "callback", "webhook", "endpoint", "target",
+            "image", "avatar", "src", "feed", "redirect", "host"
+    );
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public String getId() {
@@ -100,24 +125,43 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                         param + "=" + urlEncode(payload);
                 try {
                     HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
+                    if (response == null) {
+                        continue;
+                    }
 
-                    String indicator = response == null ? null
-                            : newSsrfIndicator(response.getBody(), payload, baselineBody, baselineIndicators);
+                    String metaIndicator = newMetadataHeaderIndicator(
+                            response.getBody(), payload, baselineBody, baselineIndicators);
+                    if (metaIndicator != null) {
+                        String freshBaseline = fetchBaselineBody(endpoint, httpClient);
+                        if (freshBaseline.toLowerCase(Locale.ROOT)
+                                .contains(metaIndicator.toLowerCase(Locale.ROOT))) {
+                            logger.debug("Metadata-header indicator '{}' on {} also appears in a fresh baseline, not reporting",
+                                    metaIndicator, endpoint);
+                            baselineBody = freshBaseline;
+                            baselineIndicators = indicatorsIn(freshBaseline);
+                            continue;
+                        }
+                        findings.add(buildMetadataHeaderFinding(
+                                endpoint, "query", param, payload, "GET " + testUrl, metaIndicator));
+                        return findings;
+                    }
+
+                    String indicator = newSsrfIndicator(
+                            response.getBody(), payload, baselineBody, baselineIndicators);
                     if (indicator != null) {
                         // Content can change during a scan (another check posts data that the endpoint
                         // then lists). If the endpoint's normal response now contains the same
                         // indicator, it is not attributable to the payload: refresh the baseline and
                         // keep testing.
                         String freshBaseline = fetchBaselineBody(endpoint, httpClient);
-                        if (freshBaseline.toLowerCase().contains(indicator.toLowerCase())) {
+                        if (freshBaseline.toLowerCase(Locale.ROOT)
+                                .contains(indicator.toLowerCase(Locale.ROOT))) {
                             logger.debug("SSRF indicator '{}' on {} also appears in a fresh baseline, not reporting",
                                     indicator, endpoint);
                             baselineBody = freshBaseline;
                             baselineIndicators = indicatorsIn(freshBaseline);
                             continue;
                         }
-                    }
-                    if (indicator != null) {
                         // A non-2xx body with new metadata content is usually a validation error that
                         // mentions an indicator word, but a proxy that relays the upstream status can
                         // also return real metadata with a 4xx/5xx. Report it as possible, not drop it.
@@ -154,7 +198,7 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
 
     private List<Finding> testBodyParameterSsrf(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
-        String method = endpoint.getMethod().toUpperCase();
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
 
         if (!method.equals("POST") && !method.equals("PUT") && !method.equals("PATCH")) {
             return findings;
@@ -163,65 +207,204 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         String baselineBody = fetchBaselineBody(endpoint, httpClient);
         Set<String> baselineIndicators = indicatorsIn(baselineBody);
 
+        ObjectNode discoveredBody = parseDiscoveredObjectBody(endpoint);
+        if (discoveredBody != null) {
+            for (String payload : SSRF_PAYLOADS) {
+                String body = buildBodyKeepingFields(discoveredBody, payload);
+                BodyProbeOutcome outcome = probeBody(endpoint, httpClient, method, body, payload,
+                        "url-shaped fields", baselineBody, baselineIndicators);
+                if (outcome.freshBaseline() != null) {
+                    baselineBody = outcome.freshBaseline();
+                    baselineIndicators = indicatorsIn(baselineBody);
+                    continue;
+                }
+                if (outcome.finding() != null) {
+                    findings.add(outcome.finding());
+                    return findings;
+                }
+            }
+            return findings;
+        }
+
+        // No discovered JSON object body: keep the historical single-field probe over URL_PARAMETERS
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
                 String body = String.format("{\"%s\":\"%s\"}", param, payload);
-                try {
-                    HttpResponse response = switch (method) {
-                        case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        case "PATCH" -> httpClient.patchWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        default      -> null;
-                    };
-
-                    String indicator = response == null ? null
-                            : newSsrfIndicator(response.getBody(), payload, baselineBody, baselineIndicators);
-                    if (indicator != null) {
-                        // Content can change during a scan (another check posts data that the endpoint
-                        // then lists). If the endpoint's normal response now contains the same
-                        // indicator, it is not attributable to the payload: refresh the baseline and
-                        // keep testing.
-                        String freshBaseline = fetchBaselineBody(endpoint, httpClient);
-                        if (freshBaseline.toLowerCase().contains(indicator.toLowerCase())) {
-                            logger.debug("SSRF indicator '{}' on {} also appears in a fresh baseline, not reporting",
-                                    indicator, endpoint);
-                            baselineBody = freshBaseline;
-                            baselineIndicators = indicatorsIn(freshBaseline);
-                            continue;
-                        }
-                    }
-                    if (indicator != null) {
-                        // A non-2xx body with new metadata content is usually a validation error that
-                        // mentions an indicator word, but a proxy that relays the upstream status can
-                        // also return real metadata with a 4xx/5xx. Report it as possible, not drop it.
-                        boolean confirmed = response.isSuccess();
-                        Finding finding = new Finding(
-                                UUID.randomUUID().toString(),
-                                confirmed ? "Server Side Request Forgery (SSRF) via Request Body"
-                                        : "Possible Server Side Request Forgery (SSRF) via Request Body (non-2xx response)",
-                                String.format("The API body parameter '%s' appears to be vulnerable to SSRF. " +
-                                        "The server fetched the URL '%s' and returned content that matches " +
-                                        "known internal/metadata service response patterns.",
-                                        param, payload),
-                                confirmed ? Severity.CRITICAL : Severity.MEDIUM,
-                                getId(),
-                                endpoint.getMethod() + " " + endpoint.getPath(),
-                                "Validate and sanitize all user-supplied URLs in request bodies. " +
-                                "Use a URL allowlist and block requests to internal network ranges."
-                        );
-                        finding.setRequestDetails(method + " " + endpoint.getFullUrl() + "\nBody: " + body);
-                        finding.setEvidence("Response contained '" + indicator + "', which is not part of the payload " +
-                                "and not in the endpoint's normal response (checked again before reporting). Payload: " + payload);
-                        findings.add(finding);
-                        return findings;
-                    }
-                } catch (Exception e) {
-                    logger.debug("Error testing body SSRF param {} on {}: {}", param, endpoint, e.getMessage());
+                BodyProbeOutcome outcome = probeBody(endpoint, httpClient, method, body, payload,
+                        param, baselineBody, baselineIndicators);
+                if (outcome.freshBaseline() != null) {
+                    baselineBody = outcome.freshBaseline();
+                    baselineIndicators = indicatorsIn(baselineBody);
+                    continue;
+                }
+                if (outcome.finding() != null) {
+                    findings.add(outcome.finding());
+                    return findings;
                 }
             }
         }
 
         return findings;
+    }
+
+    private record BodyProbeOutcome(Finding finding, String freshBaseline) {
+        static BodyProbeOutcome none() { return new BodyProbeOutcome(null, null); }
+        static BodyProbeOutcome report(Finding f) { return new BodyProbeOutcome(f, null); }
+        static BodyProbeOutcome refresh(String baseline) { return new BodyProbeOutcome(null, baseline); }
+    }
+
+    private BodyProbeOutcome probeBody(EndpointInfo endpoint, HttpClient httpClient, String method,
+                                       String body, String payload, String paramLabel,
+                                       String baselineBody, Set<String> baselineIndicators) {
+        try {
+            HttpResponse response = switch (method) {
+                case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+                case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+                case "PATCH" -> httpClient.patchWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+                default      -> null;
+            };
+            if (response == null) {
+                return BodyProbeOutcome.none();
+            }
+
+            String requestDetails = method + " " + endpoint.getFullUrl() + "\nBody: " + body;
+
+            String metaIndicator = newMetadataHeaderIndicator(
+                    response.getBody(), payload, baselineBody, baselineIndicators);
+            if (metaIndicator != null) {
+                String freshBaseline = fetchBaselineBody(endpoint, httpClient);
+                if (freshBaseline.toLowerCase(Locale.ROOT)
+                        .contains(metaIndicator.toLowerCase(Locale.ROOT))) {
+                    logger.debug("Metadata-header indicator '{}' on {} also appears in a fresh baseline, not reporting",
+                            metaIndicator, endpoint);
+                    return BodyProbeOutcome.refresh(freshBaseline);
+                }
+                return BodyProbeOutcome.report(buildMetadataHeaderFinding(
+                        endpoint, "body", paramLabel, payload, requestDetails, metaIndicator));
+            }
+
+            String indicator = newSsrfIndicator(
+                    response.getBody(), payload, baselineBody, baselineIndicators);
+            if (indicator != null) {
+                String freshBaseline = fetchBaselineBody(endpoint, httpClient);
+                if (freshBaseline.toLowerCase(Locale.ROOT)
+                        .contains(indicator.toLowerCase(Locale.ROOT))) {
+                    logger.debug("SSRF indicator '{}' on {} also appears in a fresh baseline, not reporting",
+                            indicator, endpoint);
+                    return BodyProbeOutcome.refresh(freshBaseline);
+                }
+                boolean confirmed = response.isSuccess();
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        confirmed ? "Server Side Request Forgery (SSRF) via Request Body"
+                                : "Possible Server Side Request Forgery (SSRF) via Request Body (non-2xx response)",
+                        String.format("The API body parameter '%s' appears to be vulnerable to SSRF. " +
+                                "The server fetched the URL '%s' and returned content that matches " +
+                                "known internal/metadata service response patterns.",
+                                paramLabel, payload),
+                        confirmed ? Severity.CRITICAL : Severity.MEDIUM,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Validate and sanitize all user-supplied URLs in request bodies. " +
+                        "Use a URL allowlist and block requests to internal network ranges."
+                );
+                finding.setRequestDetails(requestDetails);
+                finding.setEvidence("Response contained '" + indicator + "', which is not part of the payload " +
+                        "and not in the endpoint's normal response (checked again before reporting). Payload: " + payload);
+                return BodyProbeOutcome.report(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing body SSRF on {}: {}", endpoint, e.getMessage());
+        }
+        return BodyProbeOutcome.none();
+    }
+
+    private Finding buildMetadataHeaderFinding(EndpointInfo endpoint, String via, String param,
+                                               String payload, String requestDetails, String indicator) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Server Side Request Forgery (metadata service reached, header required)",
+                String.format("The API %s parameter '%s' caused the server to reach a cloud metadata " +
+                        "endpoint at '%s'. The metadata service responded that a required header is missing, " +
+                        "which proves the outbound fetch happened.",
+                        via, param, payload),
+                Severity.HIGH,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Validate and sanitize all user-supplied URLs. Use an allowlist of permitted " +
+                "domains/IPs. Block requests to private IP ranges (RFC 1918) and cloud metadata " +
+                "endpoints. Disable unnecessary URL-fetching functionality."
+        );
+        finding.setRequestDetails(requestDetails);
+        finding.setEvidence("Response contained '" + indicator + "' (metadata header required), which is not " +
+                "part of the payload and not in the endpoint's normal response. Payload: " + payload);
+        return finding;
+    }
+
+    /**
+     * Returns a deep copy of the endpoint's discovered JSON object body, or null when none is
+     * usable — callers then fall back to the historical single-field {@code {"url":...}} probes.
+     */
+    private ObjectNode parseDiscoveredObjectBody(EndpointInfo endpoint) {
+        String discovered = endpoint.getRequestBody();
+        if (discovered == null || discovered.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(discovered);
+            if (root.isObject() && root.size() > 0) {
+                return (ObjectNode) root.deepCopy();
+            }
+        } catch (Exception e) {
+            logger.debug("Discovered request body for {} isn't a JSON object: {}", endpoint, e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * Keeps every field from the discovered body, substitutes the SSRF payload into URL-shaped
+     * fields (by name or http(s) string value), and adds a {@code url} field when none exist.
+     */
+    private String buildBodyKeepingFields(ObjectNode template, String payload) {
+        ObjectNode copy = template.deepCopy();
+        boolean injected = false;
+        Iterator<Map.Entry<String, JsonNode>> fields = copy.fields();
+        List<String> toReplace = new ArrayList<>();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (isUrlShapedField(entry.getKey()) || looksLikeHttpUrl(entry.getValue())) {
+                toReplace.add(entry.getKey());
+            }
+        }
+        for (String key : toReplace) {
+            copy.put(key, payload);
+            injected = true;
+        }
+        if (!injected) {
+            copy.put("url", payload);
+        }
+        try {
+            return objectMapper.writeValueAsString(copy);
+        } catch (Exception e) {
+            return String.format("{\"url\":\"%s\"}", payload);
+        }
+    }
+
+    private boolean isUrlShapedField(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (URL_SHAPED_FIELD_NAMES.contains(lower)) {
+            return true;
+        }
+        // imageUrl, webhook_url, callbackUri, etc.
+        return URL_SHAPED_FIELD_NAMES.stream().anyMatch(lower::contains);
+    }
+
+    private boolean looksLikeHttpUrl(JsonNode value) {
+        if (value == null || !value.isTextual()) {
+            return false;
+        }
+        String text = value.asText().toLowerCase(Locale.ROOT);
+        return text.startsWith("http://") || text.startsWith("https://");
     }
 
     /**
@@ -241,9 +424,9 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
     }
 
     private Set<String> indicatorsIn(String body) {
-        String lower = body.toLowerCase();
-        return SSRF_INDICATORS.stream()
-                .filter(indicator -> lower.contains(indicator.toLowerCase()))
+        String lower = body.toLowerCase(Locale.ROOT);
+        return Stream.concat(SSRF_INDICATORS.stream(), METADATA_HEADER_REQUIRED_INDICATORS.stream())
+                .filter(indicator -> lower.contains(indicator.toLowerCase(Locale.ROOT)))
                 .collect(Collectors.toUnmodifiableSet());
     }
 
@@ -258,10 +441,22 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                                     Set<String> baselineIndicators) {
         if (body == null || body.isEmpty()) return null;
         if (body.equals(baselineBody)) return null;
-        String lower = stripPayloadEchoes(body, payload).toLowerCase();
+        String lower = stripPayloadEchoes(body, payload).toLowerCase(Locale.ROOT);
         return SSRF_INDICATORS.stream()
                 .filter(indicator -> !baselineIndicators.contains(indicator))
-                .filter(indicator -> lower.contains(indicator.toLowerCase()))
+                .filter(indicator -> lower.contains(indicator.toLowerCase(Locale.ROOT)))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private String newMetadataHeaderIndicator(String body, String payload, String baselineBody,
+                                              Set<String> baselineIndicators) {
+        if (body == null || body.isEmpty()) return null;
+        if (body.equals(baselineBody)) return null;
+        String lower = stripPayloadEchoes(body, payload).toLowerCase(Locale.ROOT);
+        return METADATA_HEADER_REQUIRED_INDICATORS.stream()
+                .filter(indicator -> !baselineIndicators.contains(indicator))
+                .filter(indicator -> lower.contains(indicator.toLowerCase(Locale.ROOT)))
                 .findFirst()
                 .orElse(null);
     }
