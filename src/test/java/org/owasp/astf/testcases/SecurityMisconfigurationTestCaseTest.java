@@ -345,6 +345,9 @@ class SecurityMisconfigurationTestCaseTest {
 
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Debug")),
                 "Root endpoint '/' must still trigger debug probes exactly once");
+    }
+
+    @Test
     @DisplayName("Absent X-XSS-Protection must not produce a finding")
     void testAbsentXssProtectionNotReported() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
