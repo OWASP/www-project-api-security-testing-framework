@@ -640,4 +640,24 @@ class ConfigLoaderTest {
         assertNotNull(config);
         assertEquals(ScanConfig.OutputFormat.JSON, config.getOutputFormat());
     }
+
+    @Test
+    @DisplayName("Should read adminToken from YAML configuration")
+    void testLoadYamlAdminToken(@TempDir Path tempDir) throws IOException {
+        Path yamlFile = tempDir.resolve("config.yaml");
+        Files.writeString(yamlFile, "targetUrl: https://api.example.com\nadminToken: admin-abc\n");
+
+        ScanConfig config = loader.loadFromFile(yamlFile.toString());
+
+        assertEquals("admin-abc", config.getAdminToken());
+    }
+
+    @Test
+    @DisplayName("Should read adminToken from properties configuration")
+    void testLoadPropertiesAdminToken(@TempDir Path tempDir) throws IOException {
+        Path propsFile = tempDir.resolve("config.properties");
+        Files.writeString(propsFile, "targetUrl=https://api.example.com\nadminToken=admin-abc\n");
+
+        assertEquals("admin-abc", loader.loadFromFile(propsFile.toString()).getAdminToken());
+    }
 }

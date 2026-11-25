@@ -100,10 +100,11 @@ Three distinct techniques, in increasing order of how convincing the evidence is
 
 ### BFLA (`ASTF-API5-2023`)
 
-Two complementary techniques:
+Three complementary techniques:
 
 1. **Root-relative admin path probing** — tries generic admin-shaped paths (`/admin`, `/internal`, `/manage`, `/console`, ...) appended to the base URL, and separately tries escalating the HTTP method (GET succeeds → does PUT/DELETE/PATCH also succeed?) on the same endpoint.
 2. **Privilege-tier path substitution** — takes an already-known, specific endpoint whose path contains a low-privilege segment (`user`, `customer`, `member`, `public`) and swaps just that segment for a high-privilege one (`admin`, `staff`, `internal`, `management`, `superuser`), replaying the identical request with the identical (non-elevated) token. This exists specifically because the most common real-world BFLA pattern is a "sibling" endpoint that looks harmless by naming convention alone — `DELETE /api/v2/user/videos/{id}` denying you while `DELETE /api/v2/admin/videos/{id}` silently succeeds with the same token is a real, live-confirmed pattern this technique catches.
+3. **Role matrix** (needs `--admin-token`) — replays each GET endpoint as the admin identity, as the normal `--token` identity, and with no credentials. If the admin gets a 2xx with data and the endpoint is admin-looking (path contains `admin`, `internal`, `manage`, `staff` or `superuser`) or lower identities are refused, ASTF compares the admin and normal-identity responses: the same body is a CRITICAL "Function-Level Authorization Missing", a 2xx with a different body is a MEDIUM "Not Confirmed", and a 401/403/404 for the normal identity is a pass. Without `--admin-token` the check is skipped silently. It is read-only: GET only, because replaying writes with an admin credential would change target state, so write methods are out of scope for this check.
 
 ### BOPLA / Mass Assignment / Excessive Data Exposure (`ASTF-API3-2023`)
 
