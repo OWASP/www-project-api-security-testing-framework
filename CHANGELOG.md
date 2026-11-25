@@ -8,6 +8,10 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
+### Fixed
+
+- **Security header policy (API8)**. `X-XSS-Protection` is no longer treated as a required header (OWASP marks it deprecated); a LOW finding is raised only when it is present with a value other than `0`. Authenticated responses are now checked for `Cache-Control: no-store` (LOW when absent; `no-cache` alone is not enough).
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).

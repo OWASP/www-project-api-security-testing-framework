@@ -12,6 +12,7 @@ import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -266,5 +267,120 @@ class SecurityMisconfigurationTestCaseTest {
                 .thenThrow(new IOException("Network error"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+    }
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    @Test
+    @DisplayName("Absent X-XSS-Protection must not produce a finding")
+    void testAbsentXssProtectionNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f ->
+                        f.getTitle().contains("X-XSS-Protection")
+                                || (f.getTitle().contains("Missing Security")
+                                && f.getEvidence() != null
+                                && f.getEvidence().contains("X-XSS-Protection"))),
+                "Absence of deprecated X-XSS-Protection must not be reported");
+    }
+
+    @Test
+    @DisplayName("X-XSS-Protection: 1; mode=block must produce a LOW finding")
+    void testEnabledXssProtectionReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("X-XSS-Protection", List.of("1; mode=block"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding xss = findings.stream()
+                .filter(f -> f.getTitle().contains("X-XSS-Protection"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected a finding for enabled X-XSS-Protection"));
+        assertEquals(Severity.LOW, xss.getSeverity());
+    }
+
+    @Test
+    @DisplayName("X-XSS-Protection: 0 must not produce a finding")
+    void testXssProtectionZeroNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("X-XSS-Protection", List.of("0"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("X-XSS-Protection")),
+                "X-XSS-Protection: 0 is the recommended disable value and must not be flagged");
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx without Cache-Control no-store must produce a LOW finding")
+    void testAuthenticatedMissingNoStoreReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", requiredSecurityHeaders()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding cache = findings.stream()
+                .filter(f -> f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected missing no-store finding"));
+        assertEquals(Severity.LOW, cache.getSeverity());
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx with Cache-Control: no-store must not produce a cache finding")
+    void testAuthenticatedWithNoStoreNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("Cache-Control", List.of("private, no-store"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f ->
+                        f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store")),
+                "Cache-Control containing no-store must satisfy the authenticated-response check");
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx with only Cache-Control: no-cache must produce a LOW finding")
+    void testAuthenticatedNoCacheOnlyReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("Cache-Control", List.of("no-cache"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding cache = findings.stream()
+                .filter(f -> f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no-cache alone must not satisfy the check"));
+        assertEquals(Severity.LOW, cache.getSeverity());
+    }
+
+    private static Map<String, List<String>> requiredSecurityHeaders() {
+        Map<String, List<String>> headers = new HashMap<>();
+        headers.put("X-Content-Type-Options", List.of("nosniff"));
+        headers.put("X-Frame-Options", List.of("DENY"));
+        headers.put("Strict-Transport-Security", List.of("max-age=31536000"));
+        headers.put("Content-Security-Policy", List.of("default-src 'self'"));
+        return headers;
     }
 }
