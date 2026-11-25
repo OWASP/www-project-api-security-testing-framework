@@ -220,9 +220,6 @@ class UnsafeConsumptionOfApisTestCaseTest {
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @ParameterizedTest(name = "SSTI detection for {1}: {0}")
     @CsvSource({
             "'{{1337*1337}}', Jinja2/Twig/Nunjucks",

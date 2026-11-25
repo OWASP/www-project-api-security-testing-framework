@@ -53,9 +53,6 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             "root:x:0:0",            // /etc/passwd content
             "X-Injected-Header"      // Header injection reflected
     );
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Unique arithmetic marker (1337*1337). "49" from 7*7 was both too common and
     // explicitly skipped by the success-pattern loop, so SSTI could never fire.
     private static final String SSTI_RESULT_MARKER = "1787569";
