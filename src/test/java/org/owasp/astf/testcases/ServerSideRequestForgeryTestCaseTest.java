@@ -320,6 +320,56 @@ class ServerSideRequestForgeryTestCaseTest {
     }
 
     @Test
+    @DisplayName("A body with one URL-shaped field is still probed through the other historical parameter names")
+    void testOtherUrlParametersStillTriedWhenBodyHasAUrlShapedField() throws IOException {
+        // The body lists "feed", but the endpoint is only vulnerable through "callback", a name the
+        // discovered body does not contain. 2.0.2 found this; it must not be lost.
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/subscribe", "POST", "application/json",
+                "{\"name\":\"weekly\",\"feed\":\"https://example.com/rss\"}", true);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"subscribed\":true}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            String body = inv.getArgument(3);
+            if (body.contains("\"callback\":\"http") && body.contains("169.254.169.254")) {
+                return new HttpResponse(200, "{\"fetched\":\"ami-id: ami-0abc123\"}", Map.of());
+            }
+            return new HttpResponse(200, "{\"subscribed\":true}", Map.of());
+        });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertEquals(1, findings.size(),
+                "SSRF reachable only through 'callback' must still be reported: " + findings);
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getRequestDetails().contains("\"name\":\"weekly\""),
+                "the probe that found it must keep the discovered fields");
+    }
+
+    @Test
+    @DisplayName("Field names are matched by whole word: 'security_level' is not URL-shaped, 'feed_url' is")
+    void testUrlShapedFieldMatchingUsesWholeWords() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/settings", "POST", "application/json",
+                "{\"security_level\":\"high\",\"duration\":30,\"feed_url\":\"x\"}", true);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String first = bodyCaptor.getAllValues().get(0);
+        assertTrue(first.contains("\"security_level\":\"high\""),
+                "'security_level' contains 'uri' but is not a URL field and must be left alone: " + first);
+        assertTrue(first.contains("\"duration\":30"), "non-URL field must be left alone: " + first);
+        assertTrue(first.matches(".*\"feed_url\":\"http.*"),
+                "'feed_url' is a URL field and must receive the payload: " + first);
+    }
+
+    @Test
     @DisplayName("No-body endpoint still gets the historical single-field probe")
     void testNoBodyEndpointStillUsesSingleFieldProbe() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/proxy", "POST");

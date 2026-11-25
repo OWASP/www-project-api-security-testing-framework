@@ -220,11 +220,14 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
                     return findings;
                 }
             }
-            return findings;
+            // Deliberately no return here: a body that has one URL-shaped field can still be
+            // vulnerable through a different parameter the discovered body does not list (2.0.2
+            // tried every name in URL_PARAMETERS). Falling through keeps that coverage; the probes
+            // below keep the discovered fields, so they still get past required-field validation.
         }
 
-        // No URL-shaped field to substitute: try each URL_PARAMETERS name, added alongside the
-        // discovered fields (or alone when there is no discovered body, as in 2.0.2).
+        // Try each URL_PARAMETERS name, added alongside the discovered fields (or alone when there
+        // is no discovered body, as in 2.0.2).
         ObjectNode template = discoveredBody != null ? discoveredBody : objectMapper.createObjectNode();
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
@@ -403,13 +406,19 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         }
     }
 
+    /**
+     * True when a whole word of the field name is a URL-shaped word: {@code imageUrl},
+     * {@code webhook_url}, {@code callback-uri} and {@code feed} qualify. Matching words rather
+     * than substrings matters: {@code "uri"} is inside {@code "security"} and {@code "during"}, and
+     * {@code "host"} is inside {@code "ghost"}, so a substring match would overwrite ordinary
+     * fields with the SSRF payload and send a body the server rejects for the wrong reason.
+     */
     private boolean isUrlShapedField(String name) {
-        String lower = name.toLowerCase(Locale.ROOT);
-        if (URL_SHAPED_FIELD_NAMES.contains(lower)) {
-            return true;
-        }
-        // imageUrl, webhook_url, callbackUri, etc.
-        return URL_SHAPED_FIELD_NAMES.stream().anyMatch(lower::contains);
+        String spaced = name.replaceAll("([a-z0-9])([A-Z])", "$1 $2")   // imageUrl -> image Url
+                .replaceAll("[^A-Za-z0-9]+", " ")                       // webhook_url -> webhook url
+                .toLowerCase(Locale.ROOT)
+                .trim();
+        return Stream.of(spaced.split(" ")).anyMatch(URL_SHAPED_FIELD_NAMES::contains);
     }
 
     private boolean looksLikeHttpUrl(JsonNode value) {
