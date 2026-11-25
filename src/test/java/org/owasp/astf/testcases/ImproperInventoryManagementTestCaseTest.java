@@ -204,9 +204,6 @@ class ImproperInventoryManagementTestCaseTest {
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Should probe documentation endpoints when the endpoint list has no root '/' path")
     void testDocProbesRunWithoutRootEndpoint() throws IOException {

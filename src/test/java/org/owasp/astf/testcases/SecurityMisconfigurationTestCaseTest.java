@@ -272,9 +272,6 @@ class SecurityMisconfigurationTestCaseTest {
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Should probe debug endpoints when the endpoint list has no root '/' path")
     void testDebugProbesRunWithoutRootEndpoint() throws IOException {

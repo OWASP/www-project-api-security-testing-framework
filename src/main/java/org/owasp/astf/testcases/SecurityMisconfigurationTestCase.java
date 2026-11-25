@@ -81,9 +81,6 @@ public class SecurityMisconfigurationTestCase implements TestCase {
      * rather than once per endpoint.
      */
     private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Target-level debug probes run once per base URL per scan, not once per endpoint and not
     // only when "/" is in the endpoint list (grey-box --endpoints-file --no-discovery often
     // omits "/"). Keyed by HttpClient so a new scan starts fresh; ConcurrentHashMap.newKeySet

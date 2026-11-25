@@ -52,9 +52,6 @@ public class ImproperInventoryManagementTestCase implements TestCase {
     );
 
     private static final Pattern VERSION_PATTERN = Pattern.compile("/v(\\d+)/");
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Target-level API-docs probes run once per base URL per scan, not once per endpoint and not
     // only when "/" is in the endpoint list (grey-box --endpoints-file --no-discovery often
     // omits "/"). Keyed by HttpClient so a new scan starts fresh; ConcurrentHashMap.newKeySet
