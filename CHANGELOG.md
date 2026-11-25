@@ -8,6 +8,10 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
+### Fixed
+
+- **Server-side template injection detection was unreachable**. The probe used `{{7*7}}`/`${7*7}` and looked for `49`, but the success-pattern loop explicitly skipped `49` to avoid false positives, so SSTI could never fire. Probes now use the unique marker `1337*1337=1787569` across common template syntaxes, require the marker to be absent from the baseline, ignore pure expression echoes, and name the engine family in evidence.
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).
