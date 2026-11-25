@@ -103,6 +103,11 @@ public class ASTFCli implements Callable<Integer> {
             "whether this identity can access objects belonging to the primary --token identity")
     private String secondaryBearerToken;
 
+    @Option(names = {"--admin-token"}, description = "Bearer token for an administrator identity — " +
+            "enables role-matrix function-level authorization (BFLA) testing by checking whether " +
+            "admin-only GET endpoints are also readable by the --token identity or anonymously")
+    private String adminToken;
+
     @Option(names = {"--api-key"}, description = "API key for authentication")
     private String apiKey;
 
@@ -228,6 +233,7 @@ public class ASTFCli implements Callable<Integer> {
         // Authentication
         if (bearerToken != null) config.setBearerToken(bearerToken);
         if (secondaryBearerToken != null) config.setSecondaryBearerToken(secondaryBearerToken);
+        if (adminToken != null) config.setAdminToken(adminToken);
         if (clientCertPath != null) config.setClientCertPath(clientCertPath);
         if (clientCertPassword != null) config.setClientCertPassword(clientCertPassword);
         if (invalidClientCertPath != null) config.setInvalidClientCertPath(invalidClientCertPath);

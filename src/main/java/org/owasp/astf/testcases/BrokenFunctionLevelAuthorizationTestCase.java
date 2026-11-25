@@ -15,6 +15,8 @@ import org.owasp.astf.core.http.SoftNotFoundDetector;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 /**
  * Tests for API5:2023 Broken Function Level Authorization.
  *
@@ -51,6 +53,10 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
             "admin", "administrator", "internal", "staff", "management", "superuser"
     );
 
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private static final List<String> ADMIN_NAME_HINTS = List.of("admin", "internal", "manage", "staff", "superuser");
+
     /**
      * Guards the admin-path probing below against targets that answer 2xx for every unknown path.
      * Held per instance so the baseline probe runs once per target for the whole scan rather than
@@ -82,8 +88,115 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
         findings.addAll(testAdminEndpointAccess(endpoint, httpClient));
         findings.addAll(testHttpMethodEscalation(endpoint, httpClient));
         findings.addAll(testPrivilegeTierPathSubstitution(endpoint, httpClient));
+        findings.addAll(testRoleMatrix(endpoint, httpClient));
 
         return findings;
+    }
+
+    /**
+     * Role-matrix check: replays a read-only endpoint as the admin identity ({@code --admin-token}),
+     * as the normal configured identity, and with no credentials, then compares what each could
+     * read. An endpoint is an admin-only candidate when the admin gets a 2xx with data and either
+     * its path looks administrative or a lower identity is refused while the admin is not.
+     * <p>
+     * Skips silently when no admin token is configured. Only GET is replayed: replaying writes with
+     * an admin credential mutates target state, so state-changing methods are out of scope here.
+     * The admin token value is never logged or placed in finding evidence.
+     */
+    List<Finding> testRoleMatrix(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        String adminToken = httpClient.getConfiguredAdminToken();
+        if (adminToken == null || adminToken.isEmpty()) {
+            return findings;
+        }
+        if (!"GET".equalsIgnoreCase(endpoint.getMethod())) {
+            return findings;
+        }
+
+        String url = endpoint.getFullUrl();
+        try {
+            HttpResponse admin = httpClient.getWithStatus(url, httpClient.getAdminAuthHeaders());
+            if (admin == null || !admin.isSuccess() || admin.getBody().isBlank()) {
+                return findings;
+            }
+
+            HttpResponse lowPriv = httpClient.getWithStatus(url, Map.of());
+            HttpResponse anon = httpClient.getWithStatusNoAuth(url);
+
+            boolean adminNamed = looksAdministrative(endpoint.getPath());
+            boolean lowerRefused = (lowPriv != null && !lowPriv.isSuccess()) || (anon != null && !anon.isSuccess());
+            if (!adminNamed && !lowerRefused) {
+                return findings;
+            }
+
+            if (lowPriv == null || !lowPriv.isSuccess()) {
+                return findings;
+            }
+
+            String evidence = "Admin identity status: " + admin.getStatusCode() +
+                    "\nNormal identity status: " + lowPriv.getStatusCode() +
+                    "\nNo-auth status: " + (anon != null ? anon.getStatusCode() : "n/a");
+            String request = "GET " + url + " — requested as admin, as the normal configured identity, and with no credentials";
+
+            if (sameBody(admin.getBody(), lowPriv.getBody())) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Function-Level Authorization Missing",
+                        String.format("The endpoint '%s' returned the same data to the admin identity and to the " +
+                                "normal low-privilege identity. Whatever role check was meant to restrict this " +
+                                "function to administrators is not enforced.", endpoint.getPath()),
+                        Severity.CRITICAL,
+                        getId(),
+                        "GET " + endpoint.getPath(),
+                        "Enforce role checks server-side on every function-level endpoint, independently of " +
+                        "route naming or UI visibility. Deny by default and require an explicit administrator " +
+                        "role for administrative functions."
+                );
+                finding.setRequestDetails(request);
+                finding.setResponseDetails(evidence);
+                findings.add(finding);
+            } else {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Function-Level Authorization Not Confirmed",
+                        String.format("The endpoint '%s' returned HTTP 2xx to both the admin identity and the " +
+                                "normal low-privilege identity, but with different bodies. This may be " +
+                                "legitimate per-identity data or a partially enforced role check; review it " +
+                                "manually.", endpoint.getPath()),
+                        Severity.MEDIUM,
+                        getId(),
+                        "GET " + endpoint.getPath(),
+                        "Confirm that the low-privilege identity is meant to reach this function, and that the " +
+                        "differences between the responses come from data scoping rather than a missing role check."
+                );
+                finding.setRequestDetails(request);
+                finding.setResponseDetails(evidence);
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing role matrix on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
+    private static boolean looksAdministrative(String path) {
+        String lower = path == null ? "" : path.toLowerCase();
+        return ADMIN_NAME_HINTS.stream().anyMatch(lower::contains);
+    }
+
+    private static boolean sameBody(String a, String b) {
+        String left = a.strip();
+        String right = b.strip();
+        if (left.equals(right)) {
+            return true;
+        }
+        try {
+            return JSON.readTree(left).equals(JSON.readTree(right));
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**

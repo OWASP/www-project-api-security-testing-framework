@@ -210,6 +210,31 @@ public class HttpClient {
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
 
+    /**
+     * Returns headers carrying the scan's admin identity, if one was configured via
+     * {@code --admin-token}. Passed as the per-request header override on the {@code *WithStatus}
+     * methods, so it replaces the primary identity's Authorization header for that one request
+     * only (see {@link #getSecondaryAuthHeaders()}).
+     *
+     * @return A map with an Authorization header for the admin identity, or an empty map if no
+     *         admin token was configured (in which case role-matrix checks should skip)
+     */
+    public Map<String, String> getAdminAuthHeaders() {
+        String adminToken = config.getAdminToken();
+        if (adminToken == null || adminToken.isEmpty()) {
+            return Map.of();
+        }
+        return Map.of("Authorization", "Bearer " + adminToken);
+    }
+
+    /**
+     * @return the admin bearer token configured via {@code --admin-token}, or {@code null} if
+     * none was provided. Callers must not log the returned value.
+     */
+    public String getConfiguredAdminToken() {
+        return config.getAdminToken();
+    }
+
     /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
     public boolean hasClientCert() {
         return config.getClientCertPath() != null && !config.getClientCertPath().isEmpty();

@@ -262,6 +262,10 @@ public class ConfigLoader {
             }
         }
 
+        if (root.has("adminToken") && !root.get("adminToken").isNull()) {
+            config.setAdminToken(root.get("adminToken").asText());
+        }
+
         // Endpoint input — REQ-002: endpointsFile YAML key
         // REQ-006 precedence: endpointsFile < inline endpoints (inline wins if both present)
         if (root.has("endpointsFile")) {
@@ -429,6 +433,10 @@ public class ConfigLoader {
             config.setBasicAuthPassword(props.getProperty("basicAuth.password"));
         }
 
+        if (props.containsKey("adminToken")) {
+            config.setAdminToken(props.getProperty("adminToken"));
+        }
+
         // Test case configuration
         if (props.containsKey("enableTestCases")) {
             String enableTests = props.getProperty("enableTestCases");
@@ -485,6 +493,7 @@ public class ConfigLoader {
             case "proxy_password" -> config.setProxyPassword(value);
             case "basicauth_username" -> config.setBasicAuthUsername(value);
             case "basicauth_password" -> config.setBasicAuthPassword(value);
+            case "admintoken" -> config.setAdminToken(value);
             default -> {
                 if (key.startsWith("header_")) {
                     String headerName = key.substring("header_".length());

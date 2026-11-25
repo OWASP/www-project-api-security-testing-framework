@@ -36,6 +36,11 @@ public class ScanConfig {
     // scan's primary identity.
     private String secondaryBearerToken;
 
+    // A higher-privilege (administrator) identity, used only by the role-matrix function-level
+    // authorization check to compare what an admin can read against what a normal or anonymous
+    // caller can read. Never merged into the default request headers.
+    private String adminToken;
+
     // Proxy settings
     private String proxyHost;
     private int proxyPort;
@@ -315,6 +320,25 @@ public class ScanConfig {
      */
     public void setSecondaryBearerToken(String secondaryBearerToken) {
         this.secondaryBearerToken = secondaryBearerToken;
+    }
+
+    /**
+     * Gets the admin bearer token — a higher-privilege identity used only by the role-matrix
+     * function-level authorization check. The value is never logged.
+     *
+     * @return The admin bearer token, or {@code null} if not configured
+     */
+    public String getAdminToken() {
+        return adminToken;
+    }
+
+    /**
+     * Sets the admin bearer token.
+     *
+     * @param adminToken The admin bearer token
+     */
+    public void setAdminToken(String adminToken) {
+        this.adminToken = adminToken;
     }
 
     /** @return path to the PKCS12 keystore containing the scan's normal client certificate identity */
