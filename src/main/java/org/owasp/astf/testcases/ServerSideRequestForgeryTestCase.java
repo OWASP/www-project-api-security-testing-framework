@@ -208,7 +208,7 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
         Set<String> baselineIndicators = indicatorsIn(baselineBody);
 
         ObjectNode discoveredBody = parseDiscoveredObjectBody(endpoint);
-        if (discoveredBody != null) {
+        if (discoveredBody != null && hasUrlShapedField(discoveredBody)) {
             for (String payload : SSRF_PAYLOADS) {
                 String body = buildBodyKeepingFields(discoveredBody, payload);
                 BodyProbeOutcome outcome = probeBody(endpoint, httpClient, method, body, payload,
@@ -226,10 +226,12 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
             return findings;
         }
 
-        // No discovered JSON object body: keep the historical single-field probe over URL_PARAMETERS
+        // No URL-shaped field to substitute: try each URL_PARAMETERS name, added alongside the
+        // discovered fields (or alone when there is no discovered body, as in 2.0.2).
+        ObjectNode template = discoveredBody != null ? discoveredBody : objectMapper.createObjectNode();
         for (String param : URL_PARAMETERS) {
             for (String payload : SSRF_PAYLOADS) {
-                String body = String.format("{\"%s\":\"%s\"}", param, payload);
+                String body = buildBodyWithField(template, param, payload);
                 BodyProbeOutcome outcome = probeBody(endpoint, httpClient, method, body, payload,
                         param, baselineBody, baselineIndicators);
                 if (outcome.freshBaseline() != null) {
@@ -362,31 +364,45 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
     }
 
     /**
-     * Keeps every field from the discovered body, substitutes the SSRF payload into URL-shaped
-     * fields (by name or http(s) string value), and adds a {@code url} field when none exist.
+     * Keeps every field from the discovered body and substitutes the SSRF payload into its
+     * URL-shaped fields (by name or http(s) string value).
      */
     private String buildBodyKeepingFields(ObjectNode template, String payload) {
         ObjectNode copy = template.deepCopy();
-        boolean injected = false;
-        Iterator<Map.Entry<String, JsonNode>> fields = copy.fields();
-        List<String> toReplace = new ArrayList<>();
+        for (String key : urlShapedFields(copy)) {
+            copy.put(key, payload);
+        }
+        return writeJson(copy, "url", payload);
+    }
+
+    /** Keeps every field from {@code template} and sets {@code param} to the payload. */
+    private String buildBodyWithField(ObjectNode template, String param, String payload) {
+        ObjectNode copy = template.deepCopy();
+        copy.put(param, payload);
+        return writeJson(copy, param, payload);
+    }
+
+    private boolean hasUrlShapedField(ObjectNode body) {
+        return !urlShapedFields(body).isEmpty();
+    }
+
+    private List<String> urlShapedFields(ObjectNode body) {
+        List<String> names = new ArrayList<>();
+        Iterator<Map.Entry<String, JsonNode>> fields = body.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> entry = fields.next();
             if (isUrlShapedField(entry.getKey()) || looksLikeHttpUrl(entry.getValue())) {
-                toReplace.add(entry.getKey());
+                names.add(entry.getKey());
             }
         }
-        for (String key : toReplace) {
-            copy.put(key, payload);
-            injected = true;
-        }
-        if (!injected) {
-            copy.put("url", payload);
-        }
+        return names;
+    }
+
+    private String writeJson(ObjectNode body, String fallbackField, String payload) {
         try {
-            return objectMapper.writeValueAsString(copy);
+            return objectMapper.writeValueAsString(body);
         } catch (Exception e) {
-            return String.format("{\"url\":\"%s\"}", payload);
+            return String.format("{\"%s\":\"%s\"}", fallbackField, payload);
         }
     }
 

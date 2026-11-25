@@ -10,7 +10,7 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Fixed
 
-- **SSRF body probes replaced the whole request body.** `ServerSideRequestForgeryTestCase` sent only `{"url":"<payload>"}` (and other single-field variants), so endpoints that validate required fields rejected the probe before any fetch. When a discovered JSON body exists, every field is kept and the payload is substituted into URL-shaped fields (by name or http(s) value), or a `url` field is added; endpoints with no body still use the historical single-field probe. GCP/Azure "missing metadata header" responses are now HIGH evidence that the metadata service was reached, still subject to the 2.0.2 payload-echo and baseline filters.
+- **SSRF body probes replaced the whole request body.** `ServerSideRequestForgeryTestCase` sent only `{"url":"<payload>"}` (and other single-field variants), so endpoints that validate required fields rejected the probe before any fetch. When a discovered JSON body exists, every field is kept and the payload is substituted into URL-shaped fields (by name or http(s) value). When the body has no URL-shaped field, each historical parameter name (`url`, `webhook`, `callback`, …) is added alongside the existing fields, so the parameter coverage is unchanged; endpoints with no body still get the historical single-field probe. GCP/Azure "missing metadata header" responses are now HIGH evidence that the metadata service was reached, still subject to the 2.0.2 payload-echo and baseline filters.
 
 ## 2.0.2 (patch)
 

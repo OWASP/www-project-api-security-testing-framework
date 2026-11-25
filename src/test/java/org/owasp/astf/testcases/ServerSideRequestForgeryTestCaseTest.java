@@ -300,7 +300,7 @@ class ServerSideRequestForgeryTestCaseTest {
     }
 
     @Test
-    @DisplayName("When discovered body has no URL-shaped fields, a url field is added rather than replacing the body")
+    @DisplayName("When discovered body has no URL-shaped fields, each URL parameter name is added rather than replacing the body")
     void testBodyProbeAddsUrlFieldWhenNoneExist() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/widgets", "POST", "application/json",
                 "{\"name\":\"widget\",\"qty\":2}", true);
@@ -317,6 +317,9 @@ class ServerSideRequestForgeryTestCaseTest {
         assertTrue(first.contains("\"name\""), "original fields must remain: " + first);
         assertTrue(first.contains("\"qty\""), "original fields must remain: " + first);
         assertTrue(first.contains("\"url\""), "url field must be added: " + first);
+        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(b ->
+                        b.contains("\"webhook\"") && b.contains("\"name\"") && b.contains("\"qty\"")),
+                "every URL parameter name is still tried, each alongside the discovered fields");
     }
 
     @Test
