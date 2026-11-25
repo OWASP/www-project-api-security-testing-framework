@@ -1,8 +1,10 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -187,6 +189,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         List<String> redirectParams = List.of("redirect", "return", "returnUrl", "return_url",
                 "next", "continue", "url", "goto", "back");
         String maliciousUrl = "https://evil-attacker.example.com/phishing";
+        String maliciousHost = "evil-attacker.example.com";
 
         if (!endpoint.getMethod().equalsIgnoreCase("GET")) {
             return findings;
@@ -198,11 +201,13 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
                     + param + "=" + urlEncode(maliciousUrl);
 
             try {
-                HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
+                // Must not follow redirects: the default client consumes the 302 and only
+                // returns the final response, so isRedirect() would never see the open redirect.
+                HttpResponse response = httpClient.getWithStatusNoRedirect(testUrl, Map.of());
 
                 if (response != null && response.isRedirect()) {
                     String location = response.getHeader("Location");
-                    if (location != null && location.contains("evil-attacker.example.com")) {
+                    if (isExternalOpenRedirect(location, maliciousHost, endpoint.getFullUrl())) {
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
                                 "Open Redirect Vulnerability",
@@ -228,6 +233,36 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    /**
+     * True when {@code Location} is an absolute URL whose host is the injected external host
+     * (not a relative path and not the same host as the scanned endpoint).
+     */
+    private boolean isExternalOpenRedirect(String location, String maliciousHost, String endpointUrl) {
+        if (location == null || location.isBlank()) {
+            return false;
+        }
+        try {
+            URI locationUri = URI.create(location.trim());
+            if (!locationUri.isAbsolute() || locationUri.getHost() == null) {
+                return false;
+            }
+            String locationHost = locationUri.getHost().toLowerCase(Locale.ROOT);
+            if (!locationHost.equals(maliciousHost.toLowerCase(Locale.ROOT))) {
+                return false;
+            }
+            URI endpointUri = URI.create(endpointUrl);
+            if (endpointUri.getHost() != null
+                    && endpointUri.getHost().equalsIgnoreCase(locationUri.getHost())) {
+                return false;
+            }
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     private List<Finding> checkTlsForExternalCalls(EndpointInfo endpoint, HttpClient httpClient) {

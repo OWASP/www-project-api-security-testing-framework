@@ -26,8 +26,9 @@ import static org.mockito.Mockito.when;
  *   <li>{@code testInjectionViaIntegrationEndpoints} only runs on paths containing integration
  *       patterns (webhook, proxy, integration, external, callback, third-party, import, export …).
  *       The pattern "49" is explicitly excluded from injection detection to avoid false positives.</li>
- *   <li>{@code testOpenRedirect} only runs on GET endpoints and checks that the {@code Location}
- *       response header echoes the attacker domain.</li>
+ *   <li>{@code testOpenRedirect} only runs on GET endpoints, uses a non-following HTTP client,
+ *       and requires an absolute {@code Location} whose host is the injected attacker domain
+ *       (relative / same-host Locations are not open redirects).</li>
  *   <li>{@code checkTlsForExternalCalls} only runs on integration endpoints with POST or PUT,
  *       and reports a finding when the server returns 200/201 for an HTTP callback URL.</li>
  * </ul>
@@ -126,11 +127,14 @@ class UnsafeConsumptionOfApisTestCaseTest {
                 "Should detect SQL injection from a 500 response containing a database error");
     }
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
     @Test
-    @DisplayName("Should detect open redirect when Location header echoes attacker domain")
+    @DisplayName("Should detect open redirect when Location header points at attacker host")
     void testOpenRedirectDetected() throws IOException {
         // GET endpoint — testOpenRedirect only fires on GET
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // 302 response with Location pointing to attacker domain
         HttpResponse redirectResponse = new HttpResponse(
@@ -139,7 +143,7 @@ class UnsafeConsumptionOfApisTestCaseTest {
                 Map.of("Location", List.of("https://evil-attacker.example.com/phishing"))
         );
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
                 .thenReturn(redirectResponse);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -154,9 +158,10 @@ class UnsafeConsumptionOfApisTestCaseTest {
     @DisplayName("Open redirect evidence masks token-like query values in the Location header")
     void testOpenRedirectEvidenceMasksTokens() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
         HttpResponse redirectResponse = new HttpResponse(302, "",
                 Map.of("Location", List.of("https://evil-attacker.example.com/cb?access_token=s3cr3tvalue&next=/home")));
-        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(redirectResponse);
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap())).thenReturn(redirectResponse);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -167,12 +172,46 @@ class UnsafeConsumptionOfApisTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT report open redirect for a relative Location header")
+    void testNoOpenRedirectForRelativeLocation() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "", Map.of("Location", List.of("/login?next=/home"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Relative Location is not an open redirect");
+    }
+
+    @Test
+    @DisplayName("Should NOT report open redirect when Location host is not the injected attacker host")
+    void testNoOpenRedirectForUnrelatedExternalHost() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "",
+                        Map.of("Location", List.of("https://other.example.org/path"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Location must point at the injected attacker host");
+    }
+
+    @Test
     @DisplayName("Should NOT report open redirect when server returns 200 with no attacker Location header")
     void testNoOpenRedirectWhenLocationIsSafe() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // Server returns 200 — not a redirect, so no open-redirect finding
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
                 .thenReturn(ok());
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);

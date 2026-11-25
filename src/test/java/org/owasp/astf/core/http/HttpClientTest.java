@@ -133,6 +133,41 @@ class HttpClientTest {
         assertTrue(response.getBody().contains("value"));
     }
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    @Test
+    @DisplayName("getWithStatusNoRedirect returns the 302 instead of following it")
+    void testGetWithStatusNoRedirectReturns302() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(302)
+                .addHeader("Location", "https://evil-attacker.example.com/phishing"));
+        // Would be consumed if the client followed the redirect
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("followed"));
+
+        HttpResponse response = client.getWithStatusNoRedirect(
+                server.url("/redirect").toString(), Map.of());
+
+        assertEquals(302, response.getStatusCode());
+        assertTrue(response.isRedirect());
+        assertEquals("https://evil-attacker.example.com/phishing", response.getHeader("Location"));
+        assertEquals(1, server.getRequestCount(), "Must not follow the redirect to a second request");
+    }
+
+    @Test
+    @DisplayName("getWithStatus follows redirects by default (unchanged)")
+    void testGetWithStatusStillFollowsRedirects() throws Exception {
+        server.enqueue(new MockResponse()
+                .setResponseCode(302)
+                .addHeader("Location", server.url("/final").toString()));
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("arrived"));
+
+        HttpResponse response = client.getWithStatus(server.url("/redirect").toString(), Map.of());
+
+        assertEquals(200, response.getStatusCode());
+        assertEquals("arrived", response.getBody());
+        assertEquals(2, server.getRequestCount());
+    }
+
     @Test
     @DisplayName("Should detect 401 Unauthorized response")
     void testGetWithStatus401() throws Exception {

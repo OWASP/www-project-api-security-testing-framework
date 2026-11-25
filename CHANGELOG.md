@@ -8,6 +8,10 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
+### Fixed
+
+- **Open redirect detection never saw 3xx responses**. The default HTTP client followed redirects before `testOpenRedirect` could inspect them, so a 302 to an attacker `Location` produced zero findings. Open-redirect probes now use a dedicated non-following client; detection requires an absolute `Location` whose host is the injected external host (relative and same-host redirects are ignored).
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).
