@@ -3,6 +3,7 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -14,6 +15,10 @@ import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
  * Tests for API3:2023 Broken Object Property Level Authorization.
@@ -34,13 +39,22 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
             "access_key", "accessKey", "private", "internal"
     );
 
-    // Properties attackers might try to set via mass assignment
+    // Properties attackers might try to set via mass assignment (includes docs-promised credit
+    // and VAmPI's admin flag alongside existing privilege keys)
     private static final List<Map<String, Object>> PRIVILEGE_ESCALATION_PAYLOADS = List.of(
-            Map.of("isAdmin", true, "role", "admin"),
+            Map.of("isAdmin", true, "role", "admin", "credit", 9999),
             Map.of("admin", true, "is_admin", true),
             Map.of("role", "administrator", "permissions", List.of("*")),
             Map.of("active", true, "verified", true, "premium", true)
     );
+    // Common required fields for register/update endpoints when no sample body is discovered.
+    // Values are unique per call (never "test") so repeated register probes don't collide and
+    // don't create a weak test/test account that other checks would misread as default creds.
+    private static final List<String> FILLER_FIELD_NAMES = List.of(
+            "username", "password", "email", "name"
+    );
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public String getId() {
@@ -83,7 +97,7 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
                 return findings;
             }
 
-            String body = response.getBody().toLowerCase();
+            String body = response.getBody().toLowerCase(Locale.ROOT);
             List<String> exposedFields = new ArrayList<>();
 
             for (String field : SENSITIVE_FIELDS) {
@@ -120,7 +134,7 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
 
     private List<Finding> testMassAssignment(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
-        String method = endpoint.getMethod().toUpperCase();
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
 
         if (!method.equals("POST") && !method.equals("PUT") && !method.equals("PATCH")) {
             return findings;
@@ -128,7 +142,7 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
 
         for (Map<String, Object> payload : PRIVILEGE_ESCALATION_PAYLOADS) {
             try {
-                String body = buildJsonPayload(payload);
+                String body = buildMassAssignmentBody(endpoint, payload);
                 HttpResponse response = switch (method) {
                     case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
                     case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
@@ -175,6 +189,72 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
     }
 
     /**
+     * Merges privileged mass-assignment keys into the endpoint's discovered JSON object body
+     * when available; otherwise builds a realistic filler body with unique non-weak values so
+     * endpoints that require username/password/email still reach property-binding code.
+     */
+    private String buildMassAssignmentBody(EndpointInfo endpoint, Map<String, Object> privileged) {
+        ObjectNode root = objectMapper.createObjectNode();
+        String discovered = endpoint.getRequestBody();
+        if (discovered != null && !discovered.isBlank()) {
+            try {
+                JsonNode parsed = objectMapper.readTree(discovered);
+                if (parsed.isObject() && parsed.size() > 0) {
+                    root = (ObjectNode) parsed.deepCopy();
+                } else {
+                    putFillerFields(root);
+                }
+            } catch (Exception e) {
+                logger.debug("Discovered request body for {} isn't valid JSON, using filler: {}",
+                        endpoint, e.getMessage());
+                putFillerFields(root);
+            }
+        } else {
+            putFillerFields(root);
+        }
+
+        for (Map.Entry<String, Object> entry : privileged.entrySet()) {
+            putJsonValue(root, entry.getKey(), entry.getValue());
+        }
+
+        try {
+            return objectMapper.writeValueAsString(root);
+        } catch (Exception e) {
+            // Fallback should be unreachable with ObjectNode; keep a minimal privileged-only body.
+            return buildJsonPayload(privileged);
+        }
+    }
+
+    private void putFillerFields(ObjectNode root) {
+        String unique = "astf-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        for (String field : FILLER_FIELD_NAMES) {
+            if ("email".equals(field)) {
+                root.put(field, unique + "@example.com");
+            } else if ("password".equals(field)) {
+                // Upper, lower, digit and symbol, so common password-strength rules don't reject the
+                // request before property binding runs.
+                root.put(field, "Astf!" + unique + "9Q");
+            } else {
+                root.put(field, unique);
+            }
+        }
+    }
+
+    private void putJsonValue(ObjectNode root, String key, Object value) {
+        if (value instanceof Boolean b) {
+            root.put(key, b);
+        } else if (value instanceof Number n) {
+            root.put(key, n.intValue());
+        } else if (value instanceof String s) {
+            root.put(key, s);
+        } else if (value instanceof List) {
+            root.putArray(key).add("*");
+        } else if (value != null) {
+            root.put(key, String.valueOf(value));
+        }
+    }
+
+    /**
      * Checks whether the response body reflects the specific privileged VALUE submitted for
      * {@code key} (not merely the key name). A boolean/numeric value must match exactly
      * (e.g. {@code "isAdmin":true}); a string value must match as a quoted JSON string; a list
@@ -187,16 +267,16 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
         }
         String valuePattern;
         if (expectedValue instanceof Boolean || expectedValue instanceof Number) {
-            valuePattern = Pattern.quote(String.valueOf(expectedValue).toLowerCase());
+            valuePattern = Pattern.quote(String.valueOf(expectedValue).toLowerCase(Locale.ROOT));
         } else if (expectedValue instanceof String) {
-            valuePattern = "\"" + Pattern.quote(((String) expectedValue).toLowerCase()) + "\"";
+            valuePattern = "\"" + Pattern.quote(((String) expectedValue).toLowerCase(Locale.ROOT)) + "\"";
         } else if (expectedValue instanceof List) {
             valuePattern = "\\[[^\\]]+\\]";
         } else {
             return false;
         }
-        String keyValuePattern = "\"" + Pattern.quote(key.toLowerCase()) + "\"\\s*:\\s*" + valuePattern;
-        return Pattern.compile(keyValuePattern).matcher(responseBody.toLowerCase()).find();
+        String keyValuePattern = "\"" + Pattern.quote(key.toLowerCase(Locale.ROOT)) + "\"\\s*:\\s*" + valuePattern;
+        return Pattern.compile(keyValuePattern).matcher(responseBody.toLowerCase(Locale.ROOT)).find();
     }
 
     private String buildJsonPayload(Map<String, Object> payload) {

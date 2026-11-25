@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 
+import org.mockito.ArgumentCaptor;
+
 /**
  * Unit tests for {@link BrokenObjectPropertyLevelAuthorizationTestCase}.
  *
@@ -204,5 +206,91 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
         assertFalse(findings.stream().anyMatch(
                         f -> f.getTitle().contains("Mass Assignment")),
                 "GET endpoint should not trigger mass-assignment test");
+    }
+    @Test
+    @DisplayName("Privileged keys are merged into the discovered request body fields")
+    void mergesPrivilegedKeysWithDiscoveredBody() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\",\"email\":\"a@b.c\"}", true);
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1,\"username\":\"alice\"}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String firstBody = bodyCaptor.getAllValues().get(0);
+        assertTrue(firstBody.contains("\"username\""), "discovered username must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"password\""), "discovered password must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"email\""), "discovered email must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"isAdmin\"") || firstBody.contains("\"admin\""),
+                "privileged key must be merged in: " + firstBody);
+    }
+
+    @Test
+    @DisplayName("Filler body with unique non-weak values is used when no request body is known")
+    void usesFillerBodyWhenNoneDiscovered() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST");
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String firstBody = bodyCaptor.getAllValues().get(0);
+        assertTrue(firstBody.contains("\"username\""), "filler must include username: " + firstBody);
+        assertTrue(firstBody.contains("\"password\""), "filler must include password: " + firstBody);
+        assertTrue(firstBody.contains("\"email\""), "filler must include email: " + firstBody);
+        assertTrue(firstBody.contains("astf-"), "filler values must be unique astf-* values: " + firstBody);
+        assertFalse(firstBody.contains("\"test\""), "filler must never use weak value test: " + firstBody);
+        String password = new com.fasterxml.jackson.databind.ObjectMapper().readTree(firstBody).get("password").asText();
+        assertTrue(password.matches("(?=.*[A-Z])(?=.*[a-z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{12,}"),
+                "filler password must pass common strength rules: " + password);
+    }
+
+    @Test
+    @DisplayName("Detects mass assignment on an endpoint that requires username+password")
+    void detectsWhenEndpointRequiresUsernameAndPassword() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\",\"email\":\"a@b.c\"}", true);
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    // Echo isAdmin only when required fields are present — models a register
+                    // endpoint that 400s on privileged-only payloads.
+                    if (body.contains("\"username\"") && body.contains("\"password\"")
+                            && body.contains("\"isAdmin\":true")) {
+                        return ok("{\"id\":9,\"username\":\"alice\",\"isAdmin\":true}");
+                    }
+                    if (!body.contains("\"username\"") || !body.contains("\"password\"")) {
+                        return new HttpResponse(400, "{\"error\":\"username and password required\"}", Map.of());
+                    }
+                    return ok("{\"id\":9,\"username\":\"alice\",\"isAdmin\":false}");
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(
+                        f -> "Mass Assignment - Privilege Escalation via Object Properties".equals(f.getTitle())),
+                "Should detect mass assignment when required fields are preserved");
+    }
+
+    @Test
+    @DisplayName("credit privileged field is present in mass-assignment payloads")
+    void creditFieldIsProbed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST");
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(b -> b.contains("\"credit\"")),
+                "At least one payload must include credit as promised by the docs: " + bodyCaptor.getAllValues());
     }
 }
