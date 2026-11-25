@@ -108,7 +108,7 @@ Two complementary techniques:
 ### BOPLA / Mass Assignment / Excessive Data Exposure (`ASTF-API3-2023`)
 
 - **Excessive data exposure**: scans GET responses for sensitive field names (`password`, `secret`, `ssn`, `credit_card`, ...) that shouldn't be in a client-facing payload.
-- **Mass assignment**: sends a POST/PUT with extra, unexpected privileged fields (`isAdmin`, `role`, `credit`, ...) injected into the body and checks whether the server accepted and applied them.
+- **Mass assignment**: merges unexpected privileged fields (`isAdmin`, `role`, `credit`, `admin`, ...) into the endpoint's discovered JSON request body (or a realistic unique filler with `username`/`password`/`email`/`name` when none is known) and checks whether the server accepted and applied them — so endpoints that require ordinary fields (e.g. register) still reach property-binding code.
 
 **Strategy note:** Authorization testing is the category where "the check ran and found nothing" is least trustworthy on its own — a missing finding could mean the target is genuinely secure, or it could mean ASTF never discovered the right endpoint/identity/path shape to test. Cross-check anything security-critical manually, especially endpoints your discovery pass might have missed (see [Result Interpretation](#result-interpretation--false-positive-reduction)).
 
