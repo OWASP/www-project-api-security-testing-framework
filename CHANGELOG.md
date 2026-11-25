@@ -10,7 +10,7 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Fixed
 
-- **API6 false HIGH on validation-only bursts.** `UnrestrictedAccessToSensitiveFlowsTestCase` treated HTTP 422 as a successful abuse attempt, so an endpoint that rejected every request as invalid was reported HIGH for missing rate limiting. Only accepted (2xx) attempts now count toward the abuse threshold; an all-rejected burst is reported INFO "Inconclusive" with guidance to supply a valid `requestBody`. Body-level throttle markers (`rate limit exceeded` / `throttled` / …) and HTTP 423 are recognized the same way as in the API4 rate-limit check.
+- **API6 false HIGH on validation-only bursts.** `UnrestrictedAccessToSensitiveFlowsTestCase` treated HTTP 422 as a successful abuse attempt, so an endpoint that rejected every request as invalid was reported HIGH for missing rate limiting. Only accepted (2xx) attempts count toward the HIGH finding. A burst that was never throttled but had rejected attempts is MEDIUM "Not Throttled" when some attempts were accepted or a sample `requestBody` was configured (rejected attempts can be failed OTP or coupon guesses), and INFO "Inconclusive" when ASTF could only send `{}`. 404, 405 and 410 are not counted as attempts. Body-level throttle markers (`rate limit exceeded` / `throttled` / …) and HTTP 423 are recognized the same way as in the API4 rate-limit check.
 
 ## 2.0.2 (patch)
 

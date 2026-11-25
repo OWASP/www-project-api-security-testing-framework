@@ -136,22 +136,46 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
             );
             finding.setEvidence(successCount + " automated requests succeeded without triggering protections");
             findings.add(finding);
-        } else if (successCount == 0 && rateLimitedCount == 0 && rejectedInvalidCount > 0) {
-            Finding finding = new Finding(
-                    UUID.randomUUID().toString(),
-                    "Inconclusive: every attempt was rejected as invalid; supply a valid request body via config endpoints requestBody",
-                    String.format("The sensitive business flow endpoint rejected all %d automated attempts " +
-                            "with client errors (HTTP 4xx other than 429/423). Validation failures are not " +
-                            "evidence that the flow can be abused, so missing rate limiting cannot be confirmed. " +
-                            "Provide a valid sample body via the config endpoints requestBody field and re-scan.",
-                            rejectedInvalidCount),
-                    Severity.INFO,
-                    getId(),
-                    endpoint.getMethod() + " " + endpoint.getPath(),
-                    "Supply a realistic requestBody for this endpoint in the scan configuration so the " +
-                    "abuse/rate-limit check can exercise the accepted business path."
-            );
-            finding.setEvidence(rejectedInvalidCount + " attempts rejected as invalid (4xx); none accepted (2xx)");
+        } else if (rateLimitedCount == 0 && successCount + rejectedInvalidCount >= FLOW_ABUSE_THRESHOLD) {
+            // Rejected attempts with a real sample body can be failed guesses (wrong OTP, coupon,
+            // password) that are never throttled; with the {} placeholder they are only missing fields.
+            boolean realBodySupplied = endpoint.getRequestBody() != null
+                    && !endpoint.getRequestBody().isBlank() && !endpoint.getRequestBody().trim().equals("{}");
+            Finding finding;
+            if (successCount > 0 || realBodySupplied) {
+                finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Sensitive Business Flow Not Throttled (attempts rejected, never limited)",
+                        String.format("The sensitive business flow endpoint answered %d consecutive automated " +
+                                "requests without any throttling signal: %d were accepted and %d were rejected " +
+                                "with HTTP 4xx. If the rejections are failed guesses (for example a wrong OTP or " +
+                                "coupon code), an attacker can keep guessing without limit.",
+                                successCount + rejectedInvalidCount, successCount, rejectedInvalidCount),
+                        Severity.MEDIUM,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Throttle or lock out repeated attempts on sensitive flows, counting failed attempts, " +
+                        "not only successful ones."
+                );
+            } else {
+                finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Sensitive Business Flow Rate Limiting Inconclusive (all attempts rejected as invalid)",
+                        String.format("The sensitive business flow endpoint rejected all %d automated attempts " +
+                                "with HTTP 4xx (other than 429/423). ASTF had no sample request body for this " +
+                                "endpoint and sent {}, so the rejections are most likely missing-field validation " +
+                                "errors, which say nothing about whether the flow can be abused. Provide a valid " +
+                                "sample body via the config endpoints requestBody field and re-scan.",
+                                rejectedInvalidCount),
+                        Severity.INFO,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Supply a realistic requestBody for this endpoint in the scan configuration so the " +
+                        "abuse/rate-limit check can exercise the accepted business path."
+                );
+            }
+            finding.setEvidence(successCount + " accepted (2xx), " + rejectedInvalidCount +
+                    " rejected (4xx), 0 throttled; request body: " + (realBodySupplied ? "configured sample" : "{} placeholder"));
             findings.add(finding);
         }
 
@@ -164,8 +188,11 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
                 || bodyIndicatesRateLimited(response.getBody());
     }
 
+    /** 4xx other than throttling (429/423) and other than "path not served" (404/405/410). */
     private boolean isClientRejection(int statusCode) {
-        return statusCode >= 400 && statusCode < 500 && statusCode != 429 && statusCode != 423;
+        return statusCode >= 400 && statusCode < 500
+                && statusCode != 429 && statusCode != 423
+                && statusCode != 404 && statusCode != 405 && statusCode != 410;
     }
 
     private boolean bodyIndicatesRateLimited(String body) {

@@ -184,8 +184,39 @@ class UnrestrictedAccessToSensitiveFlowsTestCaseTest {
                 "Validation rejections must not be reported as missing rate limiting");
         assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.INFO
                         && f.getTitle().contains("Inconclusive")
-                        && f.getTitle().contains("requestBody")),
+                        && f.getDescription().contains("requestBody")),
                 "Should report INFO inconclusive when every attempt is rejected as invalid");
+    }
+
+    @Test
+    @DisplayName("All-422 burst with a configured sample body is MEDIUM (failed guesses never throttled)")
+    void testAll422WithRealBodyIsMedium() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/otp/verify", "POST", "application/json",
+                "{\"phone\":\"+15550100\",\"code\":\"000000\"}", false);
+        endpoint.setBaseUrl("https://api.example.com");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(422, "{\"error\":\"invalid code\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Not Throttled")
+                && f.getSeverity() == Severity.MEDIUM));
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.HIGH));
+    }
+
+    @Test
+    @DisplayName("All-404 burst (path not served) produces no rate-limit finding")
+    void testAll404IsNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/otp/verify", "POST", "application/json",
+                "{\"code\":\"000000\"}", false);
+        endpoint.setBaseUrl("https://api.example.com");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(404, "{\"error\":\"not found\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Throttled")
+                || f.getTitle().contains("Rate Limiting")));
     }
 
     @Test
