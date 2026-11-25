@@ -3,6 +3,7 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -37,6 +38,14 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
 
     private static final int FLOW_ABUSE_THRESHOLD = 10; // Requests before rate limiting expected
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    // Same body-level throttle phrases as UnrestrictedResourceConsumptionTestCase — docs promise
+    // these markers for login/reset flows, and some APIs signal rejection via a 200 body message.
+    private static final List<String> THROTTLE_BODY_MARKERS = List.of(
+            "quota exceeded", "rate limit exceeded", "too many requests", "throttled", "slow down"
+    );
+
     @Override
     public String getId() {
         return "ASTF-API6-2023";
@@ -70,7 +79,7 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
     }
 
     private boolean isSensitiveBusinessFlow(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
+        String path = endpoint.getPath().toLowerCase(Locale.ROOT);
         return SENSITIVE_FLOW_PATTERNS.stream().anyMatch(path::contains);
     }
 
@@ -83,6 +92,7 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
 
         int successCount = 0;
         int rateLimitedCount = 0;
+        int rejectedInvalidCount = 0;
         String body = endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}";
 
         for (int i = 0; i < FLOW_ABUSE_THRESHOLD; i++) {
@@ -91,12 +101,15 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
                         endpoint.getFullUrl(), Map.of(), "application/json", body);
 
                 if (response != null) {
-                    if (response.isRateLimited()) {
+                    if (isThrottleSignal(response)) {
                         rateLimitedCount++;
                         break;
-                    } else if (response.isSuccess() || response.getStatusCode() == 422) {
-                        // 422 Unprocessable Entity still counts — request reached the business layer
+                    } else if (response.isSuccess()) {
                         successCount++;
+                    } else if (isClientRejection(response.getStatusCode())) {
+                        // 4xx (other than 429/423) means the request never reached an accepted
+                        // business-flow outcome — not evidence the flow can be abused.
+                        rejectedInvalidCount++;
                     }
                 }
             } catch (Exception e) {
@@ -123,9 +136,44 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
             );
             finding.setEvidence(successCount + " automated requests succeeded without triggering protections");
             findings.add(finding);
+        } else if (successCount == 0 && rateLimitedCount == 0 && rejectedInvalidCount > 0) {
+            Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "Inconclusive: every attempt was rejected as invalid; supply a valid request body via config endpoints requestBody",
+                    String.format("The sensitive business flow endpoint rejected all %d automated attempts " +
+                            "with client errors (HTTP 4xx other than 429/423). Validation failures are not " +
+                            "evidence that the flow can be abused, so missing rate limiting cannot be confirmed. " +
+                            "Provide a valid sample body via the config endpoints requestBody field and re-scan.",
+                            rejectedInvalidCount),
+                    Severity.INFO,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Supply a realistic requestBody for this endpoint in the scan configuration so the " +
+                    "abuse/rate-limit check can exercise the accepted business path."
+            );
+            finding.setEvidence(rejectedInvalidCount + " attempts rejected as invalid (4xx); none accepted (2xx)");
+            findings.add(finding);
         }
 
         return findings;
+    }
+
+    private boolean isThrottleSignal(HttpResponse response) {
+        return response.isRateLimited()
+                || response.getStatusCode() == 423
+                || bodyIndicatesRateLimited(response.getBody());
+    }
+
+    private boolean isClientRejection(int statusCode) {
+        return statusCode >= 400 && statusCode < 500 && statusCode != 429 && statusCode != 423;
+    }
+
+    private boolean bodyIndicatesRateLimited(String body) {
+        if (body == null || body.isEmpty()) {
+            return false;
+        }
+        String lower = body.toLowerCase(Locale.ROOT);
+        return THROTTLE_BODY_MARKERS.stream().anyMatch(lower::contains);
     }
 
     private List<Finding> testMissingBotProtection(EndpointInfo endpoint, HttpClient httpClient) {
@@ -139,9 +187,9 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
 
             if (response == null) return findings;
 
-            boolean hasCaptchaChallenge = response.getBody().toLowerCase().contains("captcha")
-                    || response.getBody().toLowerCase().contains("recaptcha")
-                    || response.getBody().toLowerCase().contains("challenge");
+            boolean hasCaptchaChallenge = response.getBody().toLowerCase(Locale.ROOT).contains("captcha")
+                    || response.getBody().toLowerCase(Locale.ROOT).contains("recaptcha")
+                    || response.getBody().toLowerCase(Locale.ROOT).contains("challenge");
             boolean hasRateLimitHeaders = response.hasHeader("X-RateLimit-Limit")
                     || response.hasHeader("X-Rate-Limit")
                     || response.hasHeader("RateLimit-Limit")

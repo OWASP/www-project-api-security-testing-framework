@@ -9,6 +9,7 @@ import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
@@ -162,5 +163,78 @@ class UnrestrictedAccessToSensitiveFlowsTestCaseTest {
         // Must not propagate the exception
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    @Test
+    @DisplayName("All-422 burst is INFO inconclusive, not HIGH missing rate limiting")
+    void testAll422IsInconclusiveNotHigh() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/register", "POST");
+        HttpResponse unprocessable = new HttpResponse(422, "{\"error\":\"validation failed\"}", Map.of());
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(unprocessable);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == Severity.HIGH
+                        && (f.getTitle().contains("Rate Limiting")
+                        || f.getTitle().contains("Without Rate Limiting"))),
+                "Validation rejections must not be reported as missing rate limiting");
+        assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.INFO
+                        && f.getTitle().contains("Inconclusive")
+                        && f.getTitle().contains("requestBody")),
+                "Should report INFO inconclusive when every attempt is rejected as invalid");
+    }
+
+    @Test
+    @DisplayName("2xx burst with no throttle still reports HIGH missing rate limiting")
+    void testAcceptedBurstStillHigh() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/checkout", "POST");
+        HttpResponse ok = ok();
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok, ok, ok, ok, ok, ok, ok, ok, ok, ok);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getSeverity() == Severity.HIGH
+                        && f.getTitle().contains("Without Rate Limiting")),
+                "Accepted 2xx burst without throttle must still be HIGH");
+    }
+
+    @Test
+    @DisplayName("429 mid-burst produces no rate-limit finding")
+    void test429MidBurstProducesNone() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/checkout", "POST");
+        HttpResponse ok = ok();
+        HttpResponse limited = rateLimited();
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok, ok, ok, limited);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Rate Limiting")
+                        || f.getTitle().contains("Without Rate Limiting")
+                        || f.getTitle().contains("Inconclusive")),
+                "A 429 mid-burst means protection worked; no rate-limit or inconclusive finding");
+    }
+
+    @Test
+    @DisplayName("Body-level throttle marker on 200 counts as rate limiting present")
+    void testBodyLevelThrottleMarkerCounts() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/checkout", "POST");
+        HttpResponse ok = ok();
+        HttpResponse throttledBody = new HttpResponse(200,
+                "{\"error\":\"rate limit exceeded, please slow down\"}", Map.of());
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok, ok, throttledBody);
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Without Rate Limiting")),
+                "A 200 body that signals throttling must count as rate limiting present");
     }
 }

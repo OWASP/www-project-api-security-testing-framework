@@ -8,6 +8,10 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
+### Fixed
+
+- **API6 false HIGH on validation-only bursts.** `UnrestrictedAccessToSensitiveFlowsTestCase` treated HTTP 422 as a successful abuse attempt, so an endpoint that rejected every request as invalid was reported HIGH for missing rate limiting. Only accepted (2xx) attempts now count toward the abuse threshold; an all-rejected burst is reported INFO "Inconclusive" with guidance to supply a valid `requestBody`. Body-level throttle markers (`rate limit exceeded` / `throttled` / …) and HTTP 423 are recognized the same way as in the API4 rate-limit check.
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).
