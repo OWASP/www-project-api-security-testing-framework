@@ -156,6 +156,7 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--output` | `-o` | Output file path | stdout |
 | `--token` | | Bearer token (`Authorization: Bearer …`) | — |
 | `--secondary-token` | | Bearer token for a **second, distinct** authenticated identity — enables cross-user BOLA testing (see [Testing Guidelines](docs/TESTING_GUIDELINES.md#authorization-testing-methodologies)) | — |
+| `--allow-destructive` | | Let the BOLA checks send the endpoint's own `PUT`/`PATCH`/`DELETE`/`POST`. Without it they use a read-only `GET` on the same URL and report any check they had to hold back. Use only against test accounts whose data may be changed or deleted. Config key: `allowDestructive` | off |
 | `--client-cert` | | Path to a PKCS12 (`.p12`/`.pfx`) keystore with a client certificate to present for mutual TLS | — |
 | `--client-cert-password` | | Password for `--client-cert` | — |
 | `--invalid-client-cert` | | Path to a deliberately invalid/untrusted PKCS12 keystore, used alongside `--client-cert` to test whether the server actually validates client certificates | — |
