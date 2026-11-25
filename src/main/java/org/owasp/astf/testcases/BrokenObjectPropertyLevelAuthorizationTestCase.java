@@ -233,6 +233,10 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
         for (String field : FILLER_FIELD_NAMES) {
             if ("email".equals(field)) {
                 root.put(field, unique + "@example.com");
+            } else if ("password".equals(field)) {
+                // Upper, lower, digit and symbol, so common password-strength rules don't reject the
+                // request before property binding runs.
+                root.put(field, "Astf!" + unique + "9Q");
             } else {
                 root.put(field, unique);
             }
