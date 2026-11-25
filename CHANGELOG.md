@@ -6,7 +6,11 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Added
 
-- **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
+- **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login: DVGA's `systemDiagnostics(username, password, cmd)`: went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
+
+### Fixed
+
+- **API6 skipped login and password-reset flows** (#175, part 2). `TESTING_GUIDELINES.md` says `ASTF-API6-2023` covers login, OTP, payment and password-reset flows, but the sensitive-flow path list had no `login`, `signin`, `password`, `reset` or `forgot`, so those endpoints were never exercised. They are now. The existing words are unchanged and match as before, so no endpoint that was tested before stops being tested. This change is meant to land after the fix for the first half of #175 (all-rejected attempts reported as HIGH), because a login that answers `{}` with a validation error would otherwise be reported at HIGH.
 
 ## 2.0.2 (patch)
 

@@ -32,7 +32,10 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
             "transfer", "withdraw", "deposit",
             "vote", "like", "review", "rate",
             "invite", "refer", "share",
-            "otp", "verify", "verification", "confirm"
+            "otp", "verify", "verification", "confirm",
+            // Credential flows. TESTING_GUIDELINES.md says API6 covers login and password reset,
+            // but none of these words were listed, so those endpoints were never exercised (#175).
+            "login", "signin", "sign-in", "sign_in", "password", "reset", "forgot"
     );
 
     private static final int FLOW_ABUSE_THRESHOLD = 10; // Requests before rate limiting expected
