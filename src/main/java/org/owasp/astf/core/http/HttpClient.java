@@ -226,6 +226,13 @@ public class HttpClient {
         }
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
+    /**
+     * @return true when state-changing requests are permitted ({@code --allow-destructive}); test
+     *     cases must otherwise use read-only requests and report what they held back
+     */
+    public boolean isDestructiveTestingAllowed() {
+        return config.isAllowDestructive();
+    }
 
     /** @return true if a secondary identity was configured via {@code --secondary-token} */
     public boolean hasSecondaryIdentity() {

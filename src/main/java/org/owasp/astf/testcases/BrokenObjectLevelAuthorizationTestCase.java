@@ -3,7 +3,9 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -57,6 +59,16 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     );
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private static final ObjectMapper STATIC_MAPPER = new ObjectMapper();
+    private static final Set<String> STATE_CHANGING_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
+    // Fields that name an object rather than describe it; used to recognise the same object in two
+    // responses that differ only in viewer-specific fields.
+    private static final Pattern IDENTIFIER_KEY = Pattern.compile(
+            "(?i)^(id|_id|uuid|guid|.*[_-]id|.*Id|.*uuid|username|user_name|email|slug)$");
+    private static final String CROSS_USER_REMEDIATION =
+            "Verify that every object-returning endpoint checks the authenticated caller's " +
+            "ownership of or explicit permission for the specific object requested, not merely " +
+            "that the caller is authenticated at all.";
 
     @Override
     public String getId() {
@@ -138,90 +150,10 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         }
 
         try {
-            String url = endpoint.getFullUrl();
-            HttpResponse primaryResponse = makeRequest(endpoint, url, httpClient, Map.of());
-            HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, false);
-
-            // Behind an API gateway that requires an application API key from every caller in
-            // addition to the user's bearer token, the secondary token alone is always rejected.
-            // Try again with the secondary token plus the application credential (never the
-            // primary token, cookies or other custom headers) so the check still runs there.
-            HttpResponse bareSecondaryResponse = secondaryResponse;
-            boolean withApplicationCredentials = false;
-            if (primaryResponse != null && primaryResponse.isSuccess()
-                    && secondaryResponse != null
-                    && (secondaryResponse.isUnauthorized() || secondaryResponse.isForbidden())
-                    && httpClient.hasApplicationCredentials()) {
-                secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, true);
-                withApplicationCredentials = true;
-            }
-
-            // Last resort, so 2.1.0 never finds less than 2.0.2: if the secondary-only request (and the
-            // application-credential variant) was rejected, send the request exactly as 2.0.2 did, the
-            // primary request with only the Authorization header replaced by the secondary token. Other
-            // custom headers and cookies ride along then, so a success cannot be pinned on the secondary
-            // identity alone and is reported at HIGH, listing what was sent.
-            List<String> riding = httpClient.getHeaderNamesBesidesAuthorization(url);
-            if (primaryResponse != null && primaryResponse.isSuccess()
-                    && secondaryResponse != null && !secondaryResponse.isSuccess()
-                    && secondaryResponse.getStatusCode() >= 400 && secondaryResponse.getStatusCode() < 500
-                    && !riding.isEmpty()) {
-                HttpResponse legacyResponse = makeRequest(endpoint, url, httpClient,
-                        httpClient.getSecondaryAuthHeaders());
-                if (legacyResponse != null && legacyResponse.isSuccess() && !legacyResponse.isNotFound()) {
-                    Finding finding = new Finding(
-                            UUID.randomUUID().toString(),
-                            "Broken Object Level Authorization (Cross-User Access, other configured headers kept)",
-                            String.format("A request carrying the second identity's token in place of the " +
-                                    "Authorization header was able to access '%s', the same object the primary " +
-                                    "identity can access. The secondary token alone was rejected (HTTP %d), so the " +
-                                    "other configured headers or cookies sent with it may identify the primary " +
-                                    "user, and the access cannot be attributed to the secondary identity alone.",
-                                    endpoint.getPath(), secondaryResponse.getStatusCode()),
-                            Severity.HIGH,
-                            getId(),
-                            endpoint.getMethod() + " " + endpoint.getPath(),
-                            CROSS_USER_REMEDIATION
-                    );
-                    finding.setRequestDetails(endpoint.getMethod() + " " + url +
-                            " (primary request with only the Authorization header replaced by the secondary token; "
-                            + "still sent: " + String.join(", ", riding) + ")");
-                    finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
-                            "\nSecondary token alone: " + secondaryResponse.getStatusCode() +
-                            "\nSecondary token with the other headers kept: " + legacyResponse.getStatusCode());
-                    findings.add(finding);
-                    return findings;
-                }
-            }
-
-            if (primaryResponse != null && secondaryResponse != null
-                    && primaryResponse.isSuccess()
-                    && secondaryResponse.isSuccess()
-                    && !secondaryResponse.isNotFound()) {
-                if (withApplicationCredentials) {
-                    findings.add(createGatewayCrossUserFinding(endpoint, httpClient, primaryResponse,
-                            bareSecondaryResponse, secondaryResponse));
-                } else {
-                    Finding finding = new Finding(
-                            UUID.randomUUID().toString(),
-                            "Broken Object Level Authorization (Cross-User Access Confirmed)",
-                            String.format("A second, distinct authenticated identity was able to access " +
-                                    "'%s' — the same object the primary identity can access — without any " +
-                                    "ID substitution. This is direct evidence of a missing object-level " +
-                                    "authorization check, not an inference from ID guessing.",
-                                    endpoint.getPath()),
-                            Severity.CRITICAL,
-                            getId(),
-                            endpoint.getMethod() + " " + endpoint.getPath(),
-                            CROSS_USER_REMEDIATION
-                    );
-                    finding.setRequestDetails(endpoint.getMethod() + " " + url +
-                            " (requested with two distinct identities: the primary credentials, then the " +
-                            "secondary token alone)");
-                    finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
-                            "\nSecondary identity status: " + secondaryResponse.getStatusCode());
-                    findings.add(finding);
-                }
+            if (isStateChanging(endpoint) && httpClient.isDestructiveTestingAllowed()) {
+                findings.addAll(testCrossUserWrite(endpoint, httpClient));
+            } else {
+                findings.addAll(testCrossUserRead(endpoint, httpClient));
             }
         } catch (Exception e) {
             logger.debug("Error testing cross-user BOLA on {}: {}", endpoint, e.getMessage());
@@ -229,11 +161,300 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
 
         return findings;
     }
+    /**
+     * Read-only cross-user check. A state-changing endpoint is probed with GET on the same URL,
+     * so the scan never modifies or deletes an object it does not own unless the operator passed
+     * {@code --allow-destructive}.
+     * <p>
+     * Two 2xx status codes alone do not prove BOLA: a public object, or an endpoint that returns
+     * each caller's own record whatever the ID, also answers 2xx to both identities. The result is
+     * CRITICAL only when the secondary identity receives the primary identity's object (see
+     * {@link #sameObject}) and an anonymous request does not; a 2xx with different content is
+     * kept as MEDIUM so it can be checked by hand.
+     */
+    private List<Finding> testCrossUserRead(EndpointInfo endpoint, HttpClient httpClient) throws IOException {
+        List<Finding> findings = new ArrayList<>();
+        // This path is only taken for a state-changing method when --allow-destructive is NOT set, so
+        // a state-changing endpoint is always probed with a GET here.
+        boolean readOnly = isStateChanging(endpoint);
+        String url = endpoint.getFullUrl();
 
-    private static final String CROSS_USER_REMEDIATION =
-            "Verify that every object-returning endpoint checks the authenticated caller's " +
-            "ownership of or explicit permission for the specific object requested, not merely " +
-            "that the caller is authenticated at all.";
+        HttpResponse primaryResponse = readOrRequest(endpoint, url, httpClient, Map.of());
+        if (primaryResponse == null || !primaryResponse.isSuccess()) {
+            if (readOnly) {
+                findings.add(heldBackFinding(endpoint, primaryResponse));
+            }
+            return findings;
+        }
+
+        HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, false, readOnly);
+
+        // Behind an API gateway that requires an application API key from every caller in
+        // addition to the user's bearer token, the secondary token alone is always rejected.
+        // Try again with the secondary token plus the application credential (never the
+        // primary token, cookies or other custom headers) so the check still runs there.
+        HttpResponse bareSecondaryResponse = secondaryResponse;
+        boolean withApplicationCredentials = false;
+        if (secondaryResponse != null
+                && (secondaryResponse.isUnauthorized() || secondaryResponse.isForbidden())
+                && httpClient.hasApplicationCredentials()) {
+            secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, true, readOnly);
+            withApplicationCredentials = true;
+        }
+
+        String probeNote = readOnly
+                ? " The check used a read-only GET on the URL of this " + endpoint.getMethod() + " endpoint; the "
+                  + endpoint.getMethod() + " itself was not sent (use --allow-destructive against test accounts to send it)."
+                : "";
+        String sentMethod = readOnly ? "GET" : endpoint.getMethod();
+
+        // Last resort, so 2.1.0 never finds less than 2.0.2: if the secondary-only request (and the
+        // application-credential variant) was rejected, send the request as 2.0.2 did, the primary
+        // request with only the Authorization header replaced by the secondary token. Other custom
+        // headers and cookies ride along then, so a success cannot be pinned on the secondary
+        // identity alone and is reported at HIGH, listing what was sent.
+        List<String> riding = httpClient.getHeaderNamesBesidesAuthorization(url);
+        if (secondaryResponse != null && !secondaryResponse.isSuccess()
+                && secondaryResponse.getStatusCode() >= 400 && secondaryResponse.getStatusCode() < 500
+                && !riding.isEmpty()) {
+            HttpResponse legacyResponse = readOrRequest(endpoint, url, httpClient,
+                    httpClient.getSecondaryAuthHeaders());
+            if (legacyResponse != null && legacyResponse.isSuccess() && !legacyResponse.isNotFound()) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Broken Object Level Authorization (Cross-User Access, other configured headers kept)",
+                        String.format("A request carrying the second identity's token in place of the " +
+                                "Authorization header was able to access '%s', the same object the primary " +
+                                "identity can access. The secondary token alone was rejected (HTTP %d), so the " +
+                                "other configured headers or cookies sent with it may identify the primary " +
+                                "user, and the access cannot be attributed to the secondary identity alone.%s",
+                                endpoint.getPath(), secondaryResponse.getStatusCode(), probeNote),
+                        Severity.HIGH,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        CROSS_USER_REMEDIATION
+                );
+                finding.setRequestDetails(sentMethod + " " + url +
+                        " (primary request with only the Authorization header replaced by the secondary token; "
+                        + "still sent: " + String.join(", ", riding) + ")");
+                finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                        "\nSecondary token alone: " + secondaryResponse.getStatusCode() +
+                        "\nSecondary token with the other headers kept: " + legacyResponse.getStatusCode());
+                findings.add(finding);
+                return findings;
+            }
+        }
+
+        if (secondaryResponse == null || !secondaryResponse.isSuccess() || secondaryResponse.isNotFound()) {
+            return findings;
+        }
+
+        // Two 2xx responses do not prove BOLA: a public object answers everyone. An anonymous request
+        // for the same object means there is no object-level boundary to break.
+        HttpResponse anonymousResponse = httpClient.getWithStatusNoAuth(url);
+        if (anonymousResponse != null && anonymousResponse.isSuccess()
+                && sameObject(primaryResponse.getBody(), anonymousResponse.getBody())) {
+            logger.debug("Cross-user BOLA on {} not reported: the object is also returned without credentials " +
+                    "(public object; missing authentication is reported by ASTF-API2-2023)", endpoint);
+            return findings;
+        }
+
+        boolean sameObject = sameObject(primaryResponse.getBody(), secondaryResponse.getBody());
+        Finding finding;
+        if (sameObject && withApplicationCredentials) {
+            finding = createGatewayCrossUserFinding(endpoint, httpClient, primaryResponse,
+                    bareSecondaryResponse, secondaryResponse, readOnly);
+        } else if (sameObject) {
+            finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "Broken Object Level Authorization (Cross-User Access Confirmed)",
+                    String.format("A second, distinct authenticated identity received the same object as the " +
+                            "primary identity from '%s', without any ID substitution, and the object is not " +
+                            "returned to an anonymous request. This is direct evidence of a missing " +
+                            "object-level authorization check, not an inference from ID guessing.%s",
+                            endpoint.getPath(), probeNote),
+                    Severity.CRITICAL,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    CROSS_USER_REMEDIATION
+            );
+            finding.setRequestDetails(sentMethod + " " + url +
+                    " (requested with two distinct identities: the primary credentials, then the " +
+                    "secondary token alone; and with no credentials)");
+            finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                    "\nSecondary identity status: " + secondaryResponse.getStatusCode() +
+                    "\nAnonymous status: " + (anonymousResponse != null ? anonymousResponse.getStatusCode() : "not sent"));
+        } else {
+            finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "Broken Object Level Authorization (Cross-User Access Not Confirmed)",
+                    String.format("Both identities received a 2xx response from '%s', but the secondary identity's " +
+                            "response does not contain the primary identity's object. The endpoint may return each " +
+                            "caller's own data regardless of the ID in the path, which is not BOLA. Compare the two " +
+                            "responses by hand before reporting.%s", endpoint.getPath(), probeNote),
+                    Severity.MEDIUM,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    CROSS_USER_REMEDIATION
+            );
+            finding.setRequestDetails(sentMethod + " " + url +
+                    " (requested with the primary credentials, the secondary token"
+                    + (withApplicationCredentials ? " plus the application credential" : " alone")
+                    + ", and no credentials)");
+            finding.setResponseDetails("Primary identity status: " + primaryResponse.getStatusCode() +
+                    "\nSecondary identity status: " + secondaryResponse.getStatusCode() +
+                    "\nAnonymous status: " + (anonymousResponse != null ? anonymousResponse.getStatusCode() : "not sent") +
+                    "\nSecondary received primary's object: false");
+        }
+        findings.add(finding);
+        return findings;
+    }
+
+    /**
+     * Destructive cross-user check, only with {@code --allow-destructive}. The secondary identity's
+     * request is sent first: on a stateful API a DELETE or one-time update that the primary identity
+     * ran first would leave nothing for the secondary identity to act on, hiding the bug. A read-only
+     * GET by the primary identity afterwards records whether the object was changed or removed.
+     * The secondary identity is sent the way {@link #testCrossUserRead} sends it (token only, then
+     * with the application credential behind a gateway). The "other headers kept" fallback is not
+     * used here: it would send the real method with the primary's headers and cookies attached.
+     */
+    private List<Finding> testCrossUserWrite(EndpointInfo endpoint, HttpClient httpClient) throws IOException {
+        List<Finding> findings = new ArrayList<>();
+        String url = endpoint.getFullUrl();
+
+        HttpResponse secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, false, false);
+        boolean withApplicationCredentials = false;
+        if (secondaryResponse != null
+                && (secondaryResponse.isUnauthorized() || secondaryResponse.isForbidden())
+                && httpClient.hasApplicationCredentials()) {
+            secondaryResponse = makeSecondaryRequest(endpoint, url, httpClient, true, false);
+            withApplicationCredentials = true;
+        }
+        if (secondaryResponse == null || !secondaryResponse.isSuccess() || secondaryResponse.isNotFound()) {
+            return findings;
+        }
+        HttpResponse ownerFollowUp = httpClient.getWithStatus(url, Map.of());
+
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Broken Object Level Authorization (Cross-User Access Confirmed)",
+                String.format("A second, distinct authenticated identity's %s to '%s', an object reachable by " +
+                        "the primary identity, was accepted without any ID substitution. This is direct evidence " +
+                        "of a missing object-level authorization check on a state-changing operation.%s",
+                        endpoint.getMethod(), endpoint.getPath(),
+                        withApplicationCredentials
+                                ? " The request carried the secondary token plus the application credential ("
+                                  + String.join(", ", httpClient.getApplicationCredentialHeaderNames())
+                                  + "), and no primary token, cookie or other custom header."
+                                : ""),
+                Severity.CRITICAL,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                CROSS_USER_REMEDIATION
+        );
+        finding.setRequestDetails(endpoint.getMethod() + " " + url + " (sent with the secondary token"
+                + (withApplicationCredentials ? " plus the application credential" : "")
+                + " and --allow-destructive, then GET with the primary token)");
+        finding.setResponseDetails("Secondary identity status: " + secondaryResponse.getStatusCode() +
+                "\nPrimary identity follow-up GET status: " +
+                (ownerFollowUp != null ? ownerFollowUp.getStatusCode() : "no response") +
+                (ownerFollowUp != null && ownerFollowUp.isNotFound()
+                        ? " (the object no longer exists for its owner)" : ""));
+        findings.add(finding);
+        return findings;
+    }
+
+    private Finding heldBackFinding(EndpointInfo endpoint, HttpResponse readProbe) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Broken Object Level Authorization Check Held Back (state-changing method)",
+                String.format("The cross-user check for %s %s was not run because it would modify or delete " +
+                        "an object, and the read-only GET used instead could not reach the object (status %s). " +
+                        "Re-run with --allow-destructive against test accounts whose data may be changed to " +
+                        "send the %s itself.", endpoint.getMethod(), endpoint.getPath(),
+                        readProbe != null ? readProbe.getStatusCode() : "no response", endpoint.getMethod()),
+                Severity.INFO,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Run the destructive cross-user check against an isolated environment, or verify this endpoint's " +
+                "object-level authorization manually."
+        );
+        finding.setRequestDetails("GET " + endpoint.getFullUrl() + " — read-only substitute for " + endpoint.getMethod());
+        return finding;
+    }
+
+    /**
+     * True when both bodies describe the same object: identical text, identical JSON, or, for JSON
+     * objects, every identifier-like field of {@code expected} (id, uuid, username, email, ...) is
+     * present in {@code actual} with the same value. Viewer-specific fields such as timestamps do
+     * not make two copies of one object look different.
+     */
+    static boolean sameObject(String expected, String actual) {
+        if (expected == null || actual == null || expected.isBlank() || actual.isBlank()) {
+            return false;
+        }
+        if (expected.trim().equals(actual.trim())) {
+            return true;
+        }
+        try {
+            JsonNode a = STATIC_MAPPER.readTree(expected);
+            JsonNode b = STATIC_MAPPER.readTree(actual);
+            if (a.equals(b)) {
+                return true;
+            }
+            JsonNode objA = unwrapSingleObject(a);
+            JsonNode objB = unwrapSingleObject(b);
+            if (objA == null || objB == null) {
+                return false;
+            }
+            int identifiers = 0;
+            var fields = objA.fields();
+            while (fields.hasNext()) {
+                var field = fields.next();
+                if (!field.getValue().isValueNode() || !IDENTIFIER_KEY.matcher(field.getKey()).matches()) {
+                    continue;
+                }
+                identifiers++;
+                JsonNode other = objB.get(field.getKey());
+                if (other == null || !other.equals(field.getValue())) {
+                    return false;
+                }
+            }
+            return identifiers > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static JsonNode unwrapSingleObject(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        if (node.size() == 1) {
+            JsonNode only = node.elements().next();
+            if (only.isObject()) {
+                return only;
+            }
+        }
+        return node;
+    }
+
+    private static boolean isStateChanging(EndpointInfo endpoint) {
+        return STATE_CHANGING_METHODS.contains(endpoint.getMethod().toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * Sends the endpoint's own method when it is read-only or {@code --allow-destructive} is set;
+     * otherwise sends a GET to the same URL.
+     */
+    private HttpResponse readOrRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                       Map<String, String> headers) throws IOException {
+        if (isStateChanging(endpoint) && !httpClient.isDestructiveTestingAllowed()) {
+            return httpClient.getWithStatus(url, headers);
+        }
+        return makeRequest(endpoint, url, httpClient, headers);
+    }
 
     /**
      * Builds the cross-user finding for a secondary request that was only accepted with the
@@ -245,13 +466,13 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      */
     private Finding createGatewayCrossUserFinding(EndpointInfo endpoint, HttpClient httpClient,
                                                   HttpResponse primaryResponse, HttpResponse bareSecondaryResponse,
-                                                  HttpResponse secondaryResponse) {
+                                                  HttpResponse secondaryResponse, boolean readOnly) {
         String url = endpoint.getFullUrl();
         String credentialNames = String.join(", ", httpClient.getApplicationCredentialHeaderNames());
 
         HttpResponse controlResponse = null;
         try {
-            controlResponse = makeApplicationCredentialOnlyRequest(endpoint, url, httpClient);
+            controlResponse = makeApplicationCredentialOnlyRequest(endpoint, url, httpClient, readOnly);
         } catch (Exception e) {
             logger.debug("Application-credential-only control request on {} failed: {}", endpoint, e.getMessage());
         }
@@ -291,7 +512,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                 endpoint.getMethod() + " " + endpoint.getPath(),
                 CROSS_USER_REMEDIATION
         );
-        finding.setRequestDetails(endpoint.getMethod() + " " + url +
+        finding.setRequestDetails((readOnly ? "GET" : endpoint.getMethod()) + " " + url +
                 " (requested with two distinct identities: the primary credentials, then the secondary " +
                 "token alone, which was rejected, then the secondary token plus the application credential " +
                 credentialNames + " with no primary bearer token, cookies or other custom headers; " +
@@ -315,6 +536,15 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         }
 
         String originalId = matcher.group(1);
+        String sentMethod = substitutionMethod(endpoint, httpClient);
+
+        HttpResponse originalResponse;
+        try {
+            originalResponse = readOrRequest(endpoint, endpoint.getFullUrl(), httpClient, Map.of());
+        } catch (Exception e) {
+            logger.debug("Error testing BOLA on {}: {}", endpoint, e.getMessage());
+            return findings;
+        }
 
         // Try accessing the same endpoint with different IDs
         for (String altId : ALTERNATIVE_NUMERIC_IDS) {
@@ -324,8 +554,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
             String altUrl = buildUrl(endpoint, altPath);
 
             try {
-                HttpResponse originalResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient);
-                HttpResponse altResponse = makeRequest(endpoint, altUrl, httpClient);
+                HttpResponse altResponse = readOrRequest(endpoint, altUrl, httpClient, Map.of());
 
                 if (originalResponse != null && altResponse != null
                         && originalResponse.isSuccess()
@@ -345,8 +574,8 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                             "accesses a data source using user-supplied identifiers. Validate that the " +
                             "requesting user has permission to access the specific object requested."
                     );
-                    finding.setRequestDetails("Original: " + endpoint.getMethod() + " " + endpoint.getFullUrl() +
-                            "\nModified: " + endpoint.getMethod() + " " + altUrl);
+                    finding.setRequestDetails("Original: " + sentMethod + " " + endpoint.getFullUrl() +
+                            "\nModified: " + sentMethod + " " + altUrl);
                     finding.setResponseDetails("Original status: " + originalResponse.getStatusCode() +
                             "\nModified status: " + altResponse.getStatusCode());
                     findings.add(finding);
@@ -374,8 +603,8 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         String altUrl = buildUrl(endpoint, altPath);
 
         try {
-            HttpResponse originalResponse = makeRequest(endpoint, endpoint.getFullUrl(), httpClient);
-            HttpResponse altResponse = makeRequest(endpoint, altUrl, httpClient);
+            HttpResponse originalResponse = readOrRequest(endpoint, endpoint.getFullUrl(), httpClient, Map.of());
+            HttpResponse altResponse = readOrRequest(endpoint, altUrl, httpClient, Map.of());
 
             if (originalResponse != null && altResponse != null
                     && originalResponse.isSuccess()
@@ -394,7 +623,8 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
                         "Validate that the authenticated user owns or has explicit permission to access " +
                         "each resource identified by UUID. Do not rely solely on the secrecy of UUIDs."
                 );
-                finding.setRequestDetails("Original UUID: " + originalUuid + "\nAlternative UUID: " + ALTERNATIVE_UUID);
+                finding.setRequestDetails(substitutionMethod(endpoint, httpClient) + " with original UUID: " + originalUuid +
+                        "\nAlternative UUID: " + ALTERNATIVE_UUID);
                 finding.setResponseDetails("Both returned HTTP " + altResponse.getStatusCode());
                 findings.add(finding);
             }
@@ -405,28 +635,32 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         return findings;
     }
 
-    private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient) throws IOException {
-        return makeRequest(endpoint, url, httpClient, Map.of());
+    private static String substitutionMethod(EndpointInfo endpoint, HttpClient httpClient) {
+        return isStateChanging(endpoint) && !httpClient.isDestructiveTestingAllowed()
+                ? "GET" : endpoint.getMethod().toUpperCase(Locale.ROOT);
     }
 
     /**
-     * Same request as {@link #makeRequest(EndpointInfo, String, HttpClient)}, sent as the
+     * Same request as {@link #makeRequest(EndpointInfo, String, HttpClient, Map)}, sent as the
      * secondary identity only (see {@link HttpClient#sendWithStatusAsSecondary}), or, with
      * {@code withApplicationCredentials}, as the secondary identity plus the scan's application
      * credential (see {@link HttpClient#sendWithStatusAsSecondaryWithApplicationCredentials}).
+     * With {@code readOnly} the request is a GET on the same URL, so a state-changing endpoint is
+     * never modified (see {@code --allow-destructive}).
      */
     private HttpResponse makeSecondaryRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
-                                              boolean withApplicationCredentials) throws IOException {
+                                              boolean withApplicationCredentials, boolean readOnly)
+            throws IOException {
         RequestSender sender = withApplicationCredentials
                 ? httpClient::sendWithStatusAsSecondaryWithApplicationCredentials
                 : httpClient::sendWithStatusAsSecondary;
-        return sendSameAsPrimary(endpoint, url, sender);
+        return sendSameAsPrimary(endpoint, url, readOnly, sender);
     }
 
     /** Same request with the application credential only (see {@link HttpClient#sendWithStatusApplicationCredentialsOnly}). */
-    private HttpResponse makeApplicationCredentialOnlyRequest(EndpointInfo endpoint, String url, HttpClient httpClient)
-            throws IOException {
-        return sendSameAsPrimary(endpoint, url, httpClient::sendWithStatusApplicationCredentialsOnly);
+    private HttpResponse makeApplicationCredentialOnlyRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                                              boolean readOnly) throws IOException {
+        return sendSameAsPrimary(endpoint, url, readOnly, httpClient::sendWithStatusApplicationCredentialsOnly);
     }
 
     @FunctionalInterface
@@ -434,11 +668,14 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         HttpResponse send(String method, String url, String contentType, String body) throws IOException;
     }
 
-    private HttpResponse sendSameAsPrimary(EndpointInfo endpoint, String url, RequestSender sender)
+    private HttpResponse sendSameAsPrimary(EndpointInfo endpoint, String url, boolean readOnly, RequestSender sender)
             throws IOException {
-        String method = endpoint.getMethod().toUpperCase();
+        if (readOnly) {
+            return sender.send("GET", url, null, null);
+        }
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
         return switch (method) {
-            case "POST", "PUT" -> sender.send(method, url, endpoint.getContentType(), resolveRequestBody(endpoint));
+            case "POST", "PUT", "PATCH" -> sender.send(method, url, endpoint.getContentType(), resolveRequestBody(endpoint));
             case "DELETE" -> sender.send("DELETE", url, null, null);
             default -> sender.send("GET", url, null, null);
         };
@@ -446,10 +683,11 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
 
     private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
                                       Map<String, String> headers) throws IOException {
-        return switch (endpoint.getMethod().toUpperCase()) {
+        return switch (endpoint.getMethod().toUpperCase(Locale.ROOT)) {
             case "GET"    -> httpClient.getWithStatus(url, headers);
             case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
             case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
+            case "PATCH"  -> httpClient.patchWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
             case "DELETE" -> httpClient.deleteWithStatus(url, headers);
             default       -> httpClient.getWithStatus(url, headers);
         };

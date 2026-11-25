@@ -16,6 +16,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Broken Object Level Authorization Test Case Tests")
@@ -201,6 +204,9 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         endpoint.setBaseUrl("https://example.com");
 
         when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders())
+                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
         when(httpClient.sendWithStatusAsSecondary(eq("PUT"), anyString(), anyString(), anyString()))
@@ -217,14 +223,209 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         assertTrue(secondaryBody.getAllValues().stream().allMatch(body -> body.contains("password")),
                 "The secondary identity's PUT must carry the same realistic body");
 
-        org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
-        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.atLeastOnce())
-                .putWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
-        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(body -> body.contains("password")),
-                "Request body must contain a real 'password' field, not an empty '{}' — " +
-                "an empty body reaches the endpoint but never exercises password-change behavior");
-        assertTrue(bodyCaptor.getAllValues().stream().noneMatch(body -> body.equals("{}")),
-                "Should never fall back to an empty '{}' body for a state-changing request");
+        assertTrue(secondaryBody.getAllValues().stream().noneMatch(body -> body.equals("{}")),
+                "Should never fall back to an empty '{}' body for a state-changing request: an empty body " +
+                "reaches the endpoint but never exercises password-change behavior");
+    }
+    private static final Map<String, String> SECONDARY = Map.of("Authorization", "Bearer secondary-user-token");
+
+    @Test
+    @DisplayName("Without --allow-destructive, a DELETE endpoint is never sent DELETE; cross-user proof uses GET")
+    void testDeleteEndpointIsProbedReadOnlyByDefault() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"id\":7,\"owner\":\"alice\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, "{\"id\":7,\"owner\":\"alice\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient, never()).deleteWithStatus(anyString(), anyMap());
+        verify(httpClient, never()).sendWithStatusAsSecondary(eq("DELETE"), anyString(), any(), any());
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")
+                        && f.getDescription().contains("read-only GET")),
+                "The GET on the same URL proves cross-user access without deleting anything");
+    }
+
+    @Test
+    @DisplayName("Without --allow-destructive, ID substitution on a DELETE endpoint sends GET to the guessed IDs, never DELETE")
+    void testIdSubstitutionNeverDeletesGuessedIdsByDefault() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        verify(httpClient, never()).deleteWithStatus(anyString(), anyMap());
+        verify(httpClient, atLeastOnce()).getWithStatus(eq("https://example.com/api/items/1"), anyMap());
+    }
+
+    @Test
+    @DisplayName("Write endpoint with no GET handler: reports the held-back check as INFO instead of dropping it")
+    void testHeldBackCheckIsReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/name1/password", "PUT", "application/json", null, true);
+        endpoint.setResolvedFromTemplate(true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(405, "{\"error\":\"method not allowed\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient, never()).putWithStatus(anyString(), anyMap(), anyString(), anyString());
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Held Back")
+                        && f.getSeverity() == org.owasp.astf.core.result.Severity.INFO
+                        && f.getDescription().contains("--allow-destructive")),
+                "The report must say which check did not run and how to run it");
+    }
+
+    @Test
+    @DisplayName("With --allow-destructive on a stateful API, the secondary DELETE is sent first and BOLA is found")
+    void testStatefulDeleteFoundWhenSecondaryGoesFirst() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
+        // The object can be deleted once; afterwards it is gone (404) for everyone.
+        when(httpClient.sendWithStatusAsSecondary(eq("DELETE"), eq("https://example.com/api/items/7"), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, "{\"deleted\":7}", Map.of()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+        when(httpClient.deleteWithStatus(eq("https://example.com/api/items/7"), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+        when(httpClient.getWithStatus(eq("https://example.com/api/items/7"), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+        when(httpClient.deleteWithStatus(org.mockito.ArgumentMatchers.argThat(u -> !u.endsWith("/7")), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        org.mockito.InOrder order = org.mockito.Mockito.inOrder(httpClient);
+        order.verify(httpClient).sendWithStatusAsSecondary("DELETE", "https://example.com/api/items/7", null, null);
+        Finding finding = findings.stream().filter(f -> f.getTitle().contains("Cross-User Access Confirmed"))
+                .findFirst().orElseThrow(() -> new AssertionError("stateful cross-user DELETE must be reported"));
+        assertTrue(finding.getResponseDetails().contains("no longer exists for its owner"));
+    }
+
+    @Test
+    @DisplayName("Public object (also returned without credentials) is not reported as cross-user BOLA")
+    void testPublicObjectIsNotCrossUserBola() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/articles/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        String article = "{\"id\":42,\"title\":\"Release notes\"}";
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, article, Map.of()));
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(200, article, Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, article, Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        // the check must really have run (both identities asked), otherwise "no finding" proves nothing
+        verify(httpClient, atLeastOnce()).sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull());
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User")),
+                "An object anyone can read is not an object-level authorization failure");
+    }
+
+    @Test
+    @DisplayName("Secondary identity receiving its own record (different object) is MEDIUM 'not confirmed', not CRITICAL")
+    void testDifferentObjectIsNotConfirmed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/profile/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"id\":42,\"username\":\"alice\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, "{\"id\":43,\"username\":\"bob\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")));
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Not Confirmed")
+                && f.getSeverity() == org.owasp.astf.core.result.Severity.MEDIUM));
+    }
+
+    @Test
+    @DisplayName("Same object with viewer-specific fields (timestamps) is still confirmed")
+    void testSameObjectWithVolatileFieldsIsConfirmed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"total\":10,\"servedAt\":\"10:00:01\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"total\":10,\"servedAt\":\"10:00:02\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")));
+    }
+
+    @Test
+    @DisplayName("PATCH endpoints are sent as PATCH with --allow-destructive, never silently as GET (regression)")
+    void testPatchIsSentAsPatch() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/notes/5", "PATCH", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
+        when(httpClient.sendWithStatusAsSecondary(eq("PATCH"), anyString(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"id\":5}", Map.of()));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(405, "", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient).sendWithStatusAsSecondary(eq("PATCH"), eq("https://example.com/api/notes/5"), anyString(), anyString());
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")));
+    }
+
+    @Test
+    @DisplayName("Behind a gateway the read-only probe still never sends the real method (credential retry and control request)")
+    void testGatewayPathsStayReadOnly() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+        String object = "{\"id\":7,\"owner\":\"alice\"}";
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.hasApplicationCredentials()).thenReturn(true);
+        when(httpClient.getApplicationCredentialHeaderNames()).thenReturn(List.of("X-API-Key"));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, object, Map.of()));
+        // the secondary token alone is refused by the gateway; with the application credential it gets the object
+        when(httpClient.sendWithStatusAsSecondary(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondaryWithApplicationCredentials(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(200, object, Map.of()));
+        when(httpClient.sendWithStatusApplicationCredentialsOnly(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("secondary token with the application API key")),
+                "the gateway finding must still be produced: " + findings);
+        verify(httpClient, never()).sendWithStatusAsSecondary(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).sendWithStatusAsSecondaryWithApplicationCredentials(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).sendWithStatusApplicationCredentialsOnly(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).deleteWithStatus(anyString(), anyMap());
+    }
+
+    @Test
+    @DisplayName("sameObject: identical, identifier match, wrapped object, and mismatches")
+    void testSameObject() {
+        assertTrue(BrokenObjectLevelAuthorizationTestCase.sameObject("{\"id\":1}", "{\"id\":1}"));
+        assertTrue(BrokenObjectLevelAuthorizationTestCase.sameObject(
+                "{\"data\":{\"user_id\":9,\"seen\":1}}", "{\"data\":{\"user_id\":9,\"seen\":2}}"));
+        assertFalse(BrokenObjectLevelAuthorizationTestCase.sameObject("{\"id\":1}", "{\"id\":2}"));
+        assertFalse(BrokenObjectLevelAuthorizationTestCase.sameObject("{\"a\":1}", "{\"a\":2}"));
+        assertFalse(BrokenObjectLevelAuthorizationTestCase.sameObject("", ""));
     }
 
     @Test

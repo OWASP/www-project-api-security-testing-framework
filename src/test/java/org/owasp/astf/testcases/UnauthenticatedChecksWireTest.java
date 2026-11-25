@@ -473,7 +473,13 @@ class UnauthenticatedChecksWireTest {
                     return new MockResponse().setResponseCode(200)
                             .addHeader("Set-Cookie", "sid=primary-cookie; Path=/");
                 }
-                return path.startsWith("/api/users/") ? json(200, "{\"id\":5,\"name\":\"bob\"}") : notFound();
+                if (path.startsWith("/api/users/")) {
+                    // an object that needs a token: a request with none is refused, so this is not a public object
+                    return request.getHeader("Authorization") == null
+                            ? json(401, "{\"error\":\"unauthorized\"}")
+                            : json(200, "{\"id\":5,\"name\":\"bob\"}");
+                }
+                return notFound();
             }
         });
         server.start();

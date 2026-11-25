@@ -167,8 +167,10 @@ class CrossUserBolaGatewayWireTest {
         secondary.forEach(CrossUserBolaGatewayWireTest::assertNoPrimaryIdentity);
 
         // The control request (API key alone, no bearer) carries no user identity at all.
+        // (The anonymous request that checks whether the object is public carries no API key either,
+        // so the control is the request with the key and no bearer.)
         List<RecordedRequest> control = objectRequests().stream()
-                .filter(r -> r.getHeader("Authorization") == null).toList();
+                .filter(r -> r.getHeader("Authorization") == null && r.getHeader("X-API-Key") != null).toList();
         assertEquals(1, control.size());
         assertEquals("app-key", control.get(0).getHeader("X-API-Key"));
         assertNoPrimaryIdentity(control.get(0));

@@ -50,6 +50,16 @@ class ConfigLoaderTest {
         assertTrue(config.isVerbose());
         assertEquals("secret123", config.getHeaders().get("X-API-Key"));
     }
+    @Test
+    @DisplayName("allowDestructive defaults to false and is read from YAML")
+    void testAllowDestructive(@TempDir Path tempDir) throws IOException {
+        assertFalse(new ScanConfig().isAllowDestructive(), "destructive checks must be opt-in");
+
+        Path yamlFile = tempDir.resolve("config.yaml");
+        Files.writeString(yamlFile, "targetUrl: https://api.example.com\nallowDestructive: true\n");
+
+        assertTrue(loader.loadFromFile(yamlFile.toString()).isAllowDestructive());
+    }
 
     @Test
     @DisplayName("Should load .yml extension as YAML")
