@@ -28,9 +28,6 @@ import org.owasp.astf.core.result.Severity;
  */
 public class SecurityMisconfigurationTestCase implements TestCase {
     private static final Logger logger = LogManager.getLogger(SecurityMisconfigurationTestCase.class);
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // X-XSS-Protection is intentionally omitted: OWASP Secure Headers / cheat sheets mark it
     // deprecated (browser XSS auditor caused vulnerabilities). Presence of a non-zero value is
     // reported separately below; absence is correct.

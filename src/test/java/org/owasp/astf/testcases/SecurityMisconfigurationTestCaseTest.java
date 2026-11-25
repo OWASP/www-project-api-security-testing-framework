@@ -268,9 +268,6 @@ class SecurityMisconfigurationTestCaseTest {
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Absent X-XSS-Protection must not produce a finding")
     void testAbsentXssProtectionNotReported() throws IOException {
