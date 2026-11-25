@@ -381,6 +381,183 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         assertFalse(BrokenObjectLevelAuthorizationTestCase.sameObject("", ""));
     }
 
+    private static boolean confirmedVia(List<Finding> findings, String where) {
+        return findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed via " + where)
+                && f.getSeverity() == org.owasp.astf.core.result.Severity.CRITICAL);
+    }
+
+    @Test
+    @DisplayName("Query ?order_id= carrying the primary's id: secondary receives primary's object -> CRITICAL")
+    void testQueryIdentifierCrossUser() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders?order_id=42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        String order = "{\"order_id\":42,\"total\":10}";
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, order, Map.of()));
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(confirmedVia(findings, "query parameter"));
+        verify(httpClient).getWithStatus("https://example.com/api/orders?order_id=42", SECONDARY);
+    }
+
+    @Test
+    @DisplayName("Query id different from the primary's is swapped to the primary's id for the secondary request")
+    void testQueryIdentifierIsSwappedToPrimaryValue() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders?order_id=7&page=2", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"order_id\":42,\"total\":10}", Map.of()));
+        when(httpClient.getWithStatus(anyString(), eq(SECONDARY)))
+                .thenReturn(new HttpResponse(200, "{\"order_id\":42,\"total\":10}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient).getWithStatus("https://example.com/api/orders?order_id=42&page=2", SECONDARY);
+        assertTrue(confirmedVia(findings, "query parameter"));
+    }
+
+    @Test
+    @DisplayName("Public object behind a query identifier (anonymous gets the same body) is not reported")
+    void testPublicQueryObjectIsNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/articles?article_id=42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        String article = "{\"article_id\":42,\"title\":\"Release notes\"}";
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, article, Map.of()));
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(200, article, Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == org.owasp.astf.core.result.Severity.CRITICAL));
+    }
+
+    @Test
+    @DisplayName("Query identifier: secondary receiving its own, different object is MEDIUM 'not confirmed'")
+    void testQueryIdentifierDifferentObject() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders?order_id=42", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"order_id\":42,\"owner\":\"alice\"}", Map.of()));
+        when(httpClient.getWithStatus(anyString(), eq(SECONDARY)))
+                .thenReturn(new HttpResponse(200, "{\"order_id\":43,\"owner\":\"bob\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getSeverity() == org.owasp.astf.core.result.Severity.CRITICAL));
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Not Confirmed via query parameter")
+                && f.getSeverity() == org.owasp.astf.core.result.Severity.MEDIUM));
+    }
+
+    @Test
+    @DisplayName("JSON body {\"accountId\":...} is swapped to the primary's id and echoed back -> CRITICAL (--allow-destructive)")
+    void testBodyIdentifierCrossUser() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/statements", "POST", "application/json",
+                "{\"accountId\":7,\"month\":\"jan\"}", true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
+        String statement = "{\"accountId\":42,\"balance\":900}";
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, statement, Map.of()));
+        when(httpClient.postWithStatus(anyString(), eq(SECONDARY), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, statement, Map.of()));
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        org.mockito.ArgumentCaptor<String> body = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(httpClient).postWithStatus(eq("https://example.com/api/statements"), eq(SECONDARY),
+                eq("application/json"), body.capture());
+        assertTrue(body.getValue().contains("\"accountId\":42") && body.getValue().contains("\"month\":\"jan\""));
+        assertTrue(confirmedVia(findings, "JSON body field"));
+    }
+
+    @Test
+    @DisplayName("Body identifier on a state-changing endpoint without --allow-destructive is reported as INFO, never sent")
+    void testBodyIdentifierHeldBackByDefault() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/statements", "POST", "application/json",
+                "{\"accountId\":7}", true);
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"accountId\":42}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient, never()).postWithStatus(anyString(), anyMap(), anyString(), anyString());
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Held Back")
+                && f.getSeverity() == org.owasp.astf.core.result.Severity.INFO));
+    }
+
+    @Test
+    @DisplayName("Query identifier on a POST endpoint without --allow-destructive is probed with GET, never POST")
+    void testQueryIdentifierOnPostIsReadOnlyByDefault() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/orders/refund?order_id=42", "POST");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"order_id\":42}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        verify(httpClient, never()).postWithStatus(anyString(), anyMap(), anyString(), anyString());
+        assertTrue(confirmedVia(findings, "query parameter"));
+    }
+
+    @Test
+    @DisplayName("Header X-User-Id set to the primary's id: same object returned to secondary -> CRITICAL")
+    void testHeaderIdentifierCrossUser() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/me/settings", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        String primaryObject = "{\"user_id\":42,\"theme\":\"dark\"}";
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, primaryObject, Map.of()));
+        when(httpClient.getWithStatus(anyString(), eq(SECONDARY)))
+                .thenReturn(new HttpResponse(200, "{\"user_id\":43,\"theme\":\"light\"}", Map.of()));
+        Map<String, String> withHeader = Map.of("Authorization", "Bearer secondary-user-token", "X-User-Id", "42");
+        when(httpClient.getWithStatus(anyString(), eq(withHeader)))
+                .thenReturn(new HttpResponse(200, primaryObject, Map.of()));
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(confirmedVia(findings, "header X-User-Id"));
+    }
+
+    @Test
+    @DisplayName("A header the server ignores (secondary gets its own data either way) produces no finding")
+    void testIgnoredHeaderProducesNoFinding() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/me/settings", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
+        when(httpClient.getWithStatus(anyString(), eq(Map.of())))
+                .thenReturn(new HttpResponse(200, "{\"user_id\":42,\"theme\":\"dark\"}", Map.of()));
+        when(httpClient.getWithStatus(anyString(), argThat(h -> h != null && h.containsKey("Authorization"))))
+                .thenReturn(new HttpResponse(200, "{\"user_id\":43,\"theme\":\"light\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Identifier helpers: names, collected values and primary value lookup")
+    void testIdentifierHelpers() {
+        assertTrue(BrokenObjectLevelAuthorizationTestCase.isIdentifierName("order_id"));
+        assertTrue(BrokenObjectLevelAuthorizationTestCase.isIdentifierName("X-Org-Id"));
+        assertFalse(BrokenObjectLevelAuthorizationTestCase.isIdentifierName("page"));
+        Map<String, com.fasterxml.jackson.databind.JsonNode> ids =
+                BrokenObjectLevelAuthorizationTestCase.collectIdentifiers("[{\"userId\":5,\"id\":9,\"total\":1}]");
+        assertEquals(2, ids.size());
+        assertEquals(5, BrokenObjectLevelAuthorizationTestCase.primaryValueFor("X-User-Id", ids).asInt());
+        assertEquals(9, BrokenObjectLevelAuthorizationTestCase.primaryValueFor("order_id", ids).asInt());
+        assertNull(BrokenObjectLevelAuthorizationTestCase.primaryValueFor("page", ids));
+    }
+
     @Test
     @DisplayName("Handles exceptions gracefully")
     void testExceptionHandling() throws IOException {
