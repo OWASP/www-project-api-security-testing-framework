@@ -249,6 +249,9 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
         assertTrue(firstBody.contains("\"email\""), "filler must include email: " + firstBody);
         assertTrue(firstBody.contains("astf-"), "filler values must be unique astf-* values: " + firstBody);
         assertFalse(firstBody.contains("\"test\""), "filler must never use weak value test: " + firstBody);
+        String password = new com.fasterxml.jackson.databind.ObjectMapper().readTree(firstBody).get("password").asText();
+        assertTrue(password.matches("(?=.*[A-Z])(?=.*[a-z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{12,}"),
+                "filler password must pass common strength rules: " + password);
     }
 
     @Test
