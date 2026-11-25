@@ -238,15 +238,21 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
     // AI-Generated Code - 2026-11-25 - Auto
     // This is AI generated code
     /**
-     * True when {@code Location} is an absolute URL whose host is the injected external host
-     * (not a relative path and not the same host as the scanned endpoint).
+     * True when {@code Location} sends the browser to the injected external host: an absolute URL,
+     * or a scheme-relative one ({@code //host}, {@code /\host}, {@code \\host}) that browsers
+     * resolve to another host. A path on the scanned host is not an open redirect.
      */
     private boolean isExternalOpenRedirect(String location, String maliciousHost, String endpointUrl) {
         if (location == null || location.isBlank()) {
             return false;
         }
+        String normalized = location.trim();
+        if (normalized.length() > 2 && (normalized.charAt(0) == '/' || normalized.charAt(0) == '\\')
+                && (normalized.charAt(1) == '/' || normalized.charAt(1) == '\\')) {
+            normalized = "https://" + normalized.substring(2).replace('\\', '/');
+        }
         try {
-            URI locationUri = URI.create(location.trim());
+            URI locationUri = URI.create(normalized);
             if (!locationUri.isAbsolute() || locationUri.getHost() == null) {
                 return false;
             }

@@ -3,6 +3,8 @@ package org.owasp.astf.testcases;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
@@ -185,6 +187,22 @@ class UnsafeConsumptionOfApisTestCaseTest {
         assertFalse(
                 findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
                 "Relative Location is not an open redirect");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"//evil-attacker.example.com/phishing", "/\\evil-attacker.example.com/phishing",
+            "\\\\evil-attacker.example.com/phishing"})
+    @DisplayName("Should detect scheme-relative open redirects that browsers resolve to the attacker host")
+    void testSchemeRelativeOpenRedirectDetected(String location) throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "", Map.of("Location", List.of(location))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Location " + location + " leaves the scanned host");
     }
 
     @Test
