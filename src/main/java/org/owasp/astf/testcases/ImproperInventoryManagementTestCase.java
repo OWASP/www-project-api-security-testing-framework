@@ -2,9 +2,13 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -48,6 +52,15 @@ public class ImproperInventoryManagementTestCase implements TestCase {
     );
 
     private static final Pattern VERSION_PATTERN = Pattern.compile("/v(\\d+)/");
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    // Target-level API-docs probes run once per base URL per scan, not once per endpoint and not
+    // only when "/" is in the endpoint list (grey-box --endpoints-file --no-discovery often
+    // omits "/"). Keyed by HttpClient so a new scan starts fresh; ConcurrentHashMap.newKeySet
+    // is safe under the scanner's concurrent virtual threads.
+    private final Map<HttpClient, Set<String>> probedDocBaseUrls =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     public String getId() {
@@ -161,13 +174,15 @@ public class ImproperInventoryManagementTestCase implements TestCase {
         List<Finding> findings = new ArrayList<>();
         String baseUrl = endpoint.getBaseUrl();
 
-        // Only run on root endpoint to avoid duplicate discoveries
-        if (baseUrl == null || baseUrl.isEmpty()
-                || (!endpoint.getPath().equals("/") && !endpoint.getPath().isEmpty())) {
+        if (baseUrl == null || baseUrl.isEmpty()) {
             return findings;
         }
 
         String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        Set<String> probed = probedDocBaseUrls.computeIfAbsent(httpClient, k -> ConcurrentHashMap.newKeySet());
+        if (!probed.add(cleanBase)) {
+            return findings;
+        }
 
         // Several of the probed paths (e.g. /docs, /redoc, /swagger-ui.html) are legitimately
         // HTML by design, so a content-type guard would wrongly reject real documentation pages.

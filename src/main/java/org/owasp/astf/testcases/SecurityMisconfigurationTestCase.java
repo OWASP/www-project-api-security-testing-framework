@@ -2,9 +2,13 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
@@ -77,6 +81,15 @@ public class SecurityMisconfigurationTestCase implements TestCase {
      * rather than once per endpoint.
      */
     private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
+
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    // Target-level debug probes run once per base URL per scan, not once per endpoint and not
+    // only when "/" is in the endpoint list (grey-box --endpoints-file --no-discovery often
+    // omits "/"). Keyed by HttpClient so a new scan starts fresh; ConcurrentHashMap.newKeySet
+    // is safe under the scanner's concurrent virtual threads.
+    private final Map<HttpClient, Set<String>> probedDebugBaseUrls =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     public String getId() {
@@ -204,10 +217,11 @@ public class SecurityMisconfigurationTestCase implements TestCase {
 
         if (baseUrl == null || baseUrl.isEmpty()) return findings;
 
-        // Only run debug endpoint discovery once per base URL (check by path being root)
-        if (!endpoint.getPath().equals("/") && !endpoint.getPath().isEmpty()) return findings;
-
         String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        Set<String> probed = probedDebugBaseUrls.computeIfAbsent(httpClient, k -> ConcurrentHashMap.newKeySet());
+        if (!probed.add(cleanBase)) {
+            return findings;
+        }
 
         for (String debugPath : DEBUG_ENDPOINTS) {
             String testUrl = cleanBase + debugPath;
