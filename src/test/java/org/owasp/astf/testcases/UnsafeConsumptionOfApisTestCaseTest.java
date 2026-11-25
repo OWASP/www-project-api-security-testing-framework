@@ -261,6 +261,23 @@ class UnsafeConsumptionOfApisTestCaseTest {
     }
 
     @Test
+    @DisplayName("GET SSTI probes percent-encode '#' so '#{...}' is not cut off as a URL fragment")
+    void testSstiGetProbeEncodesHash() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "GET");
+        List<String> urls = new java.util.ArrayList<>();
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            urls.add(inv.getArgument(0));
+            return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        assertTrue(urls.stream().anyMatch(u -> u.contains("data=%23{1337*1337}")),
+                "the #{} probe must reach the server intact: " + urls);
+        assertTrue(urls.stream().noneMatch(u -> u.contains("#")), "no raw '#' in any probe URL: " + urls);
+    }
+
+    @Test
     @DisplayName("Should NOT report SSTI when 1787569 already appears in the baseline response")
     void testNoSstiWhenMarkerInBaseline() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");

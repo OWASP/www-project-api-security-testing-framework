@@ -116,7 +116,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             return findings;
         }
 
-        String method = endpoint.getMethod().toUpperCase();
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
 
         for (String payload : INJECTION_PAYLOADS) {
             try {
@@ -376,7 +376,8 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         return value.replace(":", "%3A").replace("/", "%2F").replace("?", "%3F")
                 .replace("=", "%3D").replace("&", "%26").replace(" ", "%20")
                 .replace("<", "%3C").replace(">", "%3E").replace("'", "%27")
-                .replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A");
+                .replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
+                .replace("#", "%23"); // otherwise "#{...}" payloads are cut off as a URL fragment
     }
 
     private String escapeJson(String value) {
