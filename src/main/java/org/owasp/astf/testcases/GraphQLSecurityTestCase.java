@@ -306,6 +306,7 @@ public class GraphQLSecurityTestCase implements TestCase {
         findings.addAll(testArgumentBasedAuthBypass(endpoint, httpClient));
         findings.addAll(testStackTraceDisclosure(endpoint, httpClient));
         findings.addAll(testLoginMutationBruteForce(endpoint, httpClient));
+        findings.addAll(testQueryFieldBruteForce(endpoint, httpClient));
         // Runs last: this probe can crash the target (DVGA exits), which would otherwise leave
         // every later check running against a dead server.
         findings.addAll(testCircularFragmentAttack(endpoint, httpClient));
@@ -1181,6 +1182,147 @@ public class GraphQLSecurityTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    // ── Test: query-field brute-force lockout ─────────────────────────────────
+
+    /**
+     * Introspects <em>query</em> fields for one governed by both a username-like and a
+     * password-like argument, then sends {@link #GRAPHQL_BRUTE_FORCE_ATTEMPTS} consecutive failed
+     * attempts and checks for a rate-limit/lockout signal — the companion to
+     * {@link #testLoginMutationBruteForce}, which only matches a <em>mutation</em> whose name looks
+     * like a login.
+     *
+     * <p>Some authentication-style gates are exposed as queries, not mutations, and are not named
+     * like a login: DVGA's {@code systemDiagnostics(username, password, cmd)} is an administrative
+     * query with a weak password and no rate limiting (issue #117). Matching by argument shape
+     * rather than field name reaches it. The username-plus-password pairing is required precisely
+     * so an ordinary read query that merely happens to take a {@code password} field value is not
+     * mistaken for an auth gate.</p>
+     *
+     * <p>The call carries a selection set only when the field returns an object type — a
+     * scalar-returning field (like {@code systemDiagnostics: String}) would fail query validation
+     * before the resolver runs if a {@code {__typename}} selection were appended. Every other
+     * argument the field declares is given a type-appropriate default so the resolver accepts the
+     * call, matching the approach already used for resolver injection.</p>
+     */
+    List<Finding> testQueryFieldBruteForce(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        try {
+            HttpResponse introspectionResponse = httpClient.postWithStatus(
+                    endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, QUERY_INTROSPECTION_QUERY);
+            if (!isAcceptedGraphQLQuery(introspectionResponse)) {
+                return findings;
+            }
+
+            List<MutationCandidate> candidates = extractStringArgFields(
+                    introspectionResponse.getBody(), "queryType");
+
+            MutationCandidate authField = null;
+            String usernameArg = null;
+            String passwordArg = null;
+            for (MutationCandidate candidate : candidates) {
+                String foundUsernameArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> USERNAME_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                String foundPasswordArg = candidate.allArgs().stream()
+                        .map(ArgSpec::name)
+                        .filter(name -> PASSWORD_ARG_NAMES.stream().anyMatch(name.toLowerCase()::contains))
+                        .findFirst().orElse(null);
+                if (foundUsernameArg != null && foundPasswordArg != null) {
+                    authField = candidate;
+                    usernameArg = foundUsernameArg;
+                    passwordArg = foundPasswordArg;
+                    break;
+                }
+            }
+            if (authField == null) {
+                return findings;
+            }
+
+            String selection = isScalarType(authField.returnTypeName()) ? "" : "{__typename}";
+            HttpResponse lastResponse = null;
+            for (int attempt = 0; attempt < GRAPHQL_BRUTE_FORCE_ATTEMPTS; attempt++) {
+                String args = buildCredentialArgList(authField, usernameArg, passwordArg, attempt);
+                String queryCall = String.format("query{%s(%s)%s}", authField.name(), args, selection);
+                String requestBody = "{\"query\":\"" + queryCall + "\"}";
+
+                lastResponse = httpClient.postWithStatus(
+                        endpoint.getFullUrl(), Map.of(), CONTENT_TYPE_JSON, requestBody);
+                if (lastResponse == null) {
+                    return findings;
+                }
+                if (lastResponse.isRateLimited() || lastResponse.getStatusCode() == 423) {
+                    return findings; // lockout/rate-limiting is working correctly
+                }
+            }
+
+            Finding f = new Finding(
+                    UUID.randomUUID().toString(),
+                    "No Rate Limiting on GraphQL Query-Field Authentication",
+                    String.format("%d consecutive failed attempts against the '%s' query field — which is " +
+                            "governed by a username ('%s') and password ('%s') argument — produced no " +
+                            "rate-limiting or lockout response (HTTP 429/423). An authentication gate exposed " +
+                            "as a query is just as brute-forceable as one exposed as a login mutation.",
+                            GRAPHQL_BRUTE_FORCE_ATTEMPTS, authField.name(), usernameArg, passwordArg),
+                    Severity.MEDIUM,
+                    getId(),
+                    "POST " + endpoint.getPath() + " (query " + authField.name() + ")",
+                    "Implement account lockout or exponential rate limiting after a small number of failed " +
+                    "attempts (e.g. 5), regardless of whether the credential check is exposed as a GraphQL " +
+                    "query or mutation. Administrative query fields that take a password are authentication " +
+                    "surfaces and need the same throttling as a login endpoint."
+            );
+            f.setEvidence("Last of " + GRAPHQL_BRUTE_FORCE_ATTEMPTS + " attempts against query field '" +
+                    authField.name() + "' returned HTTP " + lastResponse.getStatusCode() +
+                    " with no lockout signal");
+            findings.add(f);
+        } catch (Exception e) {
+            logger.debug("Error testing GraphQL query-field brute-force on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
+    /**
+     * Whether a resolved type name is a built-in GraphQL scalar (or custom-scalar-like), meaning a
+     * field returning it takes no selection set. Unresolved/complex types are treated as object
+     * types (needing a {@code {__typename}} selection), which is the safe default — an object field
+     * queried without a selection fails validation, so erring toward adding one preserves the call.
+     */
+    private boolean isScalarType(String typeName) {
+        if (typeName == null) {
+            return false;
+        }
+        return switch (typeName) {
+            case "String", "Int", "Float", "Boolean", "ID" -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Builds the argument list for one brute-force attempt: the username-like argument gets a fixed
+     * account name, the password-like argument gets a per-attempt wrong password, and every other
+     * argument the field declares gets a type-appropriate benign default (so a resolver that
+     * requires, say, a {@code cmd} argument still runs the credential check).
+     */
+    private String buildCredentialArgList(MutationCandidate field, String usernameArg,
+                                          String passwordArg, int attempt) {
+        List<String> parts = new ArrayList<>();
+        for (ArgSpec arg : field.allArgs()) {
+            if (arg.name().equals(usernameArg)) {
+                parts.add(arg.name() + ":\\\"admin\\\"");
+            } else if (arg.name().equals(passwordArg)) {
+                parts.add(arg.name() + ":\\\"WrongPass-" + attempt + "!\\\"");
+            } else {
+                String defaultValue = defaultValueFor(arg.typeName());
+                if (defaultValue != null) {
+                    parts.add(arg.name() + ":" + defaultValue);
+                }
+            }
+        }
+        return String.join(",", parts);
     }
 
     // ── Test 5: Resolver-level injection ─────────────────────────────────────

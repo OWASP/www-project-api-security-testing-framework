@@ -23,6 +23,7 @@ Several checks claimed to be unauthenticated or to use one identity while sendin
 ### Added
 
 - **Custom OpenAPI specification** (#167). `--openapi <url-or-file>` (config key `openApiSpec`) takes the endpoints from a specification you name instead of searching the target for one: an `http(s)` URL, or a local JSON or YAML file. It is read even with `--no-discovery`. If it cannot be read, or is not an OpenAPI or Swagger document, a warning says why and automatic discovery runs instead (unless discovery is disabled), so a typo never leaves the target untested. A URL on another host is fetched without credentials unless the host is in `scopeHosts`; a URL on the target gets them. `--endpoints-file` still takes precedence.
+- **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
 ### Behaviour changes to know about
 
@@ -37,6 +38,7 @@ Several checks claimed to be unauthenticated or to use one identity while sendin
 ### Known limitations
 
 - On a target that resets its own data while it is scanned (VAmPI's `GET /createdb` is tested by every check), the NoSQL bypass check can still occasionally report a CRITICAL "Authorization/Logic Bypass" on a field the endpoint ignores, when the invalid-value baseline and the payload each land on a different side of a reset. This was seen in 1 of 3 scans of VAmPI with ReDoS excluded. Re-run the scan, or check the finding by hand, before acting on a NoSQL bypass on such a target.
+
 
 ## 2.0.2 (patch)
 

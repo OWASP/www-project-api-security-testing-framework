@@ -1129,4 +1129,111 @@ class GraphQLSecurityTestCaseTest {
         assertEquals(1, findings.size());
         assertTrue(elapsed < 3000, "50 attempts x 300 ms would be 15 s; the time budget must stop it early (took " + elapsed + " ms)");
     }
+
+    // ── query-field brute force (#117: DVGA systemDiagnostics) ────────────────
+
+    // A scalar-returning administrative query field governed by username + password + cmd —
+    // the shape of DVGA's systemDiagnostics, which is NOT named like a login and returns a String.
+    private static final String SYSTEM_DIAGNOSTICS_INTROSPECTION = """
+            {"data":{"__schema":{"queryType":{"fields":[
+                {"name":"pastes","type":{"name":null,"kind":"LIST"},"args":[]},
+                {"name":"systemDiagnostics","type":{"name":"String","kind":"SCALAR"},"args":[
+                    {"name":"username","type":{"name":"String","kind":"SCALAR"}},
+                    {"name":"password","type":{"name":"String","kind":"SCALAR"}},
+                    {"name":"cmd","type":{"name":"String","kind":"SCALAR"}}
+                ]}
+            ]}}}}
+            """;
+
+    @Test
+    @DisplayName("Flags missing rate-limiting on a password-governed query field (regression: DVGA systemDiagnostics, #117)")
+    void testQueryFieldBruteForceDetected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(new HttpResponse(200, SYSTEM_DIAGNOSTICS_INTROSPECTION, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("systemDiagnostics(")))
+                .thenReturn(new HttpResponse(200, "{\"data\":{\"systemDiagnostics\":\"Password Incorrect\"}}", Map.of()));
+
+        List<Finding> findings = testCase.testQueryFieldBruteForce(endpoint, httpClient);
+
+        assertFalse(findings.isEmpty(), "Should flag missing rate-limiting after repeated failed attempts");
+        assertEquals("No Rate Limiting on GraphQL Query-Field Authentication", findings.get(0).getTitle());
+
+        // Since the field returns a scalar, the call must carry NO selection set — a {__typename}
+        // on a scalar field fails query validation before the resolver ever runs.
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(httpClient, atLeastOnce())
+                .postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
+        boolean sentScalarCall = bodyCaptor.getAllValues().stream()
+                .anyMatch(b -> b.contains("systemDiagnostics(") && !b.contains("__typename"));
+        assertTrue(sentScalarCall, "scalar-returning field must be queried without a selection set");
+    }
+
+    @Test
+    @DisplayName("Does not flag query-field brute-force when the server rate-limits (429)")
+    void testQueryFieldBruteForceNotFlaggedWhenRateLimited() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(new HttpResponse(200, SYSTEM_DIAGNOSTICS_INTROSPECTION, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("systemDiagnostics(")))
+                .thenReturn(new HttpResponse(429, "{\"errors\":[{\"message\":\"Too many requests\"}]}", Map.of()));
+
+        List<Finding> findings = testCase.testQueryFieldBruteForce(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "Should not flag when the server properly rate-limits");
+    }
+
+    @Test
+    @DisplayName("Does not run query-field brute-force without a field governed by both username and password")
+    void testQueryFieldBruteForceSkippedWhenNoCredentialField() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A query field that takes a password but no username must NOT be treated as an auth gate.
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    {"name":"resetHint","type":{"name":"String","kind":"SCALAR"},"args":[
+                        {"name":"password","type":{"name":"String","kind":"SCALAR"}}
+                    ]}
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, introspection, Map.of()));
+
+        List<Finding> findings = testCase.testQueryFieldBruteForce(endpoint, httpClient);
+        assertTrue(findings.isEmpty(), "Needs both a username-like and a password-like argument to run");
+    }
+
+    @Test
+    @DisplayName("An object-returning auth query field is queried WITH a selection set")
+    void testQueryFieldBruteForceAddsSelectionForObjectReturn() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/graphql", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        String introspection = """
+                {"data":{"__schema":{"queryType":{"fields":[
+                    {"name":"adminPanel","type":{"name":"AdminResult","kind":"OBJECT"},"args":[
+                        {"name":"username","type":{"name":"String","kind":"SCALAR"}},
+                        {"name":"password","type":{"name":"String","kind":"SCALAR"}}
+                    ]}
+                ]}}}}
+                """;
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("queryType")))
+                .thenReturn(new HttpResponse(200, introspection, Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), contains("adminPanel(")))
+                .thenReturn(new HttpResponse(200, "{\"data\":{\"adminPanel\":{\"__typename\":\"AdminResult\"}}}", Map.of()));
+
+        List<Finding> findings = testCase.testQueryFieldBruteForce(endpoint, httpClient);
+        assertFalse(findings.isEmpty(), "Should flag missing rate-limiting on the object-returning auth field");
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        verify(httpClient, atLeastOnce())
+                .postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
+        boolean sentObjectCall = bodyCaptor.getAllValues().stream()
+                .anyMatch(b -> b.contains("adminPanel(") && b.contains("__typename"));
+        assertTrue(sentObjectCall, "object-returning field must be queried with a {__typename} selection set");
+    }
 }

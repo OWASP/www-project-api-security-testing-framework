@@ -120,6 +120,27 @@ scopeHosts:
   - "auth.example.com"
 ```
 
+### Environment variables in config files
+
+String values in YAML, JSON and `.properties` config files can reference environment variables as `$(NAME)`, so one file can serve several environments:
+
+```yaml
+targetUrl: "$(API_BASE_URL)"
+headers:
+  Authorization: "Bearer $(API_TOKEN)"
+```
+
+```bash
+export API_BASE_URL="https://staging.example.com"
+export API_TOKEN="..."
+java -jar astf-v2.0.2.jar -c config.yaml
+```
+
+- A variable that is not set aborts the scan with an error naming the variable and the config key that uses it. The values themselves are never printed.
+- A variable set to an empty string is valid and resolves to an empty string.
+- Write `$$(NAME)` to keep the literal text `$(NAME)`. Existing config values that already contain `$(SOMETHING)`, such as a password or regex, are now substituted (or fail the scan if the variable is unset), so escape them this way.
+- Only values are substituted, not keys, and resolved values are not expanded again.
+
 See [`docs/examples/scan-config.yaml`](docs/examples/scan-config.yaml) for every supported key: proxy, custom headers, thread count, timeout, test selection, and inline endpoints.
 
 ---
