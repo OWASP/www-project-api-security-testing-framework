@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 
+import org.mockito.ArgumentCaptor;
+
 /**
  * Unit tests for {@link BrokenObjectPropertyLevelAuthorizationTestCase}.
  *
@@ -149,43 +151,54 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
     }
 
     /**
-     * When the server accepts the POST body but does not reflect the privileged properties,
-     * no mass-assignment finding should be raised.
+     * When the server accepts the POST body but does not reflect the privileged properties and a
+     * follow-up read also does not show them, no HIGH finding is raised. An INFO notes that the
+     * write succeeded but could not be confirmed (never-skip).
      */
     @Test
-    @DisplayName("No mass-assignment finding when server does not reflect privileged properties")
+    @DisplayName("No HIGH mass-assignment finding when privileged properties are not reflected or stored")
     void noMassAssignmentWhenPropertiesNotReflected() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // Server returns 200 but does NOT echo back isAdmin or role
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"id\":4,\"name\":\"Carol\",\"email\":\"c@example.com\"}"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(ok("{\"id\":4,\"name\":\"Carol\",\"email\":\"c@example.com\"}"));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertFalse(findings.stream().anyMatch(
-                        f -> f.getTitle().contains("Mass Assignment")),
-                "Should not flag mass assignment when privileged fields are not reflected");
+                        f -> f.getTitle().contains("Mass Assignment") && f.getSeverity() == Severity.HIGH),
+                "Should not raise HIGH when privileged fields are not reflected or stored");
+        assertTrue(findings.stream().anyMatch(
+                        f -> f.getTitle().contains("Could Not Be Read Back") && f.getSeverity() == Severity.INFO),
+                "INFO should note the unconfirmed write");
     }
 
     /**
      * A server that sanitizes the field and echoes back the safe value (e.g. "isAdmin":false)
-     * should NOT be flagged — the key being present is not evidence of privilege escalation,
-     * only the privileged VALUE being reflected is.
+     * should NOT get a HIGH — the key being present is not evidence of privilege escalation,
+     * only the privileged VALUE being reflected or stored is.
      */
     @Test
-    @DisplayName("No mass-assignment finding when the key is present but sanitized to a safe value")
+    @DisplayName("No HIGH mass-assignment finding when the key is present but sanitized to a safe value")
     void noMassAssignmentWhenValueIsSanitized() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // Server echoes the field name back but with the safe/sanitized value, not the submitted one
         when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
                 .thenReturn(ok("{\"id\":5,\"name\":\"Dave\",\"isAdmin\":false,\"role\":\"user\"}"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(ok("{\"id\":5,\"name\":\"Dave\",\"isAdmin\":false,\"role\":\"user\"}"));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
-        assertFalse(findings.stream().anyMatch(f -> f.getTitle().contains("Mass Assignment")),
-                "Should not flag mass assignment when the privileged value was sanitized, even if the key is echoed back");
+        assertFalse(findings.stream().anyMatch(
+                        f -> f.getTitle().contains("Mass Assignment") && f.getSeverity() == Severity.HIGH),
+                "Should not raise HIGH when the privileged value was sanitized");
     }
 
     /**
@@ -204,5 +217,189 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
         assertFalse(findings.stream().anyMatch(
                         f -> f.getTitle().contains("Mass Assignment")),
                 "GET endpoint should not trigger mass-assignment test");
+    }
+    @Test
+    @DisplayName("Privileged keys are merged into the discovered request body fields")
+    void mergesPrivilegedKeysWithDiscoveredBody() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\",\"email\":\"a@b.c\"}", true);
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1,\"username\":\"alice\"}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String firstBody = bodyCaptor.getAllValues().get(0);
+        assertTrue(firstBody.contains("\"username\""), "discovered username must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"password\""), "discovered password must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"email\""), "discovered email must be kept: " + firstBody);
+        assertTrue(firstBody.contains("\"isAdmin\"") || firstBody.contains("\"admin\""),
+                "privileged key must be merged in: " + firstBody);
+    }
+
+    @Test
+    @DisplayName("Filler body with unique non-weak values is used when no request body is known")
+    void usesFillerBodyWhenNoneDiscovered() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST");
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String firstBody = bodyCaptor.getAllValues().get(0);
+        assertTrue(firstBody.contains("\"username\""), "filler must include username: " + firstBody);
+        assertTrue(firstBody.contains("\"password\""), "filler must include password: " + firstBody);
+        assertTrue(firstBody.contains("\"email\""), "filler must include email: " + firstBody);
+        assertTrue(firstBody.contains("astf-"), "filler values must be unique astf-* values: " + firstBody);
+        assertFalse(firstBody.contains("\"test\""), "filler must never use weak value test: " + firstBody);
+        String password = new com.fasterxml.jackson.databind.ObjectMapper().readTree(firstBody).get("password").asText();
+        assertTrue(password.matches("(?=.*[A-Z])(?=.*[a-z])(?=.*\\d)(?=.*[^A-Za-z0-9]).{12,}"),
+                "filler password must pass common strength rules: " + password);
+    }
+
+    @Test
+    @DisplayName("Detects mass assignment on an endpoint that requires username+password")
+    void detectsWhenEndpointRequiresUsernameAndPassword() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\",\"email\":\"a@b.c\"}", true);
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    // Echo isAdmin only when required fields are present — models a register
+                    // endpoint that 400s on privileged-only payloads.
+                    if (body.contains("\"username\"") && body.contains("\"password\"")
+                            && body.contains("\"isAdmin\":true")) {
+                        return ok("{\"id\":9,\"username\":\"alice\",\"isAdmin\":true}");
+                    }
+                    if (!body.contains("\"username\"") || !body.contains("\"password\"")) {
+                        return new HttpResponse(400, "{\"error\":\"username and password required\"}", Map.of());
+                    }
+                    return ok("{\"id\":9,\"username\":\"alice\",\"isAdmin\":false}");
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(
+                        f -> "Mass Assignment - Privilege Escalation via Object Properties".equals(f.getTitle())),
+                "Should detect mass assignment when required fields are preserved");
+    }
+
+    @Test
+    @DisplayName("credit privileged field is present in mass-assignment payloads")
+    void creditFieldIsProbed() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST");
+
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(ok("{\"id\":1}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(b -> b.contains("\"credit\"")),
+                "At least one payload must include credit as promised by the docs: " + bodyCaptor.getAllValues());
+    }
+
+    @Test
+    @DisplayName("Write without echo + Location read-back showing privileged value is HIGH")
+    void detectsViaLocationReadBack() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\"}", true);
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(201, "{\"message\":\"created\"}",
+                        Map.of("Location", List.of("https://api.example.com/api/v1/users/9"))));
+        when(httpClient.getWithStatus(eq("https://api.example.com/api/v1/users/9"), anyMap()))
+                .thenReturn(ok("{\"id\":9,\"username\":\"alice\",\"isAdmin\":true}"));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("confirmed on read-back")
+                                && f.getSeverity() == Severity.HIGH),
+                "Expected HIGH confirmed on read-back, got: " + findings.stream().map(Finding::getTitle).toList());
+    }
+
+    @Test
+    @DisplayName("Register write without echo + login/profile read-back showing admin is HIGH")
+    void detectsViaLoginProfileReadBack() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\",\"email\":\"a@b.c\"}", true);
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String body = inv.getArgument(3);
+                    if (url.contains("/login")) {
+                        return ok("{\"auth_token\":\"tok-alice\"}");
+                    }
+                    // register: accept but do not echo privileges (VAmPI-shaped)
+                    if (body.contains("\"username\"") && body.contains("\"password\"")) {
+                        return ok("{\"message\":\"Successfully registered\"}");
+                    }
+                    return new HttpResponse(400, "{\"error\":\"bad\"}", Map.of());
+                });
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    Map<String, String> headers = inv.getArgument(1);
+                    if (url.endsWith("/users/v1/alice")
+                            && headers != null
+                            && "Bearer tok-alice".equals(headers.get("Authorization"))) {
+                        return ok("{\"username\":\"alice\",\"admin\":true}");
+                    }
+                    return unauthorized();
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("confirmed on read-back")
+                                && f.getSeverity() == Severity.HIGH),
+                "Expected HIGH via login+profile read-back, got: "
+                        + findings.stream().map(Finding::getTitle).toList());
+    }
+
+    @Test
+    @DisplayName("Successful write with no readable object yields INFO, not silence")
+    void writeWithoutReadBackIsInfo() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/widgets", "POST", "application/json",
+                "{\"name\":\"w\"}", true);
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"message\":\"ok\"}"));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(unauthorized());
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("Could Not Be Read Back")
+                                && f.getSeverity() == Severity.INFO),
+                "Expected INFO when write succeeds but object cannot be read back, got: "
+                        + findings.stream().map(Finding::getTitle).toList());
+    }
+
+    @Test
+    @DisplayName("Existing echo-based detection still reports HIGH without needing read-back")
+    void echoBasedDetectionStillWorks() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/users", "POST", "application/json",
+                "{\"username\":\"alice\",\"password\":\"s3cret\"}", true);
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(ok("{\"id\":1,\"username\":\"alice\",\"isAdmin\":true}"));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        "Mass Assignment - Privilege Escalation via Object Properties".equals(f.getTitle())
+                                && f.getSeverity() == Severity.HIGH));
     }
 }

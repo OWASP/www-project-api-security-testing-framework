@@ -6,7 +6,12 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Added
 
+- **Mass-assignment write-then-read confirmation** (#194). When a privilege-escalation write succeeds but the response does not echo the privileged value (e.g. VAmPI `POST /users/v1/register`), ASTF now tries to read the object back via `Location`, an `id`/`username` in the response, or — for register-style paths — login with the probe credentials followed by profile/`me` GETs. Confirmed storage is HIGH; an unreadable object after a successful write is INFO rather than silent.
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
+
+### Fixed
+
+- **Mass-assignment probes dropped required fields.** `BrokenObjectPropertyLevelAuthorizationTestCase` sent only privileged keys (`isAdmin`, `role`, ...), so register-style endpoints that require `username`/`password` returned 400 before property binding ran (the documented VAmPI `POST /users/v1/register` miss). Privileged fields are now merged into the discovered request body, or into a unique `astf-*` filler body when none is known, and `credit` is included among the probed keys.
 
 ## 2.0.2 (patch)
 
