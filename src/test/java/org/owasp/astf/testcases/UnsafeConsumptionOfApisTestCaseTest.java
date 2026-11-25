@@ -5,16 +5,19 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -31,6 +34,12 @@ import static org.mockito.Mockito.when;
  *   <li>{@code testOpenRedirect} only runs on GET endpoints, uses a non-following HTTP client,
  *       and requires an absolute {@code Location} whose host is the injected attacker domain
  *       (relative / same-host Locations are not open redirects).</li>
+ *       patterns (webhook, proxy, integration, external, callback, third-party, import, export …).</li>
+ *   <li>SSTI uses a unique {@code 1337*1337=1787569} marker across template syntaxes; pure echo
+ *       of the expression without evaluation is not reported, and a marker already present in the
+ *       baseline is ignored.</li>
+ *   <li>{@code testOpenRedirect} only runs on GET endpoints and checks that the {@code Location}
+ *       response header echoes the attacker domain.</li>
  *   <li>{@code checkTlsForExternalCalls} only runs on integration endpoints with POST or PUT,
  *       and reports a finding when the server returns 200/201 for an HTTP callback URL.</li>
  * </ul>
@@ -267,5 +276,98 @@ class UnsafeConsumptionOfApisTestCaseTest {
 
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+    @ParameterizedTest(name = "SSTI detection for {1}: {0}")
+    @CsvSource({
+            "'{{1337*1337}}', Jinja2/Twig/Nunjucks",
+            "'${1337*1337}', Spring EL/JSP EL/FreeMarker",
+            "'<%= 1337*1337 %>', ERB/EJS",
+            "'#{1337*1337}', Ruby string interp/Thymeleaf legacy/Pug",
+            "'*{1337*1337}', Thymeleaf selection",
+            "'[[${1337*1337}]]', Thymeleaf inline",
+            "'@(1337*1337)', Razor"
+    })
+    @DisplayName("Should detect SSTI when unique marker is evaluated for each template syntax")
+    void testSstiDetectedPerSyntax(String payload, String engineFamily) throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    if (body.contains(payload)) {
+                        // Evaluation: marker present; expression may also be echoed
+                        return new HttpResponse(200,
+                                "{\"out\":\"1787569 also saw " + payload + "\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding ssti = findings.stream()
+                .filter(f -> f.getTitle().contains("Template Injection"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected SSTI finding for " + payload));
+        assertEquals(Severity.HIGH, ssti.getSeverity());
+        assertTrue(ssti.getEvidence().contains(engineFamily), "Evidence should name engine family");
+        assertTrue(ssti.getEvidence().contains("1787569"));
+        assertTrue(ssti.getEvidence().contains(payload));
+    }
+
+    @Test
+    @DisplayName("GET SSTI probes percent-encode '#' so '#{...}' is not cut off as a URL fragment")
+    void testSstiGetProbeEncodesHash() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "GET");
+        List<String> urls = new java.util.ArrayList<>();
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            urls.add(inv.getArgument(0));
+            return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        assertTrue(urls.stream().anyMatch(u -> u.contains("data=%23{1337*1337}")),
+                "the #{} probe must reach the server intact: " + urls);
+        assertTrue(urls.stream().noneMatch(u -> u.contains("#")), "no raw '#' in any probe URL: " + urls);
+    }
+
+    @Test
+    @DisplayName("Should NOT report SSTI when 1787569 already appears in the baseline response")
+    void testNoSstiWhenMarkerInBaseline() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"n\":1787569,\"note\":\"preexisting\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Template Injection")),
+                "Marker present in baseline must not produce an SSTI finding");
+    }
+
+    @Test
+    @DisplayName("Should NOT report SSTI on pure echo of the expression without evaluation")
+    void testNoSstiOnPureEcho() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+        AtomicInteger calls = new AtomicInteger();
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    calls.incrementAndGet();
+                    if (body.contains("1337*1337") || body.contains("{{") || body.contains("${")) {
+                        // Echo the raw expression/payload only — no evaluated marker
+                        return new HttpResponse(200, "{\"echo\":\"" + body.replace("\"", "\\\"") + "\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Template Injection")),
+                "Pure echo without 1787569 must not produce an SSTI finding");
+        assertTrue(calls.get() > 0);
     }
 }
