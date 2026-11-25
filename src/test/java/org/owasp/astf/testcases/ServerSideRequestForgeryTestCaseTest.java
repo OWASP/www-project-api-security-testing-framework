@@ -272,9 +272,6 @@ class ServerSideRequestForgeryTestCaseTest {
         assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
         assertTrue(findings.get(0).getEvidence().contains("'ami-id'"), findings.get(0).getEvidence());
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Discovered JSON body fields are kept; payload is substituted into URL-shaped fields")
     void testBodyProbeKeepsDiscoveredFieldsAndInjectsUrlShaped() throws IOException {

@@ -62,9 +62,6 @@ public class ServerSideRequestForgeryTestCase implements TestCase {
             "root:x:", "www-data",                                  // /etc/passwd content
             "docker", "kubernetes", "k8s"                          // container environment
     );
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // GCP/Azure metadata endpoints require a dedicated header; an error naming that header
     // proves the server reached the metadata service even though the fetch itself failed.
     private static final List<String> METADATA_HEADER_REQUIRED_INDICATORS = List.of(
