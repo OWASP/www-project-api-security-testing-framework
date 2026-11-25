@@ -47,9 +47,6 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
             Map.of("role", "administrator", "permissions", List.of("*")),
             Map.of("active", true, "verified", true, "premium", true)
     );
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Common required fields for register/update endpoints when no sample body is discovered.
     // Values are unique per call (never "test") so repeated register probes don't collide and
     // don't create a weak test/test account that other checks would misread as default creds.

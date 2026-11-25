@@ -207,9 +207,6 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
                         f -> f.getTitle().contains("Mass Assignment")),
                 "GET endpoint should not trigger mass-assignment test");
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Privileged keys are merged into the discovered request body fields")
     void mergesPrivilegedKeysWithDiscoveredBody() throws IOException {
