@@ -1,6 +1,7 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -55,6 +56,11 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
     );
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // Remembered from the most recent mass-assignment body so a register-style write can be
+    // followed by a login + profile read when the write response does not echo privileges.
+    private String lastProbeUsername;
+    private String lastProbePassword;
 
     @Override
     public String getId() {
@@ -140,9 +146,16 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
             return findings;
         }
 
+        boolean wroteSuccessfullyWithoutEcho = false;
+        String lastWriteBody = null;
+        HttpResponse lastWriteResponse = null;
+        Map<String, Object> lastPayload = null;
+        List<String> readBackAttempts = new ArrayList<>();
+
         for (Map<String, Object> payload : PRIVILEGE_ESCALATION_PAYLOADS) {
             try {
                 String body = buildMassAssignmentBody(endpoint, payload);
+                rememberCredentialsFromBody(body);
                 HttpResponse response = switch (method) {
                     case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
                     case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
@@ -161,31 +174,317 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
                             .anyMatch(entry -> valueWasReflected(responseBody, entry.getKey(), entry.getValue()));
 
                     if (privilegeAccepted) {
-                        Finding finding = new Finding(
-                                UUID.randomUUID().toString(),
+                        findings.add(massAssignmentFinding(
                                 "Mass Assignment - Privilege Escalation via Object Properties",
-                                "The API accepted and potentially applied restricted object properties " +
-                                "submitted by the client, which may allow privilege escalation. " +
-                                "Tested payload: " + body,
-                                Severity.HIGH,
-                                getId(),
-                                endpoint.getMethod() + " " + endpoint.getPath(),
-                                "Implement an allowlist of properties that clients are permitted to set. " +
-                                "Never bind client-supplied input directly to internal data models. " +
-                                "Explicitly define which fields are writable per user role."
-                        );
-                        finding.setRequestDetails(method + " " + endpoint.getFullUrl() + "\nBody: " + body);
-                        finding.setResponseDetails("HTTP " + response.getStatusCode());
-                        findings.add(finding);
-                        break;
+                                "The API accepted and potentially applied restricted object properties "
+                                        + "submitted by the client, which may allow privilege escalation. "
+                                        + "Tested payload: " + body,
+                                Severity.HIGH, endpoint, method, body, response,
+                                "Confirmed in the write response."));
+                        return findings;
                     }
+
+                    // Write succeeded but did not echo privileges — try reading the object back.
+                    ReadBackResult readBack = readBackAfterWrite(endpoint, httpClient, response, payload);
+                    readBackAttempts.addAll(readBack.attempts());
+                    if (readBack.confirmed()) {
+                        findings.add(massAssignmentFinding(
+                                "Mass Assignment - Privilege Escalation via Object Properties (confirmed on read-back)",
+                                "The API accepted a write that included restricted object properties. "
+                                        + "The write response did not echo them, but a follow-up read of the "
+                                        + "created/updated object showed the privileged value was stored. "
+                                        + "Tested payload: " + body,
+                                Severity.HIGH, endpoint, method, body, response,
+                                "Read-back confirmed via " + readBack.source() + ": privileged value present."));
+                        return findings;
+                    }
+
+                    wroteSuccessfullyWithoutEcho = true;
+                    lastWriteBody = body;
+                    lastWriteResponse = response;
+                    lastPayload = payload;
                 }
             } catch (Exception e) {
                 logger.debug("Error testing mass assignment on {}: {}", endpoint, e.getMessage());
             }
         }
 
+        if (wroteSuccessfullyWithoutEcho) {
+            Finding finding = massAssignmentFinding(
+                    "Mass Assignment Write Succeeded But Object Could Not Be Read Back",
+                    "The API accepted one or more writes that included restricted object properties, "
+                            + "but the response did not echo those values and a follow-up read could not "
+                            + "confirm whether they were stored. Re-check manually or expose a read path "
+                            + "for the created object. Last payload: " + lastWriteBody,
+                    Severity.INFO, endpoint, method, lastWriteBody, lastWriteResponse,
+                    "Read-back attempts: " + (readBackAttempts.isEmpty() ? "none succeeded"
+                            : String.join("; ", readBackAttempts))
+                            + (lastPayload != null ? ". Privileged keys probed: " + lastPayload.keySet() : ""));
+            findings.add(finding);
+        }
+
         return findings;
+    }
+
+    private Finding massAssignmentFinding(String title, String description, Severity severity,
+                                          EndpointInfo endpoint, String method, String body,
+                                          HttpResponse response, String evidence) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                title,
+                description,
+                severity,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Implement an allowlist of properties that clients are permitted to set. "
+                        + "Never bind client-supplied input directly to internal data models. "
+                        + "Explicitly define which fields are writable per user role."
+        );
+        finding.setRequestDetails(method + " " + endpoint.getFullUrl() + "\nBody: " + body);
+        if (response != null) {
+            finding.setResponseDetails("HTTP " + response.getStatusCode());
+        }
+        finding.setEvidence(evidence);
+        return finding;
+    }
+
+    private record ReadBackResult(boolean confirmed, String source, List<String> attempts) {
+        static ReadBackResult miss(List<String> attempts) {
+            return new ReadBackResult(false, null, attempts);
+        }
+        static ReadBackResult hit(String source, List<String> attempts) {
+            return new ReadBackResult(true, source, attempts);
+        }
+    }
+
+    /**
+     * After a successful write that did not echo privileges, try to fetch the resulting object
+     * via Location, an id/username in the response, or (for register-style paths) login + profile.
+     */
+    private ReadBackResult readBackAfterWrite(EndpointInfo endpoint, HttpClient httpClient,
+                                              HttpResponse writeResponse, Map<String, Object> payload) {
+        List<String> attempts = new ArrayList<>();
+        try {
+            String location = writeResponse.getHeader("Location");
+            if (location != null && !location.isBlank()) {
+                String url = resolveMaybeRelative(effectiveBaseUrl(endpoint), location.trim());
+                attempts.add("GET Location " + url);
+                HttpResponse got = httpClient.getWithStatus(url, Map.of());
+                if (got != null && containsPrivilegedValue(got.getBody(), payload)) {
+                    return ReadBackResult.hit("Location " + url, attempts);
+                }
+            }
+
+            JsonNode writeJson = parseObjectOrNull(writeResponse.getBody());
+            if (writeJson != null) {
+                String id = textField(writeJson, "id", "_id", "uuid");
+                if (id != null) {
+                    String url = joinUrl(endpoint.getFullUrl().replaceAll("/$", ""), id);
+                    // Avoid appending onto .../register/id — use parent collection when path ends with register/signup.
+                    if (isRegisterStylePath(endpoint.getPath())) {
+                        url = joinUrl(parentCollectionUrl(endpoint), id);
+                    }
+                    attempts.add("GET by id " + url);
+                    HttpResponse got = httpClient.getWithStatus(url, Map.of());
+                    if (got != null && containsPrivilegedValue(got.getBody(), payload)) {
+                        return ReadBackResult.hit("id " + url, attempts);
+                    }
+                }
+
+                String username = textField(writeJson, "username", "user", "name");
+                if (username == null) {
+                    username = lastProbeUsername;
+                }
+                if (username != null && isRegisterStylePath(endpoint.getPath())) {
+                    ReadBackResult fromLogin = readBackViaLogin(endpoint, httpClient, username, payload, attempts);
+                    if (fromLogin.confirmed()) {
+                        return fromLogin;
+                    }
+                }
+            } else if (lastProbeUsername != null && isRegisterStylePath(endpoint.getPath())) {
+                ReadBackResult fromLogin = readBackViaLogin(endpoint, httpClient, lastProbeUsername, payload, attempts);
+                if (fromLogin.confirmed()) {
+                    return fromLogin;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Read-back after mass assignment on {} failed: {}", endpoint, e.getMessage());
+            attempts.add("error: " + e.getMessage());
+        }
+        return ReadBackResult.miss(attempts);
+    }
+
+    private ReadBackResult readBackViaLogin(EndpointInfo endpoint, HttpClient httpClient,
+                                            String username, Map<String, Object> payload,
+                                            List<String> attempts) throws IOException {
+        if (lastProbePassword == null || lastProbePassword.isBlank()) {
+            attempts.add("login skipped (no probe password remembered)");
+            return ReadBackResult.miss(attempts);
+        }
+        String base = trimSlash(effectiveBaseUrl(endpoint));
+        String loginUrl = base + guessLoginPath(endpoint.getPath());
+        String loginBody = String.format(Locale.ROOT,
+                "{\"username\":%s,\"password\":%s}",
+                objectMapper.writeValueAsString(username),
+                objectMapper.writeValueAsString(lastProbePassword));
+        attempts.add("POST login " + loginUrl);
+        HttpResponse login = httpClient.postWithStatus(loginUrl, Map.of(), "application/json", loginBody);
+        Map<String, String> authHeaders = Map.of();
+        if (login != null && login.isSuccess()) {
+            String token = extractAuthToken(login.getBody());
+            if (token != null) {
+                authHeaders = Map.of("Authorization", "Bearer " + token);
+            }
+        }
+
+        for (String path : List.of(
+                "/users/v1/" + username,
+                "/api/v1/users/" + username,
+                "/api/v1/profile",
+                "/api/v1/me",
+                "/users/v1/me",
+                "/me")) {
+            String url = base + path;
+            attempts.add("GET " + url);
+            HttpResponse got = httpClient.getWithStatus(url, authHeaders);
+            if (got != null && containsPrivilegedValue(got.getBody(), payload)) {
+                return ReadBackResult.hit(url, attempts);
+            }
+        }
+        return ReadBackResult.miss(attempts);
+    }
+
+    private boolean containsPrivilegedValue(String body, Map<String, Object> payload) {
+        if (body == null || body.isEmpty() || payload == null) {
+            return false;
+        }
+        return payload.entrySet().stream()
+                .anyMatch(entry -> valueWasReflected(body, entry.getKey(), entry.getValue()));
+    }
+
+    private void rememberCredentialsFromBody(String body) {
+        JsonNode node = parseObjectOrNull(body);
+        if (node == null) {
+            return;
+        }
+        String username = textField(node, "username");
+        String password = textField(node, "password");
+        if (username != null) {
+            lastProbeUsername = username;
+        }
+        if (password != null) {
+            lastProbePassword = password;
+        }
+    }
+
+    private static boolean isRegisterStylePath(String path) {
+        if (path == null) {
+            return false;
+        }
+        String lower = path.toLowerCase(Locale.ROOT);
+        return lower.contains("register") || lower.contains("signup")
+                || lower.contains("sign-up") || lower.contains("sign_up");
+    }
+
+    private static String guessLoginPath(String registerPath) {
+        if (registerPath == null) {
+            return "/users/v1/login";
+        }
+        String lower = registerPath.toLowerCase(Locale.ROOT);
+        if (lower.contains("/users/v1/")) {
+            return "/users/v1/login";
+        }
+        if (lower.contains("/api/v1/")) {
+            return "/api/v1/login";
+        }
+        return "/users/v1/login";
+    }
+
+    private static String parentCollectionUrl(EndpointInfo endpoint) {
+        String full = trimSlash(endpoint.getFullUrl());
+        int slash = full.lastIndexOf('/');
+        if (slash <= 0) {
+            return full;
+        }
+        return full.substring(0, slash);
+    }
+
+    private static String joinUrl(String base, String id) {
+        return trimSlash(base) + "/" + id;
+    }
+
+    private static String trimSlash(String url) {
+        if (url == null) {
+            return "";
+        }
+        return url.endsWith("/") ? url.substring(0, url.length() - 1) : url;
+    }
+
+    private static String resolveMaybeRelative(String baseUrl, String location) {
+        try {
+            URI loc = URI.create(location);
+            if (loc.isAbsolute()) {
+                return location;
+            }
+            return URI.create(trimSlash(baseUrl) + "/").resolve(loc).toString();
+        } catch (IllegalArgumentException e) {
+            return location;
+        }
+    }
+
+    private JsonNode parseObjectOrNull(String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(body);
+            return node != null && node.isObject() ? node : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String textField(JsonNode node, String... names) {
+        for (String name : names) {
+            JsonNode child = node.get(name);
+            if (child != null && child.isTextual() && !child.asText().isBlank()) {
+                return child.asText();
+            }
+            if (child != null && child.isNumber()) {
+                return child.asText();
+            }
+        }
+        return null;
+    }
+
+    private String extractAuthToken(String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(body);
+            for (String key : List.of("auth_token", "access_token", "token", "jwt")) {
+                JsonNode child = node.get(key);
+                if (child != null && child.isTextual() && !child.asText().isBlank()) {
+                    return child.asText();
+                }
+            }
+        } catch (Exception ignored) {
+            // not JSON
+        }
+        return null;
+    }
+
+    private static String effectiveBaseUrl(EndpointInfo endpoint) {
+        if (endpoint.getBaseUrl() != null && !endpoint.getBaseUrl().isBlank()) {
+            return endpoint.getBaseUrl();
+        }
+        String full = endpoint.getFullUrl();
+        String path = endpoint.getPath();
+        if (full != null && path != null && full.endsWith(path)) {
+            return full.substring(0, full.length() - path.length());
+        }
+        return full != null ? full : "";
     }
 
     /**
