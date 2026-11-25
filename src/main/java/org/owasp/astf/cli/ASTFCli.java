@@ -145,9 +145,6 @@ public class ASTFCli implements Callable<Integer> {
 
     @Option(names = {"--no-discovery"}, description = "Disable automatic endpoint discovery")
     private boolean noDiscovery;
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Option(names = {"--allow-destructive"}, description = "Allow authorization checks to send " +
             "state-changing requests (PUT, PATCH, DELETE, POST) to the objects being scanned. Only use " +
             "against test accounts whose data may be modified or deleted. Without it, cross-user BOLA " +

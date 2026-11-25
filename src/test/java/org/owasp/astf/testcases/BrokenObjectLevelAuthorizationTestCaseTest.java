@@ -225,9 +225,6 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         assertTrue(bodyCaptor.getAllValues().stream().noneMatch(body -> body.equals("{}")),
                 "Should never fall back to an empty '{}' body for a state-changing request");
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     private static final Map<String, String> SECONDARY = Map.of("Authorization", "Bearer secondary-user-token");
 
     @Test

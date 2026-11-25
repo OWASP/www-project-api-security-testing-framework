@@ -209,9 +209,6 @@ public class HttpClient {
         }
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     /**
      * @return true when state-changing requests are permitted ({@code --allow-destructive}); test
      *     cases must otherwise use read-only requests and report what they held back

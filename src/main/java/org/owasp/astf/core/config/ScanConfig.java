@@ -35,9 +35,6 @@ public class ScanConfig {
     // never merged into the default request headers, since it must never be used as the
     // scan's primary identity.
     private String secondaryBearerToken;
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Off by default: checks that would change or delete server-side objects (for example a
     // cross-user DELETE) are replaced by read-only requests and listed in the report as held back.
     private boolean allowDestructive = false;

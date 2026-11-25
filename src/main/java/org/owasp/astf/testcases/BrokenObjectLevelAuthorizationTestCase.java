@@ -59,9 +59,6 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     );
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     private static final ObjectMapper STATIC_MAPPER = new ObjectMapper();
     private static final Set<String> STATE_CHANGING_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
     // Fields that name an object rather than describe it; used to recognise the same object in two
@@ -155,9 +152,6 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
 
         return findings;
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     /**
      * Read-only cross-user check. A state-changing endpoint is probed with GET on the same URL,
      * so the scan never modifies or deletes an object it does not own unless the operator passed

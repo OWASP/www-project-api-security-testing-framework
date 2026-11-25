@@ -50,9 +50,6 @@ class ConfigLoaderTest {
         assertTrue(config.isVerbose());
         assertEquals("secret123", config.getHeaders().get("X-API-Key"));
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("allowDestructive defaults to false and is read from YAML")
     void testAllowDestructive(@TempDir Path tempDir) throws IOException {
