@@ -190,10 +190,17 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
 
     /**
      * Merges privileged mass-assignment keys into the endpoint's discovered JSON object body
-     * when available; otherwise builds a realistic filler body with unique non-weak values so
-     * endpoints that require username/password/email still reach property-binding code.
+     * when available; otherwise, for a POST, builds a realistic filler body with unique non-weak
+     * values so endpoints that require username/password/email still reach property-binding code.
+     *
+     * <p>The filler is used for POST only. A POST that creates an object (register, sign-up) is
+     * safe to complete with made-up values: it adds a new record. A PUT or PATCH targets an object
+     * that already exists, and a filler body that gets past validation would <em>overwrite</em> it,
+     * for example by setting a random password on {@code PUT /accounts/{name}/password}. Without a
+     * discovered body those methods keep sending the privileged keys alone, as in 2.0.2.</p>
      */
     private String buildMassAssignmentBody(EndpointInfo endpoint, Map<String, Object> privileged) {
+        boolean mayFill = "POST".equalsIgnoreCase(endpoint.getMethod());
         ObjectNode root = objectMapper.createObjectNode();
         String discovered = endpoint.getRequestBody();
         if (discovered != null && !discovered.isBlank()) {
@@ -201,15 +208,17 @@ public class BrokenObjectPropertyLevelAuthorizationTestCase implements TestCase 
                 JsonNode parsed = objectMapper.readTree(discovered);
                 if (parsed.isObject() && parsed.size() > 0) {
                     root = (ObjectNode) parsed.deepCopy();
-                } else {
+                } else if (mayFill) {
                     putFillerFields(root);
                 }
             } catch (Exception e) {
                 logger.debug("Discovered request body for {} isn't valid JSON, using filler: {}",
                         endpoint, e.getMessage());
-                putFillerFields(root);
+                if (mayFill) {
+                    putFillerFields(root);
+                }
             }
-        } else {
+        } else if (mayFill) {
             putFillerFields(root);
         }
 

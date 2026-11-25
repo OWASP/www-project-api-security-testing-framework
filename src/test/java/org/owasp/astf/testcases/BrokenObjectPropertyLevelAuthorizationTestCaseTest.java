@@ -252,6 +252,50 @@ class BrokenObjectPropertyLevelAuthorizationTestCaseTest {
     }
 
     @Test
+    @DisplayName("PUT and PATCH never get filler credentials, which would overwrite a real object")
+    void doesNotSendFillerFieldsToExistingObjectsWithPutOrPatch() throws IOException {
+        // PUT /accounts/{name}/password with a made-up "password" would genuinely change that
+        // account's password if the server accepts it. Only a POST that creates an object may be
+        // completed with filler; an update method without a discovered body keeps privileged keys only.
+        ArgumentCaptor<String> putBodies = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> patchBodies = ArgumentCaptor.forClass(String.class);
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), putBodies.capture()))
+                .thenReturn(new HttpResponse(400, "{\"error\":\"password is required\"}", Map.of()));
+        when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), patchBodies.capture()))
+                .thenReturn(new HttpResponse(400, "{\"error\":\"password is required\"}", Map.of()));
+
+        testCase.execute(new EndpointInfo("/api/v1/accounts/name1/password", "PUT"), httpClient);
+        testCase.execute(new EndpointInfo("/api/v1/accounts/name1", "PATCH"), httpClient);
+
+        assertFalse(putBodies.getAllValues().isEmpty(), "the PUT probe must still run (never skipped)");
+        assertFalse(patchBodies.getAllValues().isEmpty(), "the PATCH probe must still run (never skipped)");
+        for (String body : putBodies.getAllValues()) {
+            assertFalse(body.contains("\"password\"") || body.contains("\"username\"") || body.contains("astf-"),
+                    "PUT must not carry filler fields: " + body);
+        }
+        for (String body : patchBodies.getAllValues()) {
+            assertFalse(body.contains("\"password\"") || body.contains("\"username\"") || body.contains("astf-"),
+                    "PATCH must not carry filler fields: " + body);
+        }
+    }
+
+    @Test
+    @DisplayName("A PUT with a discovered body still has the privileged keys merged into it")
+    void putWithDiscoveredBodyStillMergesPrivilegedKeys() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/v1/accounts/name1", "PUT", "application/json",
+                "{\"nickname\":\"neo\"}", true);
+        ArgumentCaptor<String> bodies = ArgumentCaptor.forClass(String.class);
+        when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), bodies.capture()))
+                .thenReturn(ok("{\"id\":1}"));
+
+        testCase.execute(endpoint, httpClient);
+
+        String first = bodies.getAllValues().get(0);
+        assertTrue(first.contains("\"nickname\":\"neo\""), "discovered field must be kept: " + first);
+        assertTrue(first.contains("\"isAdmin\":true"), "privileged key must be merged in: " + first);
+    }
+
+    @Test
     @DisplayName("Detects mass assignment on an endpoint that requires username+password")
     void detectsWhenEndpointRequiresUsernameAndPassword() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/users/v1/register", "POST", "application/json",
