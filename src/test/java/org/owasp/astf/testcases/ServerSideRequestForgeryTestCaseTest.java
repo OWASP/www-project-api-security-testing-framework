@@ -19,6 +19,8 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
 
+import org.mockito.ArgumentCaptor;
+
 /**
  * Unit tests for {@link ServerSideRequestForgeryTestCase} (OWASP API7:2023).
  */
@@ -269,5 +271,175 @@ class ServerSideRequestForgeryTestCaseTest {
         assertEquals(1, findings.size(), "the changed content is skipped, the later metadata hit is reported");
         assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
         assertTrue(findings.get(0).getEvidence().contains("'ami-id'"), findings.get(0).getEvidence());
+    }
+    @Test
+    @DisplayName("Discovered JSON body fields are kept; payload is substituted into URL-shaped fields")
+    void testBodyProbeKeepsDiscoveredFieldsAndInjectsUrlShaped() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/import", "POST", "application/json",
+                "{\"name\":\"report\",\"callback\":\"https://example.com/hook\",\"limit\":10}", true);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String first = bodyCaptor.getAllValues().get(0);
+        assertTrue(first.contains("\"name\""), "non-URL field must be kept: " + first);
+        assertTrue(first.contains("\"limit\""), "non-URL field must be kept: " + first);
+        assertTrue(first.contains("169.254.169.254") || first.contains("metadata.google.internal")
+                        || first.contains("127.0.0.1") || first.contains("localhost"),
+                "URL-shaped callback must receive an SSRF payload: " + first);
+        assertTrue(first.contains("\"callback\""), "callback field name must remain: " + first);
+    }
+
+    @Test
+    @DisplayName("When discovered body has no URL-shaped fields, each URL parameter name is added rather than replacing the body")
+    void testBodyProbeAddsUrlFieldWhenNoneExist() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/widgets", "POST", "application/json",
+                "{\"name\":\"widget\",\"qty\":2}", true);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        String first = bodyCaptor.getAllValues().get(0);
+        assertTrue(first.contains("\"name\""), "original fields must remain: " + first);
+        assertTrue(first.contains("\"qty\""), "original fields must remain: " + first);
+        assertTrue(first.contains("\"url\""), "url field must be added: " + first);
+        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(b ->
+                        b.contains("\"webhook\"") && b.contains("\"name\"") && b.contains("\"qty\"")),
+                "every URL parameter name is still tried, each alongside the discovered fields");
+    }
+
+    @Test
+    @DisplayName("No-body endpoint still gets the historical single-field probe")
+    void testNoBodyEndpointStillUsesSingleFieldProbe() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/proxy", "POST");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        assertFalse(bodyCaptor.getAllValues().isEmpty());
+        String first = bodyCaptor.getAllValues().get(0);
+        // Historical behaviour: a single JSON field whose value is the payload
+        assertTrue(first.matches("\\{\"[^\"]+\":\"http[^\"]+\"\\}"),
+                "no-body endpoint must use single-field probe, got: " + first);
+    }
+
+    @Test
+    @DisplayName("String values that look like http(s) URLs are substituted even when the field name is not URL-shaped")
+    void testHttpUrlValuedFieldsAreSubstituted() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/fetch", "POST", "application/json",
+                "{\"title\":\"x\",\"remote\":\"https://cdn.example.com/a.png\"}", true);
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+
+        testCase.execute(endpoint, httpClient);
+
+        String first = bodyCaptor.getAllValues().get(0);
+        assertTrue(first.contains("\"title\""), "title must be kept: " + first);
+        assertTrue(first.contains("\"remote\""), "remote key must remain: " + first);
+        assertFalse(first.contains("cdn.example.com"),
+                "http(s) value must be replaced with the SSRF payload: " + first);
+    }
+
+    @Test
+    @DisplayName("GCP Missing Metadata-Flavor header response is HIGH metadata-reached finding")
+    void testGcpMetadataHeaderRequiredIsHigh() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/proxy", "POST");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(403,
+                        "Missing Metadata-Flavor:Google header", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getSeverity() == Severity.HIGH
+                                && f.getTitle().contains("metadata service reached, header required")),
+                "GCP metadata header-required error must be HIGH: " + findings);
+    }
+
+    @Test
+    @DisplayName("Azure Required metadata header response is HIGH metadata-reached finding")
+    void testAzureMetadataHeaderRequiredIsHigh() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/proxy", "POST");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(400,
+                        "Required metadata header not specified", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getSeverity() == Severity.HIGH
+                                && f.getTitle().contains("metadata service reached, header required")),
+                "Azure metadata header-required error must be HIGH: " + findings);
+    }
+
+    @Test
+    @DisplayName("Metadata-header indicator already in the baseline is not reported")
+    void testMetadataHeaderIndicatorNotMatchedWhenInBaseline() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "POST");
+
+        // Baseline and every probe response already contain the GCP header-required phrase —
+        // it is part of the endpoint's normal content, not evidence of a new metadata fetch.
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200,
+                        "{\"note\":\"Missing Metadata-Flavor:Google header\"}", Map.of()));
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200,
+                        "{\"note\":\"Missing Metadata-Flavor:Google header\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("metadata service reached")),
+                "Indicator already in the baseline must not produce a finding");
+    }
+
+    @Test
+    @DisplayName("Metadata-header phrase that only appears because the payload was echoed is not reported")
+    void testMetadataHeaderIndicatorNotMatchedWhenOnlyPayloadEcho() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/echo", "GET");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("=")), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"data\":\"ok\"}", Map.of()));
+        // Reflect a note that happens to contain the indicator text after echoing the (URL-encoded)
+        // query value — stripPayloadEchoes removes the payload forms; remaining text must not
+        // alone be enough unless the indicator survives outside the echo. Here the whole response
+        // is only the echoed URL, which contains no metadata-header phrase.
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("=")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    String value = url.substring(url.indexOf('=') + 1);
+                    String decoded = java.net.URLDecoder.decode(value, java.nio.charset.StandardCharsets.UTF_8);
+                    return new HttpResponse(200, "{\"you_sent\":\"" + decoded + "\"}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("metadata service reached")),
+                "A pure payload echo must not produce a metadata-header finding");
     }
 }
