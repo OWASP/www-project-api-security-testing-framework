@@ -329,6 +329,8 @@ class SecurityMisconfigurationTestCaseTest {
         when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(200, "{\"secret\":1}", requiredSecurityHeaders()));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -365,6 +367,8 @@ class SecurityMisconfigurationTestCaseTest {
         headers.put("Cache-Control", List.of("no-cache"));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(200, "{\"secret\":1}", headers));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -373,6 +377,22 @@ class SecurityMisconfigurationTestCaseTest {
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("no-cache alone must not satisfy the check"));
         assertEquals(Severity.LOW, cache.getSeverity());
+    }
+
+    @Test
+    @DisplayName("Public 2xx (also served without credentials) must not produce a cache finding")
+    void testPublicEndpointWithTokenNotReportedForNoStore() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/health", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"ok\"}", requiredSecurityHeaders()));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"ok\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("no-store")),
+                "An endpoint that answers without credentials is not an authenticated response");
     }
 
     private static Map<String, List<String>> requiredSecurityHeaders() {

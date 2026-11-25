@@ -10,7 +10,7 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Fixed
 
-- **Security header policy (API8)**. `X-XSS-Protection` is no longer treated as a required header (OWASP marks it deprecated); a LOW finding is raised only when it is present with a value other than `0`. Authenticated responses are now checked for `Cache-Control: no-store` (LOW when absent; `no-cache` alone is not enough).
+- **Security header policy (API8)**. `X-XSS-Protection` is no longer treated as a required header (OWASP marks it deprecated); a LOW finding is raised only when it is present with a value other than `0`. Authenticated responses are now checked for `Cache-Control: no-store` (LOW when absent; `no-cache` alone is not enough). A response counts as authenticated when it sets a cookie, or when it is a `2xx` to a credentialed request and the same URL without credentials gets `401`/`403`; public endpoints are not flagged.
 
 ## 2.0.2 (patch)
 

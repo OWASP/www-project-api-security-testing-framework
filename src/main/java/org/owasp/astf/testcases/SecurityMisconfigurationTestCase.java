@@ -219,11 +219,18 @@ public class SecurityMisconfigurationTestCase implements TestCase {
         }
         String token = httpClient.getConfiguredBearerToken();
         boolean credentialsConfigured = token != null && !token.isEmpty();
-        if (!credentialsConfigured) {
+        if (!credentialsConfigured || !response.isSuccess() || cacheControlHasNoStore(response)) {
             return false;
         }
-        // Credentialed request: endpoint requires auth, or a successful 2xx with Authorization.
-        return endpoint.isRequiresAuthentication() || response.isSuccess();
+        // A 2xx that carried the token is only "authenticated" if the same URL is refused without
+        // it; otherwise public endpoints (health, docs, catalogues) would all be flagged.
+        try {
+            HttpResponse anonymous = httpClient.getWithStatusNoAuth(endpoint.getFullUrl());
+            return anonymous != null && (anonymous.getStatusCode() == 401 || anonymous.getStatusCode() == 403);
+        } catch (IOException e) {
+            logger.debug("Anonymous control request failed for {}: {}", endpoint, e.getMessage());
+            return false;
+        }
     }
 
     private boolean carriesSetCookie(HttpResponse response) {
