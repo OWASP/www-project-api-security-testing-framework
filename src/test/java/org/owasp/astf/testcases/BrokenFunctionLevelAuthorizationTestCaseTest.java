@@ -249,4 +249,93 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
     }
+
+    private static final Map<String, List<String>> JSON_HEADERS = Map.of("Content-Type", List.of("application/json"));
+    private static final String ROLE_MATRIX_TITLE_PREFIX = "Function-Level Authorization";
+
+    private EndpointInfo roleMatrixEndpoint() {
+        EndpointInfo endpoint = new EndpointInfo("/api/admin/users", "GET");
+        endpoint.setBaseUrl("https://example.com");
+        return endpoint;
+    }
+
+    private void stubRoleMatrix(HttpResponse admin, HttpResponse user, HttpResponse anon) throws IOException {
+        when(httpClient.getConfiguredAdminToken()).thenReturn("admin-secret");
+        when(httpClient.getAdminAuthHeaders()).thenReturn(Map.of("Authorization", "Bearer admin-secret"));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            return headers.containsKey("Authorization") ? admin : user;
+        });
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(anon);
+    }
+
+    private List<Finding> roleMatrixFindings(List<Finding> findings) {
+        return findings.stream().filter(f -> f.getTitle().startsWith(ROLE_MATRIX_TITLE_PREFIX)).toList();
+    }
+
+    @Test
+    @DisplayName("Role matrix: admin 200 and user 200 with the same body is CRITICAL")
+    void testRoleMatrixSameBodyCritical() throws IOException {
+        String body = "{\"users\":[{\"id\":1},{\"id\":2}]}";
+        stubRoleMatrix(new HttpResponse(200, body, JSON_HEADERS),
+                new HttpResponse(200, "{ \"users\": [ {\"id\":1}, {\"id\":2} ] }", JSON_HEADERS),
+                new HttpResponse(401, "{}", JSON_HEADERS));
+
+        List<Finding> findings = roleMatrixFindings(testCase.execute(roleMatrixEndpoint(), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Function-Level Authorization Missing", findings.get(0).getTitle());
+        assertEquals(org.owasp.astf.core.result.Severity.CRITICAL, findings.get(0).getSeverity());
+        assertFalse(String.valueOf(findings.get(0).getResponseDetails()).contains("admin-secret"));
+        assertFalse(String.valueOf(findings.get(0).getRequestDetails()).contains("admin-secret"));
+    }
+
+    @Test
+    @DisplayName("Role matrix: admin 200 and user 403 produces no finding")
+    void testRoleMatrixUserForbidden() throws IOException {
+        stubRoleMatrix(new HttpResponse(200, "{\"users\":[1,2]}", JSON_HEADERS),
+                new HttpResponse(403, "{\"error\":\"forbidden\"}", JSON_HEADERS),
+                new HttpResponse(401, "{}", JSON_HEADERS));
+
+        List<Finding> findings = roleMatrixFindings(testCase.execute(roleMatrixEndpoint(), httpClient));
+
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Role matrix: admin 200 and user 200 with a different body is MEDIUM Not Confirmed")
+    void testRoleMatrixDifferentBodyMedium() throws IOException {
+        stubRoleMatrix(new HttpResponse(200, "{\"users\":[1,2,3],\"audit\":true}", JSON_HEADERS),
+                new HttpResponse(200, "{\"users\":[1]}", JSON_HEADERS),
+                new HttpResponse(401, "{}", JSON_HEADERS));
+
+        List<Finding> findings = roleMatrixFindings(testCase.execute(roleMatrixEndpoint(), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Function-Level Authorization Not Confirmed", findings.get(0).getTitle());
+        assertEquals(org.owasp.astf.core.result.Severity.MEDIUM, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Role matrix: skipped silently when no admin token is configured")
+    void testRoleMatrixSkippedWithoutAdminToken() throws IOException {
+        when(httpClient.getConfiguredAdminToken()).thenReturn(null);
+
+        List<Finding> findings = testCase.testRoleMatrix(roleMatrixEndpoint(), httpClient);
+
+        assertTrue(findings.isEmpty());
+        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.never()).getWithStatus(anyString(), anyMap());
+        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.never()).getWithStatusNoAuth(anyString());
+    }
+
+    @Test
+    @DisplayName("Role matrix: write methods are not replayed")
+    void testRoleMatrixIgnoresWrites() throws IOException {
+        when(httpClient.getConfiguredAdminToken()).thenReturn("admin-secret");
+        EndpointInfo endpoint = new EndpointInfo("/api/admin/users", "DELETE");
+        endpoint.setBaseUrl("https://example.com");
+
+        assertTrue(testCase.testRoleMatrix(endpoint, httpClient).isEmpty());
+        org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.never()).getWithStatus(anyString(), anyMap());
+    }
 }

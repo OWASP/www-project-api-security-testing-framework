@@ -156,6 +156,7 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--output` | `-o` | Output file path | stdout |
 | `--token` | | Bearer token (`Authorization: Bearer …`) | — |
 | `--secondary-token` | | Bearer token for a **second, distinct** authenticated identity — enables cross-user BOLA testing (see [Testing Guidelines](docs/TESTING_GUIDELINES.md#authorization-testing-methodologies)) | — |
+| `--admin-token` | | Bearer token for an **administrator** identity — enables role-matrix BFLA testing: admin-only GET endpoints that the normal `--token` identity can also read are reported (read-only; see [Testing Guidelines](docs/TESTING_GUIDELINES.md#bfla-astf-api5-2023)) | — |
 | `--client-cert` | | Path to a PKCS12 (`.p12`/`.pfx`) keystore with a client certificate to present for mutual TLS | — |
 | `--client-cert-password` | | Password for `--client-cert` | — |
 | `--invalid-client-cert` | | Path to a deliberately invalid/untrusted PKCS12 keystore, used alongside `--client-cert` to test whether the server actually validates client certificates | — |
@@ -238,7 +239,7 @@ Inline `endpoints:` entries in a config file can also carry an optional `request
 | `ASTF-API2-2023` | Broken Authentication | `BrokenAuthenticationTestCase` | Missing auth, JWT `none` algorithm, `kid` path traversal, RS256→HS256 algorithm confusion (via real JWKS fetch), `jku` header abuse, expired tokens, tokens in URL, username/password enumeration, brute-force lockout, 2FA bypass, insecure session cookies |
 | `ASTF-API3-2023` | Broken Object Property Level Authorization | `BrokenObjectPropertyLevelAuthorizationTestCase` | Password/secret fields in responses (excessive data exposure), mass assignment via POST |
 | `ASTF-API4-2023` | Unrestricted Resource Consumption | `UnrestrictedResourceConsumptionTestCase` | Missing rate limiting (burst-request test, HTTP 429/423 or body-level rejection signal) on resource-heavy endpoints |
-| `ASTF-API5-2023` | Broken Function Level Authorization | `BrokenFunctionLevelAuthorizationTestCase` | Admin endpoints reachable without elevated privileges, HTTP method escalation, and **privilege-tier path substitution** (`/user/...` → `/admin/...` on an otherwise identical request) |
+| `ASTF-API5-2023` | Broken Function Level Authorization | `BrokenFunctionLevelAuthorizationTestCase` | Admin endpoints reachable without elevated privileges, HTTP method escalation, and **privilege-tier path substitution** (`/user/...` → `/admin/...` on an otherwise identical request), plus a **role-matrix** read-only check (admin vs normal vs anonymous, via `--admin-token`) |
 | `ASTF-API6-2023` | Unrestricted Access to Sensitive Flows | `UnrestrictedAccessToSensitiveFlowsTestCase` | Rate limiting and bot protection absent on login, OTP, payment, and password-reset flows |
 | `ASTF-API7-2023` | Server-Side Request Forgery | `ServerSideRequestForgeryTestCase` | SSRF via `url`, `webhook`, `redirect`, `callback` parameters — injects cloud metadata endpoint URLs |
 | `ASTF-API8-2023` | Security Misconfiguration | `SecurityMisconfigurationTestCase` | Missing security headers, verbose error messages, stack traces in responses |
