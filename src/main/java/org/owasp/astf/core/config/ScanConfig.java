@@ -36,6 +36,12 @@ public class ScanConfig {
     // scan's primary identity.
     private String secondaryBearerToken;
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    // Off by default: checks that would change or delete server-side objects (for example a
+    // cross-user DELETE) are replaced by read-only requests and listed in the report as held back.
+    private boolean allowDestructive = false;
+
     // Proxy settings
     private String proxyHost;
     private int proxyPort;
@@ -315,6 +321,19 @@ public class ScanConfig {
      */
     public void setSecondaryBearerToken(String secondaryBearerToken) {
         this.secondaryBearerToken = secondaryBearerToken;
+    }
+
+    /**
+     * @return true when the operator passed {@code --allow-destructive}, permitting checks to send
+     *     state-changing requests (PUT, PATCH, DELETE, POST) to objects identified by the scan
+     */
+    public boolean isAllowDestructive() {
+        return allowDestructive;
+    }
+
+    /** @param allowDestructive true to permit state-changing requests in authorization checks */
+    public void setAllowDestructive(boolean allowDestructive) {
+        this.allowDestructive = allowDestructive;
     }
 
     /** @return path to the PKCS12 keystore containing the scan's normal client certificate identity */

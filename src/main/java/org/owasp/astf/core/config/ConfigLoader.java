@@ -222,6 +222,10 @@ public class ConfigLoader {
             config.setDiscoveryEnabled(root.get("discoveryEnabled").asBoolean());
         }
 
+        if (root.has("allowDestructive")) {
+            config.setAllowDestructive(root.get("allowDestructive").asBoolean());
+        }
+
         if (root.has("verbose")) {
             config.setVerbose(root.get("verbose").asBoolean());
         }
@@ -393,6 +397,10 @@ public class ConfigLoader {
 
         if (props.containsKey("discoveryEnabled")) {
             config.setDiscoveryEnabled(Boolean.parseBoolean(props.getProperty("discoveryEnabled")));
+        }
+
+        if (props.containsKey("allowDestructive")) {
+            config.setAllowDestructive(Boolean.parseBoolean(props.getProperty("allowDestructive")));
         }
 
         if (props.containsKey("verbose")) {

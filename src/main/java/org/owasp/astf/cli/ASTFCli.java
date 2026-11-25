@@ -43,6 +43,7 @@ import picocli.CommandLine.Option;
  *   --proxy                Proxy URL (e.g., http://proxy:8080)
  *   --endpoints-file       Path to a file containing endpoints to test (one per line: METHOD /path)
  *   --no-discovery         Disable automatic endpoint discovery
+ *   --allow-destructive    Allow authorization checks to send PUT/PATCH/DELETE/POST to the scanned objects
  *   --test-cases           Comma-separated list of test case IDs to run
  *   --exclude-tests        Comma-separated list of test case IDs to skip
  *   --timeout              Scan timeout in minutes (default: 30)
@@ -145,6 +146,14 @@ public class ASTFCli implements Callable<Integer> {
     @Option(names = {"--no-discovery"}, description = "Disable automatic endpoint discovery")
     private boolean noDiscovery;
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    @Option(names = {"--allow-destructive"}, description = "Allow authorization checks to send " +
+            "state-changing requests (PUT, PATCH, DELETE, POST) to the objects being scanned. Only use " +
+            "against test accounts whose data may be modified or deleted. Without it, cross-user BOLA " +
+            "checks on write endpoints use a read-only GET and list what was held back.")
+    private boolean allowDestructive;
+
     @Option(names = {"--test-cases"}, description = "Comma-separated list of test case IDs to run")
     private String enabledTestCases;
 
@@ -210,6 +219,7 @@ public class ASTFCli implements Callable<Integer> {
         if (timeoutMinutes != null) config.setTimeoutMinutes(timeoutMinutes);
         if (verbose) config.setVerbose(true);
         if (noDiscovery) config.setDiscoveryEnabled(false);
+        if (allowDestructive) config.setAllowDestructive(true);
 
         // Output format — precedence: CLI -f > YAML outputFormat > default JSON
         if (format != null) {

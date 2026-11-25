@@ -210,6 +210,16 @@ public class HttpClient {
         return Map.of("Authorization", "Bearer " + secondaryToken);
     }
 
+    // AI-Generated Code - 2026-11-25 - Auto
+    // This is AI generated code
+    /**
+     * @return true when state-changing requests are permitted ({@code --allow-destructive}); test
+     *     cases must otherwise use read-only requests and report what they held back
+     */
+    public boolean isDestructiveTestingAllowed() {
+        return config.isAllowDestructive();
+    }
+
     /** @return true if a normal (valid-identity) client certificate was configured via {@code --client-cert} */
     public boolean hasClientCert() {
         return config.getClientCertPath() != null && !config.getClientCertPath().isEmpty();

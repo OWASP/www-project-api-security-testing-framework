@@ -8,6 +8,15 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
+### Fixed
+
+- **BOLA checks no longer modify or delete other users' objects by default, and find stateful BOLA** (D1, D6, D7 in the ASTF gap analysis). On `PUT`/`PATCH`/`DELETE`/`POST` endpoints the cross-user check and ID substitution sent the real method, including `DELETE` to guessed IDs `1`, `2`, `100`, `999` and `0`. The primary identity's request also went first, so on a stateful API the secondary identity found nothing left and the bug was missed. Write endpoints are now probed with a read-only `GET` on the same URL unless the new `--allow-destructive` flag (config `allowDestructive`) is set; a check that cannot run read-only is reported as INFO "Check Held Back" instead of disappearing. With the flag, the secondary identity's request is sent first. Cross-user access is CRITICAL only when the secondary identity receives the primary identity's object and an anonymous request does not; a 2xx with different content is MEDIUM "Not Confirmed". `PATCH` endpoints were sent as `GET`; they are now sent as `PATCH`.
+
+### Behaviour changes to know about
+
+- Without `--allow-destructive`, VAmPI's cross-user password change (`PUT /users/v1/{username}/password`) is reported as INFO "Check Held Back" instead of CRITICAL, because the password change is not sent. Add `--allow-destructive` to reproduce the account takeover against test accounts.
+- A cross-user 2xx whose body does not contain the primary identity's object is MEDIUM instead of CRITICAL, and an object that is also returned without credentials is no longer reported as BOLA (ASTF-API2-2023 reports the missing authentication).
+
 ## 2.0.2 (patch)
 
 A correctness release. No new command-line flags, no report-format changes, and exit codes keep their meaning. Every code fix below has unit tests, and the release build was checked with full scans of VAmPI, crAPI, DVGA and gRPC Goat in Docker, compared with the previous code (results are in the release pull request).
