@@ -9,6 +9,7 @@ import java.security.spec.RSAPublicKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import javax.crypto.Mac;
@@ -29,8 +30,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 /**
  * Tests for API2:2023 Broken Authentication.
  *
- * <p>Covers weak credentials, JWT algorithm attacks (none / expired tokens),
- * session-cookie security flags, and 2FA/MFA bypass attempts.</p>
+ * <p>Covers weak credentials, JWT algorithm attacks (none / expired tokens /
+ * corrupted signature), session-cookie security flags, and 2FA/MFA bypass attempts.</p>
  *
  * @see <a href="https://owasp.org/API-Security/editions/2023/en/0xa2-broken-authentication/">OWASP API2:2023</a>
  */
@@ -145,6 +146,7 @@ public class BrokenAuthenticationTestCase implements TestCase {
         } else {
             findings.addAll(testMissingAuthentication(endpoint, httpClient));
             findings.addAll(testJwtNoneAlgorithm(endpoint, httpClient));
+            findings.addAll(testJwtCorruptedSignature(endpoint, httpClient));
             findings.addAll(testJwtAnalysis(endpoint, httpClient));
         }
 
@@ -515,6 +517,91 @@ public class BrokenAuthenticationTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /**
+     * Checks whether the server accepts the configured JWT with one character of its signature
+     * flipped. That is the cheapest "signature not verified" check: unlike {@code alg: none},
+     * the header still names a real algorithm and a signature is present, just wrong — so
+     * libraries that only block {@code none} still fall for it.
+     */
+    List<Finding> testJwtCorruptedSignature(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        if (!endpoint.isRequiresAuthentication()) {
+            return findings;
+        }
+
+        String realToken = httpClient.getConfiguredBearerToken();
+        if (realToken == null || realToken.isBlank()) {
+            return findings;
+        }
+
+        String corrupted = corruptJwtSignature(realToken.trim());
+        if (corrupted == null) {
+            // Not a three-part JWT (opaque bearer, API key, malformed). Nothing to flip.
+            return findings;
+        }
+
+        try {
+            String fullUrl = endpoint.getFullUrl();
+            HttpResponse baseline = probeWithoutAuth(endpoint, httpClient, fullUrl);
+            if (baseline == null || baseline.isSuccess()) {
+                logger.debug("Skipping corrupted-signature JWT test for {} {} — endpoint is publicly accessible",
+                        endpoint.getMethod(), endpoint.getPath());
+                return findings;
+            }
+
+            Map<String, String> headers = Map.of("Authorization", "Bearer " + corrupted);
+            HttpResponse response = switch (endpoint.getMethod().toUpperCase(Locale.ROOT)) {
+                case "POST"   -> httpClient.postWithStatus(fullUrl, headers, "application/json", "{}");
+                case "PUT"    -> httpClient.putWithStatus(fullUrl, headers, "application/json", "{}");
+                case "DELETE" -> httpClient.deleteWithStatus(fullUrl, headers);
+                default       -> httpClient.getWithStatus(fullUrl, headers);
+            };
+
+            if (looksLikeAuthSuccess(response)) {
+                Finding finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "JWT Signature Not Verified",
+                        "The API accepted the configured JWT after one character of its signature was "
+                                + "changed. The server is decoding the token without verifying the "
+                                + "signature, so anyone can mint a token for any user by editing the payload.",
+                        Severity.CRITICAL,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Always verify JWT signatures with the issuer's key. Reject tokens whose "
+                                + "signature does not validate. Do not use decode-only JWT APIs in production."
+                );
+                finding.setEvidence("Server returned HTTP " + response.getStatusCode()
+                        + " for a token whose signature differs from the configured token by one "
+                        + "character (baseline without auth: HTTP " + baseline.getStatusCode() + ").");
+                findings.add(finding);
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing corrupted JWT signature on {}: {}", endpoint, e.getMessage());
+        }
+
+        return findings;
+    }
+
+    /**
+     * Returns the JWT with the last character of the signature segment flipped between
+     * {@code A} and {@code B} (both valid base64url), or {@code null} when {@code token} is not a
+     * three-part JWT with a non-empty signature.
+     */
+    static String corruptJwtSignature(String token) {
+        if (token == null) {
+            return null;
+        }
+        String[] parts = token.split("\\.", -1);
+        if (parts.length != 3 || parts[0].isEmpty() || parts[1].isEmpty() || parts[2].isEmpty()) {
+            return null;
+        }
+        String sig = parts[2];
+        char last = sig.charAt(sig.length() - 1);
+        char flipped = (last == 'A') ? 'B' : 'A';
+        return parts[0] + "." + parts[1] + "." + sig.substring(0, sig.length() - 1) + flipped;
     }
 
     private List<Finding> checkTokenInUrl(EndpointInfo endpoint) {
