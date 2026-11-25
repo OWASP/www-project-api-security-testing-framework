@@ -3,6 +3,7 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -193,7 +194,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             return findings;
         }
 
-        String method = endpoint.getMethod().toUpperCase();
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
         String baselineBody = "";
         try {
             HttpResponse baseline = sendIntegrationPayload(endpoint, httpClient, method, "ssti-baseline");
