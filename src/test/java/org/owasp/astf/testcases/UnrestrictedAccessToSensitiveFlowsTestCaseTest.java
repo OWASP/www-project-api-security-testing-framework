@@ -164,9 +164,6 @@ class UnrestrictedAccessToSensitiveFlowsTestCaseTest {
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("All-422 burst is INFO inconclusive, not HIGH missing rate limiting")
     void testAll422IsInconclusiveNotHigh() throws IOException {

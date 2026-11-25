@@ -37,9 +37,6 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
     );
 
     private static final int FLOW_ABUSE_THRESHOLD = 10; // Requests before rate limiting expected
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Same body-level throttle phrases as UnrestrictedResourceConsumptionTestCase — docs promise
     // these markers for login/reset flows, and some APIs signal rejection via a 200 body message.
     private static final List<String> THROTTLE_BODY_MARKERS = List.of(
