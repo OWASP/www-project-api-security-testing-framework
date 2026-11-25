@@ -132,9 +132,6 @@ class HttpClientTest {
         assertFalse(response.isUnauthorized());
         assertTrue(response.getBody().contains("value"));
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("getWithStatusNoRedirect returns the 302 instead of following it")
     void testGetWithStatusNoRedirectReturns302() throws Exception {

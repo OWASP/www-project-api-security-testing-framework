@@ -128,9 +128,6 @@ class UnsafeConsumptionOfApisTestCaseTest {
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("SQL Injection")),
                 "Should detect SQL injection from a 500 response containing a database error");
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     @Test
     @DisplayName("Should detect open redirect when Location header points at attacker host")
     void testOpenRedirectDetected() throws IOException {

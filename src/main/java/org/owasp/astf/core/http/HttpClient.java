@@ -79,9 +79,6 @@ public class HttpClient {
 
     // Lazily-built client for HTTP/2 cleartext (h2c) prior-knowledge requests — see postH2c().
     private volatile OkHttpClient h2cClient;
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     // Lazily-built client that does not follow redirects — see getWithStatusNoRedirect().
     private volatile OkHttpClient noRedirectClient;
 

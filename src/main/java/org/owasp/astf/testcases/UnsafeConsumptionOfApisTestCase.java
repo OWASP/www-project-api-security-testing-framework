@@ -234,9 +234,6 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
 
         return findings;
     }
-
-    // AI-Generated Code - 2026-11-25 - Auto
-    // This is AI generated code
     /**
      * True when {@code Location} sends the browser to the injected external host: an absolute URL,
      * or a scheme-relative one ({@code //host}, {@code /\host}, {@code \\host}) that browsers
