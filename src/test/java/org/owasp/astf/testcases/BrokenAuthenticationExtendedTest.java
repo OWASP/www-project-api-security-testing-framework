@@ -294,4 +294,80 @@ class BrokenAuthenticationExtendedTest {
         // Should not throw
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
     }
+
+    // ── Corrupted JWT signature (#190) ─────────────────────────────────────
+
+    private static final String SAMPLE_JWT =
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+                    + "eyJzdWIiOiJhbGljZSIsImV4cCI6OTk5OTk5OTk5OX0."
+                    + "dGVzdHNpZ25hdHVyZQ";
+
+    @Test
+    @DisplayName("Corrupted JWT signature accepted on a protected endpoint is CRITICAL")
+    void testCorruptedSignatureAccepted() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
+        when(httpClient.getConfiguredBearerToken()).thenReturn(SAMPLE_JWT);
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(unauthorized());
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    Map<String, String> hdrs = inv.getArgument(1);
+                    String auth = hdrs.getOrDefault("Authorization", "");
+                    // Server accepts any Bearer token without verifying the signature
+                    return auth.startsWith("Bearer ") ? ok() : unauthorized();
+                });
+
+        List<Finding> findings = testCase.testJwtCorruptedSignature(endpoint, httpClient);
+
+        Finding hit = findings.stream()
+                .filter(f -> f.getTitle().equals("JWT Signature Not Verified"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected corrupted-signature finding"));
+        assertEquals(Severity.CRITICAL, hit.getSeverity());
+        assertTrue(hit.getEvidence().contains("signature differs"));
+    }
+
+    @Test
+    @DisplayName("Corrupted JWT signature rejected produces no finding")
+    void testCorruptedSignatureRejected() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
+        when(httpClient.getConfiguredBearerToken()).thenReturn(SAMPLE_JWT);
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(unauthorized());
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(unauthorized());
+
+        List<Finding> findings = testCase.testJwtCorruptedSignature(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Public endpoint is not flagged for a corrupted JWT (false-positive guard)")
+    void testCorruptedSignatureSkippedOnPublicEndpoint() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/public", "GET", "application/json", null, true);
+        when(httpClient.getConfiguredBearerToken()).thenReturn(SAMPLE_JWT);
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(ok());
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(ok());
+
+        List<Finding> findings = testCase.testJwtCorruptedSignature(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Opaque (non-JWT) bearer token is skipped, not treated as a three-part JWT")
+    void testCorruptedSignatureSkippedForOpaqueToken() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET", "application/json", null, true);
+        when(httpClient.getConfiguredBearerToken()).thenReturn("not-a-jwt");
+        when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(unauthorized());
+
+        List<Finding> findings = testCase.testJwtCorruptedSignature(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty());
+        assertNull(BrokenAuthenticationTestCase.corruptJwtSignature("not-a-jwt"));
+        assertNull(BrokenAuthenticationTestCase.corruptJwtSignature("a.b."));
+        String corrupted = BrokenAuthenticationTestCase.corruptJwtSignature(SAMPLE_JWT);
+        assertNotNull(corrupted);
+        assertNotEquals(SAMPLE_JWT, corrupted);
+        assertEquals(SAMPLE_JWT.substring(0, SAMPLE_JWT.length() - 1),
+                corrupted.substring(0, corrupted.length() - 1));
+    }
 }

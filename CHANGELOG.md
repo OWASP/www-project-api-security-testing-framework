@@ -6,6 +6,7 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Added
 
+- **JWT signature not verified** (#190). `BrokenAuthenticationTestCase` already forged `alg: none`, `kid`, `jku` and RS256→HS256 tokens, but never tried the cheapest case: the configured token with one character of its signature flipped. A server that decodes without verifying accepts it. The new check reports CRITICAL when a protected endpoint (no-auth baseline is non-2xx) accepts the corrupted token. Opaque non-JWT bearer tokens are skipped.
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
 ### Fixed

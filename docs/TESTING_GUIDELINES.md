@@ -71,6 +71,7 @@ Maps to `ASTF-API2-2023` (`BrokenAuthenticationTestCase`), plus authentication-a
 |---|---|---|
 | **Missing authentication** | An endpoint that should require a token doesn't | Requests the endpoint with no `Authorization` header at all; flags an unexpected 2xx |
 | **JWT "none" algorithm** | The server trusts a token's claims without verifying a signature | Forges a token with `alg: none` and an empty signature segment, submits it, checks for acceptance |
+| **JWT signature not verified** | The server decodes the JWT without checking the signature (common with decode-only libraries) | Flips one character of the configured token's signature segment; reports CRITICAL when a protected endpoint accepts it. Opaque non-JWT tokens are skipped |
 | **JWT `kid` path traversal** | The server resolves the signing key from an attacker-controlled `kid` header value | Sets `kid` to `../../../dev/null` and signs with an empty-string HMAC secret (a `kid` pointing at an empty/predictable file yields a known key) |
 | **JWT algorithm confusion (RS256→HS256)** | The server accepts an HMAC-signed token when it expects an RSA-signed one, using the RSA **public** key (which is, well, public) as the HMAC secret | Fetches the real JWKS, extracts the RSA public key, signs a forged token with HS256 using that key's raw bytes as the secret |
 | **JWT `jku` header abuse** | The server fetches the signing key from an attacker-specified URL in the `jku` header instead of a pinned, trusted key set | Sets `jku` to an ASTF-controlled probe URL and looks for a fetch attempt (timing-based; full exploitation needs an attacker-hosted key, which is out of scope for automated detection) |
@@ -223,7 +224,7 @@ Each `Finding.remediation` field already contains specific guidance for the exac
 | OWASP category | Typical fix |
 |---|---|
 | API1 — BOLA | Enforce object-level ownership checks in the data-access layer, not just authentication. Don't rely on ID unpredictability (UUIDs) as the only control. |
-| API2 — Broken Authentication | Reject `alg: none`; validate JWT signatures against an explicit algorithm allowlist; never resolve signing keys from client-controlled `kid`/`jku` values without strict validation; implement account lockout/rate limiting on login. |
+| API2 — Broken Authentication | Reject `alg: none`; always verify JWT signatures (not decode-only); validate against an explicit algorithm allowlist; never resolve signing keys from client-controlled `kid`/`jku` values without strict validation; implement account lockout/rate limiting on login. |
 | API3 — BOPLA | Use explicit response DTOs/serializers rather than returning ORM entities directly; validate and allowlist which fields a client can set on write operations. |
 | API4 — Unrestricted Resource Consumption | Rate-limit at the gateway or application layer; return 429 with `Retry-After`; cap pagination/page-size parameters. |
 | API5 — BFLA | Enforce role checks in the resolver/controller layer for *every* endpoint independently — never let a path's naming convention (`/admin/...`) be the only thing distinguishing its authorization requirements from a sibling path. |
