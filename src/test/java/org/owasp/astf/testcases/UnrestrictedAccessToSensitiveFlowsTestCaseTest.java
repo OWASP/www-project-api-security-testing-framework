@@ -113,6 +113,24 @@ class UnrestrictedAccessToSensitiveFlowsTestCaseTest {
     }
 
     @Test
+    @DisplayName("Login and password-reset flows, which TESTING_GUIDELINES.md says API6 covers, are exercised (#175)")
+    void testCredentialFlowsAreRecognisedAsSensitive() throws IOException {
+        for (String path : List.of("/api/v1/login", "/auth/signin", "/api/sign-in", "/account/password",
+                "/api/v1/password/reset", "/api/forgot-password")) {
+            org.mockito.Mockito.reset(httpClient);
+            HttpResponse ok = ok();
+            when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                    .thenReturn(ok, ok, ok, ok, ok, ok, ok, ok, ok, ok);
+
+            List<Finding> findings = testCase.execute(new EndpointInfo(path, "POST"), httpClient);
+
+            assertTrue(
+                    findings.stream().anyMatch(f -> f.getTitle().contains("Rate Limiting")),
+                    path + " is a credential flow and must be tested for missing rate limiting, got: " + findings);
+        }
+    }
+
+    @Test
     @DisplayName("Should report MEDIUM finding when bot protection headers are absent on sensitive path")
     void testBotProtectionMissing() throws IOException {
         // /api/register contains "register" — a sensitive flow pattern
