@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
@@ -514,6 +515,25 @@ class BrokenAuthenticationTestCaseTest {
         List<Finding> findings = testCase.testBruteForceLockout(endpoint, httpClient);
 
         assertTrue(findings.isEmpty(), "Should not flag missing lockout once a 429 response is observed");
+    }
+
+    @ParameterizedTest(name = "HTTP {0} is not a lockout signal")
+    @ValueSource(ints = {404, 405, 410, 501})
+    @DisplayName("Does not flag missing lockout when the endpoint itself does not exist")
+    void testPathAbsentDoesNotImplyMissingLockout(int statusCode) throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/login", "POST");
+        endpoint.setBaseUrl("https://example.com");
+
+        // A path the target does not serve produces none of the responses a lockout check
+        // reasons about, so a finding here would describe the missing path rather than a
+        // missing control (#144).
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(statusCode, "{\"error\":\"not found\"}", Map.of()));
+
+        List<Finding> findings = testCase.testBruteForceLockout(endpoint, httpClient);
+
+        assertTrue(findings.isEmpty(),
+                "HTTP " + statusCode + " means no login was attempted, so lockout cannot be assessed");
     }
 
     // ── JWT kid path traversal (#99) ──────────────────────────────────────────
