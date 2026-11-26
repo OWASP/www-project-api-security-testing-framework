@@ -215,7 +215,18 @@ class ImproperInventoryManagementTestCaseTest {
 
         when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
                 .thenReturn(notFound());
+
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__"))))
+                .thenReturn(notFound());
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/openapi.json")) {
+                        return ok("{\"openapi\":\"3.0.0\",\"paths\":{}}");
+                    }
+                    return notFound();
+                });
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__"))))
                 .thenAnswer(inv -> {
                     String url = inv.getArgument(0);
                     if (url.contains("/openapi.json")) {
@@ -229,7 +240,7 @@ class ImproperInventoryManagementTestCaseTest {
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
                         || f.getTitle().contains("Exposed")),
                 "Grey-box lists without '/' must still trigger target-level documentation probes");
-        verify(httpClient, atLeastOnce()).getWithStatus(contains("/openapi.json"), anyMap());
+        verify(httpClient, atLeastOnce()).getWithStatusNoAuth(contains("/openapi.json"));
     }
 
     @Test
@@ -242,7 +253,12 @@ class ImproperInventoryManagementTestCaseTest {
 
         when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
                 .thenReturn(notFound());
+
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__"))))
+                .thenReturn(notFound());
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__"))))
                 .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
 
         List<Finding> firstFindings = testCase.execute(first, httpClient);
@@ -256,6 +272,7 @@ class ImproperInventoryManagementTestCaseTest {
                         || f.getTitle().contains("Exposed")),
                 "Second endpoint of the same base URL must not repeat documentation findings");
         verify(httpClient, never()).getWithStatus(contains("/openapi.json"), anyMap());
+        verify(httpClient, never()).getWithStatusNoAuth(contains("/openapi.json"));
     }
 
     @Test
@@ -266,7 +283,12 @@ class ImproperInventoryManagementTestCaseTest {
 
         when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
                 .thenReturn(notFound());
+
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__"))))
+                .thenReturn(notFound());
         when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
+        when(httpClient.getWithStatusNoAuth(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__"))))
                 .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
 
         List<Finding> findings = testCase.execute(root, httpClient);

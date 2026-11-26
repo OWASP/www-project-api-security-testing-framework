@@ -298,13 +298,23 @@ class SecurityMisconfigurationTestCaseTest {
                     return new HttpResponse(404, "{}", Map.of());
                 });
 
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/actuator/env")) {
+                        return new HttpResponse(200,
+                                "{\"activeProfiles\":[\"prod\"],\"propertySources\":[]}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         assertTrue(findings.stream().anyMatch(f ->
                         f.getTitle().contains("Debug") && f.getEndpoint() != null
                                 && f.getEndpoint().contains("/actuator/env")),
                 "Grey-box lists without '/' must still trigger target-level debug probes");
-        verify(httpClient, atLeastOnce()).getWithStatus(contains("/actuator/env"), anyMap());
+        verify(httpClient, atLeastOnce()).getWithStatusNoAuth(contains("/actuator/env"));
     }
 
     @Test
@@ -324,6 +334,15 @@ class SecurityMisconfigurationTestCaseTest {
                     return new HttpResponse(404, "{}", Map.of());
                 });
 
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/actuator")) {
+                        return new HttpResponse(200, "{\"status\":\"UP\"}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
         List<Finding> firstFindings = testCase.execute(first, httpClient);
         clearInvocations(httpClient);
         List<Finding> secondFindings = testCase.execute(second, httpClient);
@@ -333,6 +352,7 @@ class SecurityMisconfigurationTestCaseTest {
         assertTrue(secondFindings.stream().noneMatch(f -> f.getTitle().contains("Debug")),
                 "Second endpoint of the same base URL must not repeat debug findings");
         verify(httpClient, never()).getWithStatus(contains("/actuator"), anyMap());
+        verify(httpClient, never()).getWithStatusNoAuth(contains("/actuator"));
     }
 
     @Test
@@ -342,6 +362,15 @@ class SecurityMisconfigurationTestCaseTest {
         root.setBaseUrl("https://example.com");
 
         when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/debug")) {
+                        return new HttpResponse(200, "{\"vars\":{}}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
+        when(httpClient.getWithStatusNoAuth(anyString()))
                 .thenAnswer(inv -> {
                     String url = inv.getArgument(0);
                     if (url.contains("/debug")) {
