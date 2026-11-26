@@ -216,7 +216,9 @@ public class RegexDosTestCase implements TestCase {
         for (int i = 0; i < allFields.size(); i++) {
             if (i > 0) sb.append(",");
             String field = allFields.get(i);
-            String value = field.equals(targetField) ? payload : "test";
+            // Not "test": that filler made register endpoints create a real test/test account mid-scan,
+            // which the broken-authentication check then reported as weak default credentials.
+            String value = field.equals(targetField) ? payload : SqlNoSqlInjectionTestCase.FILLER_VALUE;
             sb.append("\"").append(field).append("\":\"").append(escapeJson(value)).append("\"");
         }
         sb.append("}");

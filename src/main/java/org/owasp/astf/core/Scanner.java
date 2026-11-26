@@ -90,7 +90,8 @@ public class Scanner {
 
             // Determine if we need to discover endpoints or use provided ones
             List<EndpointInfo> endpoints = new ArrayList<>();
-            if (config.isDiscoveryEnabled() && config.getEndpoints().isEmpty()) {
+            boolean specGiven = config.getOpenApiSpec() != null && !config.getOpenApiSpec().isBlank();
+            if ((config.isDiscoveryEnabled() || specGiven) && config.getEndpoints().isEmpty()) {
                 logger.info("No endpoints provided. Attempting endpoint discovery...");
                 endpoints = discoverEndpoints();
             } else {

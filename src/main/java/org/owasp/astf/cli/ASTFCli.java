@@ -143,6 +143,13 @@ public class ASTFCli implements Callable<Integer> {
                           "Skips automatic discovery. Lines starting with # are ignored.")
     private String endpointsFile;
 
+    @Option(names = {"--openapi"},
+            description = "OpenAPI/Swagger specification to take endpoints from, instead of searching " +
+                          "the target for one: an http(s) URL or a local file (JSON or YAML). A URL " +
+                          "on another host is fetched without credentials unless the host is in " +
+                          "scopeHosts. Ignored when --endpoints-file is given.")
+    private String openApiSpec;
+
     @Option(names = {"--no-discovery"}, description = "Disable automatic endpoint discovery")
     private boolean noDiscovery;
     @Option(names = {"--allow-destructive"}, description = "Allow authorization checks to send " +
@@ -216,6 +223,7 @@ public class ASTFCli implements Callable<Integer> {
         if (timeoutMinutes != null) config.setTimeoutMinutes(timeoutMinutes);
         if (verbose) config.setVerbose(true);
         if (noDiscovery) config.setDiscoveryEnabled(false);
+        if (openApiSpec != null && !openApiSpec.isBlank()) config.setOpenApiSpec(openApiSpec.trim());
         if (allowDestructive) config.setAllowDestructive(true);
 
         // Output format — precedence: CLI -f > YAML outputFormat > default JSON
@@ -281,6 +289,9 @@ public class ASTFCli implements Callable<Integer> {
                     manualEndpoints.size(), endpointsFile);
             System.out.printf("Endpoints: %d loaded from %s (discovery skipped)%n",
                     manualEndpoints.size(), endpointsFile);
+            if (config.getOpenApiSpec() != null) {
+                logger.warn("--openapi {} is not used because --endpoints-file was given", config.getOpenApiSpec());
+            }
         }
 
         // Add API key header if API key is configured but no header set yet

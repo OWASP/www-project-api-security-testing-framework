@@ -111,6 +111,15 @@ java -jar astf-v2.0.2.jar -c scan.yaml --token "$API_TOKEN"
 # Two identities for cross-user BOLA checks:  --token "$TOKEN_A" --secondary-token "$TOKEN_B"
 ```
 
+Credentials stay on the target. When a request goes to another host or port (a redirect, or a spec URL that a Swagger UI page points to), ASTF still sends it but drops the `Authorization` header, the API-key header, `Proxy-Authorization` (unless it is a plain-http request sent through an HTTP proxy, which reads that header itself), cookies, and every custom header except `Accept`, `Accept-Encoding`, `Accept-Language`, `Content-Type`, `Content-Length`, `Content-Encoding`, `Transfer-Encoding`, `User-Agent`, `Host` and `Connection`. ASTF logs a warning the first time this happens for each host:port. A redirect from `http://host` to `https://host` on the target's own host (port 80 to 443) counts as the target and keeps credentials; any other port change does not. A redirect from `https` to plain `http` never carries credentials, even to a host listed under `scopeHosts`. To let other hosts receive credentials, list them under `scopeHosts` (`host` for any port, `host:port` for one port). If discovery reads an OpenAPI spec from another host that needs credentials, add that host here, otherwise it is fetched without them. Redirects are followed unless `followRedirects: false` is set:
+
+```yaml
+targetUrl: "https://api.example.com"
+followRedirects: true
+scopeHosts:
+  - "auth.example.com"
+```
+
 ### Environment variables in config files
 
 String values in YAML, JSON and `.properties` config files can reference environment variables as `$(NAME)`, so one file can serve several environments:
@@ -172,7 +181,8 @@ Usage: astf [-hvV] [--no-discovery] [--api-key=<apiKey>]
 | `--timeout` | | Scan timeout in minutes | `30` |
 | `--test-cases` | | Comma-separated test case IDs to run | all |
 | `--exclude-tests` | | Comma-separated test case IDs to skip | none |
-| `--no-discovery` | | Disable auto endpoint discovery | false |
+| `--openapi` | | OpenAPI/Swagger spec to take endpoints from: an `http(s)` URL or a local file (JSON or YAML). Replaces the search for a spec; if it cannot be read, automatic discovery runs instead. A URL on another host is fetched without credentials unless the host is in `scopeHosts`. Ignored with `--endpoints-file`. | — |
+| `--no-discovery` | | Disable auto endpoint discovery (an explicit `--openapi` is still read) | false |
 | `--verbose` | `-v` | Verbose output | false |
 | `--version` | `-V` | Print version | — |
 | `--help` | `-h` | Show help | — |
@@ -202,8 +212,9 @@ When multiple endpoint sources are configured, ASTF uses this order (highest win
 | 1 | `--endpoints-file` CLI flag | Overrides everything |
 | 2 | `endpoints:` inline YAML block | In config file |
 | 3 | `endpointsFile:` YAML key | In config file |
-| 4 | Automatic discovery | OpenAPI probing + common paths |
-| 5 | Fallback hardcoded paths | When discovery finds nothing |
+| 4 | `--openapi` / `openApiSpec:` | The spec you name; if it cannot be read, discovery below runs |
+| 5 | Automatic discovery | OpenAPI probing + common paths |
+| 6 | Fallback hardcoded paths | When discovery finds nothing |
 
 ```bash
 # Scan only specific endpoints from a file

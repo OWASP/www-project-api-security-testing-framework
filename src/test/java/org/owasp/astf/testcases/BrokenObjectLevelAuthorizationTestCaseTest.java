@@ -98,12 +98,13 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        // A secondary identity is configured — HttpClient reports its override headers.
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
-        // Both the primary (Map.of() headers) and secondary (override headers) requests to the
-        // exact same object ID succeed — no ID substitution involved at all.
+        // A secondary identity is configured.
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        // Both the primary request and the secondary-identity-only request to the exact same
+        // object ID succeed, with no ID substitution involved at all.
         when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"owner\":\"someone-else\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), any(), any()))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"owner\":\"someone-else\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -118,8 +119,8 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        // getSecondaryAuthHeaders() defaults to an empty map (Mockito's default for
-        // unstubbed Map-returning methods) — simulating no --secondary-token configured.
+        // hasSecondaryIdentity() defaults to false (Mockito's default for unstubbed boolean
+        // methods), simulating no --secondary-token configured.
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(404, "{}", Map.of()));
 
@@ -135,12 +136,11 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         // Primary succeeds; secondary is correctly rejected with 403 — proper authorization.
         when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42}", Map.of()));
-        when(httpClient.getWithStatus(argThat(url -> true), eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), any(), any()))
                 .thenReturn(new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -155,8 +155,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
 
         // The collection endpoint (placeholder segment + everything after it stripped) returns
         // a list of real books — "bookTitle82" is the plausible identifier to resolve to.
@@ -167,8 +166,8 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         // Both identities can read the resolved, real object with no ID substitution.
         when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
-        when(httpClient.getWithStatus(eq("https://example.com/books/v1/bookTitle82"),
-                eq(Map.of("Authorization", "Bearer secondary-user-token"))))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), eq("https://example.com/books/v1/bookTitle82"),
+                any(), any()))
                 .thenReturn(new HttpResponse(200, "{\"secret_content\":\"top secret\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -183,8 +182,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/books/v1/{book_title}", "GET", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
 
-        when(httpClient.getSecondaryAuthHeaders())
-                .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         // Collection lookup fails (404) — nothing to resolve to.
         when(httpClient.getWithStatus(eq("https://example.com/books/v1"), eq(Map.of())))
                 .thenReturn(new HttpResponse(404, "", Map.of()));
@@ -205,10 +203,13 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         endpoint.setResolvedFromTemplate(true);
         endpoint.setBaseUrl("https://example.com");
 
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders())
                 .thenReturn(Map.of("Authorization", "Bearer secondary-user-token"));
         when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
         when(httpClient.putWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("PUT"), anyString(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{\"message\":\"password updated\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -216,14 +217,15 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")),
                 "Should still detect cross-user access on the PUT");
 
-        org.mockito.ArgumentCaptor<String> bodyCaptor = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<String> secondaryBody = org.mockito.ArgumentCaptor.forClass(String.class);
         org.mockito.Mockito.verify(httpClient, org.mockito.Mockito.atLeastOnce())
-                .putWithStatus(anyString(), anyMap(), anyString(), bodyCaptor.capture());
-        assertTrue(bodyCaptor.getAllValues().stream().anyMatch(body -> body.contains("password")),
-                "Request body must contain a real 'password' field, not an empty '{}' — " +
-                "an empty body reaches the endpoint but never exercises password-change behavior");
-        assertTrue(bodyCaptor.getAllValues().stream().noneMatch(body -> body.equals("{}")),
-                "Should never fall back to an empty '{}' body for a state-changing request");
+                .sendWithStatusAsSecondary(eq("PUT"), anyString(), anyString(), secondaryBody.capture());
+        assertTrue(secondaryBody.getAllValues().stream().allMatch(body -> body.contains("password")),
+                "The secondary identity's PUT must carry the same realistic body");
+
+        assertTrue(secondaryBody.getAllValues().stream().noneMatch(body -> body.equals("{}")),
+                "Should never fall back to an empty '{}' body for a state-changing request: an empty body " +
+                "reaches the endpoint but never exercises password-change behavior");
     }
     private static final Map<String, String> SECONDARY = Map.of("Authorization", "Bearer secondary-user-token");
 
@@ -232,13 +234,17 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testDeleteEndpointIsProbedReadOnlyByDefault() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"id\":7,\"owner\":\"alice\"}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
                 .thenReturn(new HttpResponse(200, "{\"id\":7,\"owner\":\"alice\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         verify(httpClient, never()).deleteWithStatus(anyString(), anyMap());
+        verify(httpClient, never()).sendWithStatusAsSecondary(eq("DELETE"), anyString(), any(), any());
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")
                         && f.getDescription().contains("read-only GET")),
                 "The GET on the same URL proves cross-user access without deleting anything");
@@ -264,6 +270,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         EndpointInfo endpoint = new EndpointInfo("/users/v1/name1/password", "PUT", "application/json", null, true);
         endpoint.setResolvedFromTemplate(true);
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(405, "{\"error\":\"method not allowed\"}", Map.of()));
@@ -282,11 +289,14 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testStatefulDeleteFoundWhenSecondaryGoesFirst() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
         // The object can be deleted once; afterwards it is gone (404) for everyone.
-        when(httpClient.deleteWithStatus(eq("https://example.com/api/items/7"), anyMap()))
+        when(httpClient.sendWithStatusAsSecondary(eq("DELETE"), eq("https://example.com/api/items/7"), isNull(), isNull()))
                 .thenReturn(new HttpResponse(200, "{\"deleted\":7}", Map.of()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+        when(httpClient.deleteWithStatus(eq("https://example.com/api/items/7"), anyMap()))
                 .thenReturn(new HttpResponse(404, "{}", Map.of()));
         when(httpClient.getWithStatus(eq("https://example.com/api/items/7"), anyMap()))
                 .thenReturn(new HttpResponse(404, "{}", Map.of()));
@@ -296,7 +306,7 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
         org.mockito.InOrder order = org.mockito.Mockito.inOrder(httpClient);
-        order.verify(httpClient).deleteWithStatus("https://example.com/api/items/7", SECONDARY);
+        order.verify(httpClient).sendWithStatusAsSecondary("DELETE", "https://example.com/api/items/7", null, null);
         Finding finding = findings.stream().filter(f -> f.getTitle().contains("Cross-User Access Confirmed"))
                 .findFirst().orElseThrow(() -> new AssertionError("stateful cross-user DELETE must be reported"));
         assertTrue(finding.getResponseDetails().contains("no longer exists for its owner"));
@@ -307,12 +317,18 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testPublicObjectIsNotCrossUserBola() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/articles/42", "GET");
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         String article = "{\"id\":42,\"title\":\"Release notes\"}";
         when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, article, Map.of()));
         when(httpClient.getWithStatusNoAuth(anyString())).thenReturn(new HttpResponse(200, article, Map.of()));
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
+                .thenReturn(new HttpResponse(200, article, Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        // the check must really have run (both identities asked), otherwise "no finding" proves nothing
+        verify(httpClient, atLeastOnce()).sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull());
 
         assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("Cross-User")),
                 "An object anyone can read is not an object-level authorization failure");
@@ -323,10 +339,11 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testDifferentObjectIsNotConfirmed() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/profile/42", "GET");
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.getWithStatus(anyString(), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"id\":42,\"username\":\"alice\"}", Map.of()));
-        when(httpClient.getWithStatus(anyString(), eq(SECONDARY)))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
                 .thenReturn(new HttpResponse(200, "{\"id\":43,\"username\":\"bob\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -341,10 +358,11 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testSameObjectWithVolatileFieldsIsConfirmed() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/orders/42", "GET");
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.getWithStatus(anyString(), eq(Map.of())))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"total\":10,\"servedAt\":\"10:00:01\"}", Map.of()));
-        when(httpClient.getWithStatus(anyString(), eq(SECONDARY)))
+        when(httpClient.sendWithStatusAsSecondary(eq("GET"), anyString(), isNull(), isNull()))
                 .thenReturn(new HttpResponse(200, "{\"orderId\":42,\"total\":10,\"servedAt\":\"10:00:02\"}", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -357,17 +375,46 @@ class BrokenObjectLevelAuthorizationTestCaseTest {
     void testPatchIsSentAsPatch() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/notes/5", "PATCH", "application/json", null, true);
         endpoint.setBaseUrl("https://example.com");
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
         when(httpClient.getSecondaryAuthHeaders()).thenReturn(SECONDARY);
         when(httpClient.isDestructiveTestingAllowed()).thenReturn(true);
-        when(httpClient.patchWithStatus(anyString(), anyMap(), anyString(), anyString()))
+        when(httpClient.sendWithStatusAsSecondary(eq("PATCH"), anyString(), anyString(), anyString()))
                 .thenReturn(new HttpResponse(200, "{\"id\":5}", Map.of()));
         when(httpClient.getWithStatus(anyString(), anyMap()))
                 .thenReturn(new HttpResponse(405, "", Map.of()));
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
-        verify(httpClient).patchWithStatus(eq("https://example.com/api/notes/5"), eq(SECONDARY), anyString(), anyString());
+        verify(httpClient).sendWithStatusAsSecondary(eq("PATCH"), eq("https://example.com/api/notes/5"), anyString(), anyString());
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Cross-User Access Confirmed")));
+    }
+
+    @Test
+    @DisplayName("Behind a gateway the read-only probe still never sends the real method (credential retry and control request)")
+    void testGatewayPathsStayReadOnly() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/items/7", "DELETE", "application/json", null, true);
+        endpoint.setBaseUrl("https://example.com");
+        String object = "{\"id\":7,\"owner\":\"alice\"}";
+        when(httpClient.hasSecondaryIdentity()).thenReturn(true);
+        when(httpClient.hasApplicationCredentials()).thenReturn(true);
+        when(httpClient.getApplicationCredentialHeaderNames()).thenReturn(List.of("X-API-Key"));
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(new HttpResponse(200, object, Map.of()));
+        // the secondary token alone is refused by the gateway; with the application credential it gets the object
+        when(httpClient.sendWithStatusAsSecondary(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+        when(httpClient.sendWithStatusAsSecondaryWithApplicationCredentials(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(200, object, Map.of()));
+        when(httpClient.sendWithStatusApplicationCredentialsOnly(anyString(), anyString(), any(), any()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("secondary token with the application API key")),
+                "the gateway finding must still be produced: " + findings);
+        verify(httpClient, never()).sendWithStatusAsSecondary(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).sendWithStatusAsSecondaryWithApplicationCredentials(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).sendWithStatusApplicationCredentialsOnly(eq("DELETE"), anyString(), any(), any());
+        verify(httpClient, never()).deleteWithStatus(anyString(), anyMap());
     }
 
     @Test
