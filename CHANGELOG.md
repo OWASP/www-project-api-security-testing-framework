@@ -6,6 +6,8 @@ Releases before 2.0.2 are described on the [GitHub Releases page](https://github
 
 ### Added
 
+- **Inbound webhook signature verification check** (#192). `ASTF-API10-2023` now probes POST/PUT/PATCH endpoints whose path contains `/webhook`, `/webhooks/`, `/hooks/` or `/callback/`. It sends a benign Stripe, GitHub or Slack style event (a provider named in the path selects that shape, otherwise all three are tried) with no signature, an invalid signature, and a stale timestamp with a well-formed but invalid signature. A 2xx whose body shows the event was processed is reported as CRITICAL "Webhook Accepts Unsigned/Forged Events"; a 2xx with an empty or generic body is MEDIUM "Webhook Signature Check Not Confirmed"; 400/401/403 passes. Note that if the receiver is vulnerable, the benign event is processed and may change state on the target.
+
 - **GraphQL query-field brute-force detection** (#117). The existing brute-force check only matched a *mutation* named like a login. An authentication gate exposed as a *query* field and not named like a login — DVGA's `systemDiagnostics(username, password, cmd)` — went undetected. A new check introspects query fields for one governed by both a username-like and a password-like argument, sends eight failed attempts, and reports a missing-rate-limiting finding (MEDIUM) if no 429/423 lockout appears. The call carries a selection set only for object-returning fields, so a scalar-returning field like `systemDiagnostics: String` is queried correctly. Discovery relies on introspection being enabled. Live-verified against DVGA: reported "No Rate Limiting on GraphQL Query-Field Authentication" for `systemDiagnostics`.
 
 ### Fixed

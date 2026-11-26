@@ -2,10 +2,14 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.owasp.astf.core.EndpointInfo;
@@ -64,6 +68,26 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             "sql syntax", "syntax error", "mysql", "sqlite", "postgresql", "ora-0", "sqlstate"
     );
 
+    private static final List<String> WEBHOOK_SIGNATURE_PATH_MARKERS = List.of(
+            "/webhook", "/webhooks/", "/hooks/", "/callback/"
+    );
+
+    private static final List<String> WEBHOOK_PROVIDERS = List.of("stripe", "github", "slack");
+
+    private static final String ZERO_SIGNATURE = "0".repeat(64);
+    private static final long STALE_TIMESTAMP_AGE_SECONDS = 3600;
+    private static final ObjectMapper JSON = new ObjectMapper();
+
+    private static final String STRIPE_BODY =
+            "{\"id\":\"evt_astf_test\",\"type\":\"ping\",\"data\":{\"object\":{}}}";
+    private static final String GITHUB_BODY = "{\"zen\":\"astf-ping\",\"hook_id\":1}";
+    private static final String SLACK_BODY = "{\"type\":\"url_verification\",\"challenge\":\"astf\"}";
+
+    // Words that show the server rejected the request even though it answered 2xx.
+    private static final List<String> WEBHOOK_REJECTION_MARKERS = List.of(
+            "signature", "unauthorized", "forbidden", "denied"
+    );
+
     @Override
     public String getId() {
         return "ASTF-API10-2023";
@@ -88,6 +112,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         findings.addAll(testInjectionViaIntegrationEndpoints(endpoint, httpClient));
         findings.addAll(testOpenRedirect(endpoint, httpClient));
         findings.addAll(checkTlsForExternalCalls(endpoint, httpClient));
+        findings.addAll(checkWebhookSignatureVerification(endpoint, httpClient));
 
         return findings;
     }
@@ -274,6 +299,182 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /**
+     * Checks that an inbound webhook receiver verifies request signatures. Only benign event
+     * bodies are sent (ping / url_verification shapes), with no signature, a wrong signature,
+     * and a stale timestamp with a well-formed but invalid signature.
+     */
+    private List<Finding> checkWebhookSignatureVerification(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+
+        if (!isWebhookReceiverPath(endpoint)) {
+            return findings;
+        }
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
+        if (!method.equals("POST") && !method.equals("PUT") && !method.equals("PATCH")) {
+            return findings;
+        }
+
+        String url = endpoint.getFullUrl();
+        String path = endpoint.getPath().toLowerCase(Locale.ROOT);
+        List<String> providers = WEBHOOK_PROVIDERS.stream().filter(path::contains).toList();
+        if (providers.isEmpty()) {
+            providers = WEBHOOK_PROVIDERS;
+        }
+
+        Finding unconfirmed = null;
+        for (String provider : providers) {
+            for (Map.Entry<String, Map<String, String>> variant : signatureVariants(provider).entrySet()) {
+                try {
+                    HttpResponse response = sendWebhookEvent(httpClient, method, url, variant.getValue(),
+                            webhookBody(provider));
+                    if (response == null || !response.isSuccess()) {
+                        continue;
+                    }
+                    String responseBody = response.getBody();
+                    String lower = responseBody.toLowerCase(Locale.ROOT);
+                    if (WEBHOOK_REJECTION_MARKERS.stream().anyMatch(lower::contains)) {
+                        continue;
+                    }
+                    String detail = provider + " event, " + variant.getKey();
+                    if (webhookBodyShowsProcessing(responseBody)) {
+                        Finding finding = new Finding(
+                                UUID.randomUUID().toString(),
+                                "Webhook Accepts Unsigned/Forged Events",
+                                String.format("The webhook endpoint at '%s' returned HTTP %d and processed a " +
+                                        "benign %s-style event sent with %s. Without signature verification " +
+                                        "anyone can forge events, which may trigger state changes in the API.",
+                                        endpoint.getPath(), response.getStatusCode(), provider,
+                                        variant.getKey()),
+                                Severity.CRITICAL,
+                                getId(),
+                                endpoint.getMethod() + " " + endpoint.getPath(),
+                                webhookRemediation()
+                        );
+                        finding.setRequestDetails(method + " " + url + "\nHeaders: "
+                                + describeHeaders(variant.getValue()));
+                        finding.setEvidence("Variant: " + detail + "\nHTTP " + response.getStatusCode()
+                                + "\nResponse: " + truncate(responseBody));
+                        findings.add(finding);
+                        return findings;
+                    }
+                    if (unconfirmed == null) {
+                        unconfirmed = new Finding(
+                                UUID.randomUUID().toString(),
+                                "Webhook Signature Check Not Confirmed",
+                                String.format("The webhook endpoint at '%s' returned HTTP %d with an empty or " +
+                                        "generic body for a benign %s-style event sent with %s. It was not " +
+                                        "rejected, so signature verification could not be confirmed.",
+                                        endpoint.getPath(), response.getStatusCode(), provider,
+                                        variant.getKey()),
+                                Severity.MEDIUM,
+                                getId(),
+                                endpoint.getMethod() + " " + endpoint.getPath(),
+                                webhookRemediation()
+                        );
+                        unconfirmed.setRequestDetails(method + " " + url + "\nHeaders: "
+                                + describeHeaders(variant.getValue()));
+                        unconfirmed.setEvidence("Variant: " + detail + "\nHTTP " + response.getStatusCode()
+                                + "\nResponse: " + truncate(responseBody));
+                    }
+                } catch (Exception e) {
+                    logger.debug("Error testing webhook signature on {}: {}", endpoint, e.getMessage());
+                }
+            }
+        }
+
+        if (unconfirmed != null) {
+            findings.add(unconfirmed);
+        }
+        return findings;
+    }
+
+    private boolean isWebhookReceiverPath(EndpointInfo endpoint) {
+        String path = endpoint.getPath().toLowerCase(Locale.ROOT);
+        return WEBHOOK_SIGNATURE_PATH_MARKERS.stream().anyMatch(path::contains);
+    }
+
+    private Map<String, Map<String, String>> signatureVariants(String provider) {
+        long now = System.currentTimeMillis() / 1000;
+        long stale = now - STALE_TIMESTAMP_AGE_SECONDS;
+        Map<String, Map<String, String>> variants = new LinkedHashMap<>();
+        variants.put("no signature header", Map.of());
+        switch (provider) {
+            case "stripe" -> {
+                variants.put("an invalid signature",
+                        Map.of("Stripe-Signature", "t=" + now + ",v1=" + ZERO_SIGNATURE));
+                variants.put("a stale timestamp",
+                        Map.of("Stripe-Signature", "t=" + stale + ",v1=" + ZERO_SIGNATURE));
+            }
+            case "github" -> variants.put("an invalid signature",
+                    Map.of("X-Hub-Signature-256", "sha256=" + ZERO_SIGNATURE));
+            case "slack" -> {
+                variants.put("an invalid signature", Map.of(
+                        "X-Slack-Signature", "v0=" + ZERO_SIGNATURE,
+                        "X-Slack-Request-Timestamp", String.valueOf(now)));
+                variants.put("a stale timestamp", Map.of(
+                        "X-Slack-Signature", "v0=" + ZERO_SIGNATURE,
+                        "X-Slack-Request-Timestamp", String.valueOf(stale)));
+            }
+            default -> { }
+        }
+        return variants;
+    }
+
+    private String webhookBody(String provider) {
+        return switch (provider) {
+            case "stripe" -> STRIPE_BODY;
+            case "github" -> GITHUB_BODY;
+            default -> SLACK_BODY;
+        };
+    }
+
+    private HttpResponse sendWebhookEvent(HttpClient httpClient, String method, String url,
+                                          Map<String, String> headers, String body) throws IOException {
+        return switch (method) {
+            case "PUT" -> httpClient.putWithStatus(url, headers, "application/json", body);
+            case "PATCH" -> httpClient.patchWithStatus(url, headers, "application/json", body);
+            default -> httpClient.postWithStatus(url, headers, "application/json", body);
+        };
+    }
+
+    private boolean webhookBodyShowsProcessing(String responseBody) {
+        String lower = responseBody.toLowerCase(Locale.ROOT);
+        if (lower.contains("received") || lower.contains("evt_astf_test") || lower.contains("astf-ping")) {
+            return true;
+        }
+        if (lower.contains("challenge") && lower.contains("astf")) {
+            return true;
+        }
+        try {
+            JsonNode node = JSON.readTree(responseBody);
+            if (node == null || node.isMissingNode() || node.isNull() || node.isEmpty()) {
+                return false;
+            }
+            if (node.isObject() && (node.has("error") || node.has("errors"))) {
+                return false;
+            }
+            return node.isObject() || node.isArray();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String webhookRemediation() {
+        return "Verify the provider's signature on every inbound webhook (Stripe-Signature, " +
+                "X-Hub-Signature-256, X-Slack-Signature) using a constant-time comparison over the raw " +
+                "request body, reject missing or invalid signatures with 400/401/403, and enforce a " +
+                "timestamp tolerance (for example five minutes) to stop replayed events.";
+    }
+
+    private String describeHeaders(Map<String, String> headers) {
+        return headers.isEmpty() ? "(no signature headers)" : headers.toString();
+    }
+
+    private String truncate(String value) {
+        return value.length() <= 200 ? value : value.substring(0, 200) + "...";
     }
 
     private boolean isIntegrationEndpoint(EndpointInfo endpoint) {

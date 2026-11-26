@@ -16,6 +16,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -213,5 +216,95 @@ class UnsafeConsumptionOfApisTestCaseTest {
 
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+
+    private static final String STRIPE_BODY =
+            "{\"id\":\"evt_astf_test\",\"type\":\"ping\",\"data\":{\"object\":{}}}";
+    private static final String GITHUB_BODY = "{\"zen\":\"astf-ping\",\"hook_id\":1}";
+
+    private static List<Finding> signatureFindings(List<Finding> findings) {
+        return findings.stream()
+                .filter(f -> f.getTitle().startsWith("Webhook Accepts") || f.getTitle().startsWith("Webhook Signature"))
+                .toList();
+    }
+
+    @Test
+    @DisplayName("Stripe webhook accepting an unsigned event and saying received is CRITICAL")
+    void testStripeUnsignedAcceptedIsCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/stripe/webhook", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            String body = inv.getArgument(3);
+            if (STRIPE_BODY.equals(body) && headers.isEmpty()) {
+                return new HttpResponse(200, "{\"received\":true}", Map.of());
+            }
+            return new HttpResponse(400, "{\"error\":\"bad\"}", Map.of());
+        });
+
+        List<Finding> findings = signatureFindings(testCase.execute(endpoint, httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Webhook Accepts Unsigned/Forged Events", findings.get(0).getTitle());
+        assertEquals(org.owasp.astf.core.result.Severity.CRITICAL, findings.get(0).getSeverity());
+        verify(httpClient, never()).postWithStatus(anyString(), argThat(h -> h.containsKey("X-Hub-Signature-256")),
+                anyString(), anyString());
+    }
+
+    @Test
+    @DisplayName("GitHub webhook accepting a wrong signature and processing the event is CRITICAL")
+    void testGithubWrongSignatureAcceptedIsCritical() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/hooks/github", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            String body = inv.getArgument(3);
+            if (GITHUB_BODY.equals(body) && headers.getOrDefault("X-Hub-Signature-256", "").startsWith("sha256=0")) {
+                return new HttpResponse(200, "{\"status\":\"queued\",\"zen\":\"astf-ping\"}", Map.of());
+            }
+            return new HttpResponse(401, "", Map.of());
+        });
+
+        List<Finding> findings = signatureFindings(testCase.execute(endpoint, httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Webhook Accepts Unsigned/Forged Events", findings.get(0).getTitle());
+        assertTrue(findings.get(0).getEvidence().contains("invalid signature"));
+    }
+
+    @Test
+    @DisplayName("Webhook returning 200 with an empty body is reported as MEDIUM, not confirmed")
+    void testEmptyBodyAcceptedIsMedium() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/webhook/slack", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "", Map.of()));
+
+        List<Finding> findings = signatureFindings(testCase.execute(endpoint, httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Webhook Signature Check Not Confirmed", findings.get(0).getTitle());
+        assertEquals(org.owasp.astf.core.result.Severity.MEDIUM, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Webhook rejecting every variant with 401 produces no signature finding")
+    void testAllVariantsRejectedNoFinding() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhooks/payments", "POST");
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(401, "{\"error\":\"invalid signature\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(signatureFindings(findings).isEmpty());
+        verify(httpClient, atLeastOnce()).postWithStatus(anyString(), anyMap(), anyString(), eq(STRIPE_BODY));
+    }
+
+    @Test
+    @DisplayName("Non-webhook path does not run the signature check")
+    void testNonWebhookPathSendsNothing() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "POST");
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(signatureFindings(findings).isEmpty());
+        verify(httpClient, never()).postWithStatus(anyString(), anyMap(), anyString(), anyString());
     }
 }
