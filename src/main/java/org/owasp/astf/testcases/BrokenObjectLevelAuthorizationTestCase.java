@@ -1,7 +1,11 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -21,6 +25,7 @@ import org.owasp.astf.core.result.Severity;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
  * Tests for API1:2023 Broken Object Level Authorization (BOLA/IDOR).
@@ -65,6 +70,8 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
     // responses that differ only in viewer-specific fields.
     private static final Pattern IDENTIFIER_KEY = Pattern.compile(
             "(?i)^(id|_id|uuid|guid|.*[_-]id|.*Id|.*uuid|username|user_name|email|slug)$");
+    private static final List<String> IDENTIFIER_HEADERS = List.of(
+            "X-User-Id", "X-Account-Id", "X-Tenant-Id", "X-Org-Id", "X-Customer-Id");
     private static final String CROSS_USER_REMEDIATION =
             "Verify that every object-returning endpoint checks the authenticated caller's " +
             "ownership of or explicit permission for the specific object requested, not merely " +
@@ -98,6 +105,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         EndpointInfo resolvedEndpoint = PathTemplateResolver.resolve(endpoint, httpClient);
 
         findings.addAll(testCrossUserAccess(resolvedEndpoint, httpClient));
+        findings.addAll(testIdentifiersOutsidePath(resolvedEndpoint, httpClient));
         findings.addAll(testNumericIdManipulation(resolvedEndpoint, httpClient));
         findings.addAll(testUuidManipulation(resolvedEndpoint, httpClient));
 
@@ -276,6 +284,291 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         return findings;
     }
 
+    /**
+     * Cross-user check for identifiers that are not in the URL path: object IDs in the query
+     * string, in a JSON request body, or in an identity header such as {@code X-User-Id}. The
+     * secondary identity replays the request carrying the <em>primary</em> identity's identifier
+     * values, and the result is judged like the path-based check: CRITICAL only when the secondary
+     * identity receives the primary identity's object (see {@link #sameObject}) and an anonymous
+     * request does not, MEDIUM "Not Confirmed" for a 2xx with different content.
+     * <p>
+     * The primary identity's object, and the identifier values to carry over, come from a read-only
+     * GET of the endpoint. Without {@code --allow-destructive}, query and header probes on a
+     * state-changing endpoint are sent as GET; a body probe cannot be sent read-only and is reported
+     * as INFO "Check Held Back". Header probes are always read-only GETs.
+     */
+    private List<Finding> testIdentifiersOutsidePath(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        Map<String, String> secondaryHeaders = httpClient.getSecondaryAuthHeaders();
+        if (secondaryHeaders.isEmpty() || !endpoint.isRequiresAuthentication()) {
+            return findings;
+        }
+
+        try {
+            String path = endpoint.getPath();
+            int queryStart = path.indexOf('?');
+            String rawQuery = queryStart >= 0 ? path.substring(queryStart + 1) : null;
+            EndpointInfo target = endpoint;
+            if (queryStart >= 0) {
+                target = new EndpointInfo(path.substring(0, queryStart), endpoint.getMethod(),
+                        endpoint.getContentType(), endpoint.getRequestBody(), endpoint.isRequiresAuthentication());
+                target.setBaseUrl(endpoint.getBaseUrl());
+                target.setResolvedFromTemplate(endpoint.isResolvedFromTemplate());
+            }
+            String baseUrl = target.getFullUrl();
+            String originalUrl = rawQuery == null || rawQuery.isEmpty() ? baseUrl : baseUrl + "?" + rawQuery;
+
+            List<String[]> queryParams = parseQuery(rawQuery);
+            boolean hasQueryIds = queryParams.stream().anyMatch(p -> isIdentifierName(decode(p[0])));
+            ObjectNode body = identifierBody(target);
+            boolean hasBodyIds = body != null && hasIdentifierField(body);
+
+            HttpResponse primary = httpClient.getWithStatus(originalUrl, Map.of());
+            if (primary == null || !primary.isSuccess()) {
+                if (isStateChanging(endpoint) && (hasQueryIds || hasBodyIds)) {
+                    findings.add(heldBackIdentifierFinding(endpoint,
+                            "the read-only GET used to read the primary identity's object could not reach it (status "
+                            + (primary != null ? primary.getStatusCode() : "no response") + ")"));
+                }
+                return findings;
+            }
+            Map<String, JsonNode> primaryIds = collectIdentifiers(primary.getBody());
+            if (primaryIds.isEmpty()) {
+                return findings;
+            }
+
+            if (hasQueryIds) {
+                String probeUrl = baseUrl + "?" + swapQuery(queryParams, primaryIds);
+                HttpResponse secondary = sendProbe(target, probeUrl, httpClient, secondaryHeaders, null);
+                addIfPresent(findings, assessIdentifierProbe(target, httpClient, "query parameter", probeUrl,
+                        probeUrl, primary, secondary, null));
+            }
+
+            if (hasBodyIds) {
+                if (httpClient.isDestructiveTestingAllowed()) {
+                    String swapped = swapBody(body, primaryIds).toString();
+                    HttpResponse secondary = makeRequest(target, baseUrl, httpClient, secondaryHeaders, swapped);
+                    addIfPresent(findings, assessIdentifierProbe(target, httpClient, "JSON body field",
+                            baseUrl, baseUrl, primary, secondary, null));
+                } else {
+                    findings.add(heldBackIdentifierFinding(endpoint,
+                            "the identifier is in the JSON request body, which cannot be tested with a read-only GET"));
+                }
+            }
+
+            HttpResponse secondaryBaseline = null;
+            for (String header : IDENTIFIER_HEADERS) {
+                JsonNode value = primaryValueFor(header, primaryIds);
+                if (value == null) {
+                    continue;
+                }
+                if (secondaryBaseline == null) {
+                    secondaryBaseline = httpClient.getWithStatus(originalUrl, secondaryHeaders);
+                    if (secondaryBaseline != null && secondaryBaseline.isSuccess()
+                            && sameObject(primary.getBody(), secondaryBaseline.getBody())) {
+                        break;
+                    }
+                }
+                Map<String, String> headers = new LinkedHashMap<>(secondaryHeaders);
+                headers.put(header, value.asText());
+                HttpResponse secondary = httpClient.getWithStatus(originalUrl, headers);
+                Finding finding = assessIdentifierProbe(target, httpClient, "header " + header, originalUrl,
+                        originalUrl, primary, secondary, secondaryBaseline);
+                if (finding != null) {
+                    findings.add(finding);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error testing identifiers outside the path on {}: {}", endpoint, e.getMessage());
+        }
+        return findings;
+    }
+
+    /**
+     * Judges one probe. {@code effectBaseline}, when given, is the secondary identity's response
+     * without the probe's change; a 2xx that merely equals it shows the change did nothing and is
+     * dropped instead of reported as MEDIUM.
+     */
+    private Finding assessIdentifierProbe(EndpointInfo endpoint, HttpClient httpClient, String where,
+                                          String probeUrl, String anonymousUrl, HttpResponse primary,
+                                          HttpResponse secondary, HttpResponse effectBaseline) throws IOException {
+        if (secondary == null || !secondary.isSuccess() || secondary.isNotFound()) {
+            return null;
+        }
+        HttpResponse anonymous = httpClient.getWithStatusNoAuth(anonymousUrl);
+        if (anonymous != null && anonymous.isSuccess() && sameObject(primary.getBody(), anonymous.getBody())) {
+            return null;
+        }
+        boolean confirmed = sameObject(primary.getBody(), secondary.getBody());
+        if (!confirmed && effectBaseline != null && effectBaseline.isSuccess()
+                && sameBody(effectBaseline.getBody(), secondary.getBody())) {
+            return null;
+        }
+
+        boolean readSubstituted = isStateChanging(endpoint) && !httpClient.isDestructiveTestingAllowed();
+        String sent = readSubstituted || where.startsWith("header") ? "GET" : endpoint.getMethod();
+        String note = readSubstituted
+                ? " The check used a read-only GET; the " + endpoint.getMethod() + " itself was not sent." : "";
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                confirmed
+                        ? "Broken Object Level Authorization (Cross-User Access Confirmed via " + where + ")"
+                        : "Broken Object Level Authorization (Cross-User Access Not Confirmed via " + where + ")",
+                confirmed
+                        ? String.format("A second, distinct authenticated identity received the primary identity's " +
+                                "object from '%s' by sending the primary identity's identifier in a %s, and the " +
+                                "object is not returned to an anonymous request. The server trusts a " +
+                                "client-supplied identifier without checking that the caller owns the object.%s",
+                                endpoint.getPath(), where, note)
+                        : String.format("The secondary identity received a 2xx response from '%s' with the primary " +
+                                "identity's identifier in a %s, but the response does not contain the primary " +
+                                "identity's object. Compare the responses by hand before reporting.%s",
+                                endpoint.getPath(), where, note),
+                confirmed ? Severity.CRITICAL : Severity.MEDIUM,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                CROSS_USER_REMEDIATION
+        );
+        finding.setRequestDetails(sent + " " + probeUrl + " — identifier in " + where
+                + " set to the primary identity's value, sent with the secondary token");
+        finding.setResponseDetails("Primary identity status: " + primary.getStatusCode() +
+                "\nSecondary identity status: " + secondary.getStatusCode() +
+                "\nAnonymous status: " + (anonymous != null ? anonymous.getStatusCode() : "not sent") +
+                "\nSecondary received primary's object: " + confirmed);
+        return finding;
+    }
+
+    private static void addIfPresent(List<Finding> findings, Finding finding) {
+        if (finding != null) {
+            findings.add(finding);
+        }
+    }
+
+    private static boolean sameBody(String a, String b) {
+        if (a == null || b == null) {
+            return false;
+        }
+        if (a.trim().equals(b.trim())) {
+            return true;
+        }
+        try {
+            return STATIC_MAPPER.readTree(a).equals(STATIC_MAPPER.readTree(b));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Sends the endpoint's own method with {@code --allow-destructive} (the caller's request body, or
+     * {@code bodyOverride} when given), otherwise a GET to the same URL.
+     */
+    private HttpResponse sendProbe(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                   Map<String, String> headers, String bodyOverride) throws IOException {
+        if (isStateChanging(endpoint) && !httpClient.isDestructiveTestingAllowed()) {
+            return httpClient.getWithStatus(url, headers);
+        }
+        return makeRequest(endpoint, url, httpClient, headers, bodyOverride);
+    }
+
+    private ObjectNode identifierBody(EndpointInfo endpoint) {
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
+        String raw = endpoint.getRequestBody();
+        if (!Set.of("POST", "PUT", "PATCH").contains(method) || raw == null || raw.isBlank()) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(raw);
+            return root.isObject() ? (ObjectNode) root : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static boolean hasIdentifierField(ObjectNode body) {
+        var names = body.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            if (body.get(name).isValueNode() && isIdentifierName(name)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ObjectNode swapBody(ObjectNode body, Map<String, JsonNode> primaryIds) {
+        ObjectNode copy = body.deepCopy();
+        var names = body.fieldNames();
+        while (names.hasNext()) {
+            String name = names.next();
+            JsonNode value = primaryValueFor(name, primaryIds);
+            if (body.get(name).isValueNode() && isIdentifierName(name) && value != null) {
+                copy.set(name, value.deepCopy());
+            }
+        }
+        return copy;
+    }
+
+    private static List<String[]> parseQuery(String rawQuery) {
+        List<String[]> params = new ArrayList<>();
+        if (rawQuery == null || rawQuery.isEmpty()) {
+            return params;
+        }
+        for (String pair : rawQuery.split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+            int eq = pair.indexOf('=');
+            params.add(eq < 0 ? new String[] {pair, null}
+                    : new String[] {pair.substring(0, eq), pair.substring(eq + 1)});
+        }
+        return params;
+    }
+
+    private static String swapQuery(List<String[]> params, Map<String, JsonNode> primaryIds) {
+        StringBuilder sb = new StringBuilder();
+        for (String[] param : params) {
+            if (sb.length() > 0) {
+                sb.append('&');
+            }
+            String name = decode(param[0]);
+            JsonNode value = isIdentifierName(name) ? primaryValueFor(name, primaryIds) : null;
+            sb.append(param[0]);
+            if (value != null) {
+                sb.append('=').append(URLEncoder.encode(value.asText(), StandardCharsets.UTF_8));
+            } else if (param[1] != null) {
+                sb.append('=').append(param[1]);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String decode(String value) {
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return value;
+        }
+    }
+
+    private Finding heldBackIdentifierFinding(EndpointInfo endpoint, String reason) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Broken Object Level Authorization Check Held Back (state-changing method)",
+                String.format("The cross-user check of the identifiers in the query string or request body of " +
+                        "%s %s was not run: %s. Re-run with --allow-destructive against test accounts whose " +
+                        "data may be changed to send the %s itself.",
+                        endpoint.getMethod(), endpoint.getPath(), reason, endpoint.getMethod()),
+                Severity.INFO,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Run the destructive cross-user check against an isolated environment, or verify this endpoint's " +
+                "object-level authorization manually."
+        );
+        finding.setRequestDetails("GET " + endpoint.getFullUrl() + " — read-only substitute for " + endpoint.getMethod());
+        return finding;
+    }
+
     private Finding heldBackFinding(EndpointInfo endpoint, HttpResponse readProbe) {
         Finding finding = new Finding(
                 UUID.randomUUID().toString(),
@@ -323,7 +616,7 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
             var fields = objA.fields();
             while (fields.hasNext()) {
                 var field = fields.next();
-                if (!field.getValue().isValueNode() || !IDENTIFIER_KEY.matcher(field.getKey()).matches()) {
+                if (!field.getValue().isValueNode() || !isIdentifierName(field.getKey())) {
                     continue;
                 }
                 identifiers++;
@@ -336,6 +629,67 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /** True when {@code name} names an object (id, *_id, *Id, uuid, username, email, slug, ...). */
+    static boolean isIdentifierName(String name) {
+        return name != null && IDENTIFIER_KEY.matcher(name).matches();
+    }
+
+    /**
+     * Identifier-like scalar fields of the object a JSON body describes (a single wrapped object or
+     * the first element of an array is unwrapped), keyed by field name. Empty when the body is not
+     * JSON or carries no identifiers.
+     */
+    static Map<String, JsonNode> collectIdentifiers(String body) {
+        Map<String, JsonNode> identifiers = new LinkedHashMap<>();
+        if (body == null || body.isBlank()) {
+            return identifiers;
+        }
+        try {
+            JsonNode root = STATIC_MAPPER.readTree(body);
+            if (root != null && root.isArray() && root.size() > 0) {
+                root = root.get(0);
+            }
+            JsonNode object = unwrapSingleObject(root);
+            if (object == null) {
+                return identifiers;
+            }
+            var fields = object.fields();
+            while (fields.hasNext()) {
+                var field = fields.next();
+                if (field.getValue().isValueNode() && !field.getValue().isNull()
+                        && isIdentifierName(field.getKey())) {
+                    identifiers.put(field.getKey(), field.getValue());
+                }
+            }
+        } catch (Exception e) {
+            return new LinkedHashMap<>();
+        }
+        return identifiers;
+    }
+
+    /**
+     * The primary identity's value for a request field or header named {@code name}: the response
+     * field with the same name (ignoring case, separators and an {@code X-} prefix), otherwise the
+     * response's plain {@code id}.
+     */
+    static JsonNode primaryValueFor(String name, Map<String, JsonNode> primaryIds) {
+        String wanted = normalizeName(name);
+        for (Map.Entry<String, JsonNode> entry : primaryIds.entrySet()) {
+            if (normalizeName(entry.getKey()).equals(wanted)) {
+                return entry.getValue();
+            }
+        }
+        return wanted.endsWith("id") ? primaryIds.get("id") : null;
+    }
+
+    private static String normalizeName(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("x-")) {
+            lower = lower.substring(2);
+        }
+        return lower.replaceAll("[^a-z0-9]", "");
     }
 
     private static JsonNode unwrapSingleObject(JsonNode node) {
@@ -489,11 +843,17 @@ public class BrokenObjectLevelAuthorizationTestCase implements TestCase {
      */
     private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
                                       Map<String, String> headers) throws IOException {
+        return makeRequest(endpoint, url, httpClient, headers, null);
+    }
+
+    private HttpResponse makeRequest(EndpointInfo endpoint, String url, HttpClient httpClient,
+                                      Map<String, String> headers, String bodyOverride) throws IOException {
+        String body = bodyOverride != null ? bodyOverride : resolveRequestBody(endpoint);
         return switch (endpoint.getMethod().toUpperCase(Locale.ROOT)) {
             case "GET"    -> httpClient.getWithStatus(url, headers);
-            case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
-            case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
-            case "PATCH"  -> httpClient.patchWithStatus(url, headers, endpoint.getContentType(), resolveRequestBody(endpoint));
+            case "POST"   -> httpClient.postWithStatus(url, headers, endpoint.getContentType(), body);
+            case "PUT"    -> httpClient.putWithStatus(url, headers, endpoint.getContentType(), body);
+            case "PATCH"  -> httpClient.patchWithStatus(url, headers, endpoint.getContentType(), body);
             case "DELETE" -> httpClient.deleteWithStatus(url, headers);
             default       -> httpClient.getWithStatus(url, headers);
         };
