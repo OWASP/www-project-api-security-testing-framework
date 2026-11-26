@@ -3,16 +3,21 @@ package org.owasp.astf.testcases;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -26,6 +31,13 @@ import static org.mockito.Mockito.when;
  *   <li>{@code testInjectionViaIntegrationEndpoints} only runs on paths containing integration
  *       patterns (webhook, proxy, integration, external, callback, third-party, import, export …).
  *       The pattern "49" is explicitly excluded from injection detection to avoid false positives.</li>
+ *   <li>{@code testOpenRedirect} only runs on GET endpoints, uses a non-following HTTP client,
+ *       and requires an absolute {@code Location} whose host is the injected attacker domain
+ *       (relative / same-host Locations are not open redirects).</li>
+ *       patterns (webhook, proxy, integration, external, callback, third-party, import, export …).</li>
+ *   <li>SSTI uses a unique {@code 1337*1337=1787569} marker across template syntaxes; pure echo
+ *       of the expression without evaluation is not reported, and a marker already present in the
+ *       baseline is ignored.</li>
  *   <li>{@code testOpenRedirect} only runs on GET endpoints and checks that the {@code Location}
  *       response header echoes the attacker domain.</li>
  *   <li>{@code checkTlsForExternalCalls} only runs on integration endpoints with POST or PUT,
@@ -125,12 +137,12 @@ class UnsafeConsumptionOfApisTestCaseTest {
         assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("SQL Injection")),
                 "Should detect SQL injection from a 500 response containing a database error");
     }
-
     @Test
-    @DisplayName("Should detect open redirect when Location header echoes attacker domain")
+    @DisplayName("Should detect open redirect when Location header points at attacker host")
     void testOpenRedirectDetected() throws IOException {
         // GET endpoint — testOpenRedirect only fires on GET
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // 302 response with Location pointing to attacker domain
         HttpResponse redirectResponse = new HttpResponse(
@@ -139,7 +151,7 @@ class UnsafeConsumptionOfApisTestCaseTest {
                 Map.of("Location", List.of("https://evil-attacker.example.com/phishing"))
         );
 
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
                 .thenReturn(redirectResponse);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -154,9 +166,10 @@ class UnsafeConsumptionOfApisTestCaseTest {
     @DisplayName("Open redirect evidence masks token-like query values in the Location header")
     void testOpenRedirectEvidenceMasksTokens() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
         HttpResponse redirectResponse = new HttpResponse(302, "",
                 Map.of("Location", List.of("https://evil-attacker.example.com/cb?access_token=s3cr3tvalue&next=/home")));
-        when(httpClient.getWithStatus(anyString(), anyMap())).thenReturn(redirectResponse);
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap())).thenReturn(redirectResponse);
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
 
@@ -167,12 +180,62 @@ class UnsafeConsumptionOfApisTestCaseTest {
     }
 
     @Test
+    @DisplayName("Should NOT report open redirect for a relative Location header")
+    void testNoOpenRedirectForRelativeLocation() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "", Map.of("Location", List.of("/login?next=/home"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Relative Location is not an open redirect");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"//evil-attacker.example.com/phishing", "/\\evil-attacker.example.com/phishing",
+            "\\\\evil-attacker.example.com/phishing"})
+    @DisplayName("Should detect scheme-relative open redirects that browsers resolve to the attacker host")
+    void testSchemeRelativeOpenRedirectDetected(String location) throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "", Map.of("Location", List.of(location))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Location " + location + " leaves the scanned host");
+    }
+
+    @Test
+    @DisplayName("Should NOT report open redirect when Location host is not the injected attacker host")
+    void testNoOpenRedirectForUnrelatedExternalHost() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
+
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(302, "",
+                        Map.of("Location", List.of("https://other.example.org/path"))));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Redirect")),
+                "Location must point at the injected attacker host");
+    }
+
+    @Test
     @DisplayName("Should NOT report open redirect when server returns 200 with no attacker Location header")
     void testNoOpenRedirectWhenLocationIsSafe() throws IOException {
         EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://api.example.com");
 
         // Server returns 200 — not a redirect, so no open-redirect finding
-        when(httpClient.getWithStatus(anyString(), anyMap()))
+        when(httpClient.getWithStatusNoRedirect(anyString(), anyMap()))
                 .thenReturn(ok());
 
         List<Finding> findings = testCase.execute(endpoint, httpClient);
@@ -213,5 +276,98 @@ class UnsafeConsumptionOfApisTestCaseTest {
 
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+    @ParameterizedTest(name = "SSTI detection for {1}: {0}")
+    @CsvSource({
+            "'{{1337*1337}}', Jinja2/Twig/Nunjucks",
+            "'${1337*1337}', Spring EL/JSP EL/FreeMarker",
+            "'<%= 1337*1337 %>', ERB/EJS",
+            "'#{1337*1337}', Ruby string interp/Thymeleaf legacy/Pug",
+            "'*{1337*1337}', Thymeleaf selection",
+            "'[[${1337*1337}]]', Thymeleaf inline",
+            "'@(1337*1337)', Razor"
+    })
+    @DisplayName("Should detect SSTI when unique marker is evaluated for each template syntax")
+    void testSstiDetectedPerSyntax(String payload, String engineFamily) throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    if (body.contains(payload)) {
+                        // Evaluation: marker present; expression may also be echoed
+                        return new HttpResponse(200,
+                                "{\"out\":\"1787569 also saw " + payload + "\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding ssti = findings.stream()
+                .filter(f -> f.getTitle().contains("Template Injection"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected SSTI finding for " + payload));
+        assertEquals(Severity.HIGH, ssti.getSeverity());
+        assertTrue(ssti.getEvidence().contains(engineFamily), "Evidence should name engine family");
+        assertTrue(ssti.getEvidence().contains("1787569"));
+        assertTrue(ssti.getEvidence().contains(payload));
+    }
+
+    @Test
+    @DisplayName("GET SSTI probes percent-encode '#' so '#{...}' is not cut off as a URL fragment")
+    void testSstiGetProbeEncodesHash() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "GET");
+        List<String> urls = new java.util.ArrayList<>();
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            urls.add(inv.getArgument(0));
+            return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+        });
+
+        testCase.execute(endpoint, httpClient);
+
+        assertTrue(urls.stream().anyMatch(u -> u.contains("data=%23{1337*1337}")),
+                "the #{} probe must reach the server intact: " + urls);
+        assertTrue(urls.stream().noneMatch(u -> u.contains("#")), "no raw '#' in any probe URL: " + urls);
+    }
+
+    @Test
+    @DisplayName("Should NOT report SSTI when 1787569 already appears in the baseline response")
+    void testNoSstiWhenMarkerInBaseline() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenReturn(new HttpResponse(200, "{\"n\":1787569,\"note\":\"preexisting\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Template Injection")),
+                "Marker present in baseline must not produce an SSTI finding");
+    }
+
+    @Test
+    @DisplayName("Should NOT report SSTI on pure echo of the expression without evaluation")
+    void testNoSstiOnPureEcho() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/webhook", "POST");
+        AtomicInteger calls = new AtomicInteger();
+
+        when(httpClient.postWithStatus(anyString(), anyMap(), anyString(), anyString()))
+                .thenAnswer(inv -> {
+                    String body = inv.getArgument(3);
+                    calls.incrementAndGet();
+                    if (body.contains("1337*1337") || body.contains("{{") || body.contains("${")) {
+                        // Echo the raw expression/payload only — no evaluated marker
+                        return new HttpResponse(200, "{\"echo\":\"" + body.replace("\"", "\\\"") + "\"}", Map.of());
+                    }
+                    return new HttpResponse(200, "{\"accepted\":true}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertFalse(
+                findings.stream().anyMatch(f -> f.getTitle().contains("Template Injection")),
+                "Pure echo without 1787569 must not produce an SSTI finding");
+        assertTrue(calls.get() > 0);
     }
 }

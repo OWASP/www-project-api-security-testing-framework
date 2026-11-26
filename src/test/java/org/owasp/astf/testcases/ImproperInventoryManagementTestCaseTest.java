@@ -16,6 +16,10 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -25,8 +29,8 @@ import static org.mockito.Mockito.when;
  * <ul>
  *   <li>{@code testOldApiVersions} only runs when the endpoint path matches {@code /v\d+/} AND
  *       {@code endpoint.getBaseUrl()} is non-null/non-empty.</li>
- *   <li>{@code testExposedDocumentation} only runs when {@code baseUrl} is non-empty AND
- *       the path is {@code "/"} or {@code ""} (root endpoint guard).</li>
+ *   <li>{@code testExposedDocumentation} runs once per base URL per scan (first endpoint seen
+ *       for that base), regardless of whether {@code "/"} is in the endpoint list.</li>
  * </ul>
  */
 @DisplayName("Improper Inventory Management Test Case Tests")
@@ -199,5 +203,73 @@ class ImproperInventoryManagementTestCaseTest {
 
         List<Finding> findings = assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
         assertNotNull(findings);
+    }
+    @Test
+    @DisplayName("Should probe documentation endpoints when the endpoint list has no root '/' path")
+    void testDocProbesRunWithoutRootEndpoint() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(notFound());
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/openapi.json")) {
+                        return ok("{\"openapi\":\"3.0.0\",\"paths\":{}}");
+                    }
+                    return notFound();
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
+                        || f.getTitle().contains("Exposed")),
+                "Grey-box lists without '/' must still trigger target-level documentation probes");
+        verify(httpClient, atLeastOnce()).getWithStatus(contains("/openapi.json"), anyMap());
+    }
+
+    @Test
+    @DisplayName("Should probe documentation endpoints only once across multiple endpoints of the same base URL")
+    void testDocProbesRunOncePerBaseUrl() throws IOException {
+        EndpointInfo first = new EndpointInfo("/api/users", "GET");
+        first.setBaseUrl("https://example.com");
+        EndpointInfo second = new EndpointInfo("/api/orders", "GET");
+        second.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(notFound());
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
+
+        List<Finding> firstFindings = testCase.execute(first, httpClient);
+        clearInvocations(httpClient);
+        List<Finding> secondFindings = testCase.execute(second, httpClient);
+
+        assertTrue(firstFindings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
+                        || f.getTitle().contains("Exposed")),
+                "First endpoint for a base URL must run documentation probes");
+        assertTrue(secondFindings.stream().noneMatch(f -> f.getTitle().contains("Documentation")
+                        || f.getTitle().contains("Exposed")),
+                "Second endpoint of the same base URL must not repeat documentation findings");
+        verify(httpClient, never()).getWithStatus(contains("/openapi.json"), anyMap());
+    }
+
+    @Test
+    @DisplayName("Should still probe documentation endpoints when '/' is present in the endpoint list")
+    void testDocProbesStillRunWhenRootPresent() throws IOException {
+        EndpointInfo root = new EndpointInfo("/", "GET");
+        root.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(argThat(url -> url != null && url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(notFound());
+        when(httpClient.getWithStatus(argThat(url -> url != null && !url.contains("__astf_nonexistent_path_check__")), anyMap()))
+                .thenReturn(ok("{\"openapi\":\"3.0.0\",\"paths\":{}}"));
+
+        List<Finding> findings = testCase.execute(root, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Documentation")
+                        || f.getTitle().contains("Exposed")),
+                "Root endpoint '/' must still trigger documentation probes exactly once");
     }
 }
