@@ -1,8 +1,10 @@
 package org.owasp.astf.testcases;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -38,8 +40,6 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
     private static final List<String> INJECTION_PAYLOADS = List.of(
             "<script>alert('xss')</script>",
             "'; DROP TABLE users; --",
-            "{{7*7}}",                  // Template injection
-            "${7*7}",                   // EL injection
             "../../../etc/passwd",      // Path traversal
             "%00null",                  // Null byte injection
             "\\x00",                    // Null byte (hex)
@@ -51,10 +51,24 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
     private static final List<String> INJECTION_SUCCESS_PATTERNS = List.of(
             "<script>",               // Unescaped XSS
             "alert('xss')",           // XSS executed context
-            "49",                     // 7*7=49 template injection
             "root:x:0:0",            // /etc/passwd content
             "X-Injected-Header"      // Header injection reflected
     );
+    // Unique arithmetic marker (1337*1337). "49" from 7*7 was both too common and
+    // explicitly skipped by the success-pattern loop, so SSTI could never fire.
+    private static final String SSTI_RESULT_MARKER = "1787569";
+
+    private static final List<SstiProbe> SSTI_PROBES = List.of(
+            new SstiProbe("{{1337*1337}}", "Jinja2/Twig/Nunjucks"),
+            new SstiProbe("${1337*1337}", "Spring EL/JSP EL/FreeMarker"),
+            new SstiProbe("<%= 1337*1337 %>", "ERB/EJS"),
+            new SstiProbe("#{1337*1337}", "Ruby string interp/Thymeleaf legacy/Pug"),
+            new SstiProbe("*{1337*1337}", "Thymeleaf selection"),
+            new SstiProbe("[[${1337*1337}]]", "Thymeleaf inline"),
+            new SstiProbe("@(1337*1337)", "Razor")
+    );
+
+    private record SstiProbe(String payload, String engineFamily) {}
 
     // SQL-error patterns are checked separately against error (5xx) responses — real
     // error-based SQL injection almost always manifests as a 500 with the DB error text,
@@ -86,6 +100,7 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         List<Finding> findings = new ArrayList<>();
 
         findings.addAll(testInjectionViaIntegrationEndpoints(endpoint, httpClient));
+        findings.addAll(testServerSideTemplateInjection(endpoint, httpClient));
         findings.addAll(testOpenRedirect(endpoint, httpClient));
         findings.addAll(checkTlsForExternalCalls(endpoint, httpClient));
 
@@ -99,32 +114,16 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
             return findings;
         }
 
-        String method = endpoint.getMethod().toUpperCase();
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
 
         for (String payload : INJECTION_PAYLOADS) {
             try {
-                HttpResponse response;
-                if (method.equals("GET")) {
-                    String testUrl = endpoint.getFullUrl() + "?data=" + urlEncode(payload)
-                            + "&query=" + urlEncode(payload);
-                    response = httpClient.getWithStatus(testUrl, Map.of());
-                } else {
-                    String body = String.format(
-                            "{\"data\":\"%s\",\"value\":\"%s\",\"query\":\"%s\"}",
-                            escapeJson(payload), escapeJson(payload), escapeJson(payload));
-                    response = switch (method) {
-                        case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        case "PATCH" -> httpClient.patchWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
-                        default      -> null;
-                    };
-                }
+                HttpResponse response = sendIntegrationPayload(endpoint, httpClient, method, payload);
 
                 if (response != null && response.isSuccess()) {
                     String responseBody = response.getBody();
                     for (String pattern : INJECTION_SUCCESS_PATTERNS) {
-                        if (responseBody.toLowerCase().contains(pattern.toLowerCase())
-                                && !pattern.equals("49")) { // Skip false positives for "49"
+                        if (responseBody.toLowerCase().contains(pattern.toLowerCase())) {
                             Finding finding = new Finding(
                                     UUID.randomUUID().toString(),
                                     "Injection Vulnerability in API Integration Endpoint",
@@ -181,12 +180,103 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         return findings;
     }
 
+    /**
+     * Probes integration endpoints for server-side template injection using a unique
+     * arithmetic marker ({@code 1337*1337=1787569}) that cannot occur naturally like {@code 49}.
+     * One request per template syntax; reports HIGH (same as other confirmed injection findings)
+     * only when the evaluated marker appears, was absent from the baseline, and is not a pure echo.
+     */
+    private List<Finding> testServerSideTemplateInjection(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        if (!isIntegrationEndpoint(endpoint)) {
+            return findings;
+        }
+
+        String method = endpoint.getMethod().toUpperCase(Locale.ROOT);
+        String baselineBody = "";
+        try {
+            HttpResponse baseline = sendIntegrationPayload(endpoint, httpClient, method, "ssti-baseline");
+            if (baseline != null) {
+                baselineBody = baseline.getBody();
+            }
+        } catch (Exception e) {
+            logger.debug("Error fetching SSTI baseline for {}: {}", endpoint, e.getMessage());
+        }
+
+        for (SstiProbe probe : SSTI_PROBES) {
+            try {
+                HttpResponse response = sendIntegrationPayload(endpoint, httpClient, method, probe.payload());
+                if (response == null || !response.isSuccess()) {
+                    continue;
+                }
+                String responseBody = response.getBody();
+                if (isSstiEvaluation(responseBody, baselineBody)) {
+                    Finding finding = new Finding(
+                            UUID.randomUUID().toString(),
+                            "Server-Side Template Injection in API Integration Endpoint",
+                            String.format("The API integration endpoint at '%s' evaluated a template " +
+                                    "expression and returned the unique marker '%s', indicating " +
+                                    "server-side template injection (engine family: %s).",
+                                    endpoint.getPath(), SSTI_RESULT_MARKER, probe.engineFamily()),
+                            Severity.HIGH,
+                            getId(),
+                            endpoint.getMethod() + " " + endpoint.getPath(),
+                            "Never pass untrusted input into a template engine. " +
+                            "Disable expression evaluation for user-controlled strings, " +
+                            "or render with a sandboxed/logic-less template engine. " +
+                            "Treat third-party API data as untrusted input."
+                    );
+                    finding.setEvidence("Payload: " + probe.payload() +
+                            "\nEngine family: " + probe.engineFamily() +
+                            "\nEvaluated marker found: " + SSTI_RESULT_MARKER);
+                    findings.add(finding);
+                    return findings;
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing SSTI on {}: {}", endpoint, e.getMessage());
+            }
+        }
+
+        return findings;
+    }
+
+    /**
+     * True when the response contains the evaluated marker and the baseline did not.
+     * A pure echo of the expression/payload (without {@code 1787569}) does not match.
+     * A response may contain both the expression and the evaluated result — that still counts.
+     */
+    private boolean isSstiEvaluation(String responseBody, String baselineBody) {
+        if (responseBody == null || !responseBody.contains(SSTI_RESULT_MARKER)) {
+            return false;
+        }
+        return baselineBody == null || !baselineBody.contains(SSTI_RESULT_MARKER);
+    }
+
+    private HttpResponse sendIntegrationPayload(EndpointInfo endpoint, HttpClient httpClient,
+                                                String method, String payload) throws IOException {
+        if (method.equals("GET")) {
+            String testUrl = endpoint.getFullUrl() + "?data=" + urlEncode(payload)
+                    + "&query=" + urlEncode(payload);
+            return httpClient.getWithStatus(testUrl, Map.of());
+        }
+        String body = String.format(
+                "{\"data\":\"%s\",\"value\":\"%s\",\"query\":\"%s\"}",
+                escapeJson(payload), escapeJson(payload), escapeJson(payload));
+        return switch (method) {
+            case "POST"  -> httpClient.postWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+            case "PUT"   -> httpClient.putWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+            case "PATCH" -> httpClient.patchWithStatus(endpoint.getFullUrl(), Map.of(), "application/json", body);
+            default      -> null;
+        };
+    }
+
     private List<Finding> testOpenRedirect(EndpointInfo endpoint, HttpClient httpClient) {
         List<Finding> findings = new ArrayList<>();
 
         List<String> redirectParams = List.of("redirect", "return", "returnUrl", "return_url",
                 "next", "continue", "url", "goto", "back");
         String maliciousUrl = "https://evil-attacker.example.com/phishing";
+        String maliciousHost = "evil-attacker.example.com";
 
         if (!endpoint.getMethod().equalsIgnoreCase("GET")) {
             return findings;
@@ -198,11 +288,13 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
                     + param + "=" + urlEncode(maliciousUrl);
 
             try {
-                HttpResponse response = httpClient.getWithStatus(testUrl, Map.of());
+                // Must not follow redirects: the default client consumes the 302 and only
+                // returns the final response, so isRedirect() would never see the open redirect.
+                HttpResponse response = httpClient.getWithStatusNoRedirect(testUrl, Map.of());
 
                 if (response != null && response.isRedirect()) {
                     String location = response.getHeader("Location");
-                    if (location != null && location.contains("evil-attacker.example.com")) {
+                    if (isExternalOpenRedirect(location, maliciousHost, endpoint.getFullUrl())) {
                         Finding finding = new Finding(
                                 UUID.randomUUID().toString(),
                                 "Open Redirect Vulnerability",
@@ -228,6 +320,39 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         }
 
         return findings;
+    }
+    /**
+     * True when {@code Location} sends the browser to the injected external host: an absolute URL,
+     * or a scheme-relative one ({@code //host}, {@code /\host}, {@code \\host}) that browsers
+     * resolve to another host. A path on the scanned host is not an open redirect.
+     */
+    private boolean isExternalOpenRedirect(String location, String maliciousHost, String endpointUrl) {
+        if (location == null || location.isBlank()) {
+            return false;
+        }
+        String normalized = location.trim();
+        if (normalized.length() > 2 && (normalized.charAt(0) == '/' || normalized.charAt(0) == '\\')
+                && (normalized.charAt(1) == '/' || normalized.charAt(1) == '\\')) {
+            normalized = "https://" + normalized.substring(2).replace('\\', '/');
+        }
+        try {
+            URI locationUri = URI.create(normalized);
+            if (!locationUri.isAbsolute() || locationUri.getHost() == null) {
+                return false;
+            }
+            String locationHost = locationUri.getHost().toLowerCase(Locale.ROOT);
+            if (!locationHost.equals(maliciousHost.toLowerCase(Locale.ROOT))) {
+                return false;
+            }
+            URI endpointUri = URI.create(endpointUrl);
+            if (endpointUri.getHost() != null
+                    && endpointUri.getHost().equalsIgnoreCase(locationUri.getHost())) {
+                return false;
+            }
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
     }
 
     private List<Finding> checkTlsForExternalCalls(EndpointInfo endpoint, HttpClient httpClient) {
@@ -285,7 +410,8 @@ public class UnsafeConsumptionOfApisTestCase implements TestCase {
         return value.replace(":", "%3A").replace("/", "%2F").replace("?", "%3F")
                 .replace("=", "%3D").replace("&", "%26").replace(" ", "%20")
                 .replace("<", "%3C").replace(">", "%3E").replace("'", "%27")
-                .replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A");
+                .replace("\"", "%22").replace("\r", "%0D").replace("\n", "%0A")
+                .replace("#", "%23"); // otherwise "#{...}" payloads are cut off as a URL fragment
     }
 
     private String escapeJson(String value) {

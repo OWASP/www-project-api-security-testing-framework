@@ -80,6 +80,8 @@ public class HttpClient {
 
     // Lazily-built client for HTTP/2 cleartext (h2c) prior-knowledge requests — see postH2c().
     private volatile OkHttpClient h2cClient;
+    // Lazily-built client that does not follow redirects — see getWithStatusNoRedirect().
+    private volatile OkHttpClient noRedirectClient;
 
     // Lazily-built, per-keystore-path clients for mTLS testing — see getWithClientCert().
     private final Map<String, OkHttpClient> clientCertClients = new ConcurrentHashMap<>();
@@ -668,6 +670,37 @@ public class HttpClient {
      */
     public HttpResponse getWithStatus(String url, Map<String, String> headers) throws IOException {
         return executeRequestWithStatus(createRequest(url, "GET", headers, null, null));
+    }
+
+    /**
+     * Makes a GET request without following redirects, returning the 3xx response as-is.
+     * Used by open-redirect detection, which must inspect the {@code Location} header on the
+     * intermediate redirect rather than the final followed response.
+     *
+     * @param url The target URL
+     * @param headers Additional headers to include
+     * @return The full HTTP response (including 3xx status and Location when present)
+     * @throws IOException If the request fails
+     */
+    public HttpResponse getWithStatusNoRedirect(String url, Map<String, String> headers) throws IOException {
+        return executeRequestWithStatus(createRequest(url, "GET", headers, null, null), noRedirectClient());
+    }
+
+    private OkHttpClient noRedirectClient() {
+        OkHttpClient local = noRedirectClient;
+        if (local == null) {
+            synchronized (this) {
+                local = noRedirectClient;
+                if (local == null) {
+                    local = client.newBuilder()
+                            .followRedirects(false)
+                            .followSslRedirects(false)
+                            .build();
+                    noRedirectClient = local;
+                }
+            }
+        }
+        return local;
     }
 
     /**

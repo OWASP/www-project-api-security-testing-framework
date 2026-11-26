@@ -3,6 +3,7 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -32,10 +33,18 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
             "transfer", "withdraw", "deposit",
             "vote", "like", "review", "rate",
             "invite", "refer", "share",
-            "otp", "verify", "verification", "confirm"
+            "otp", "verify", "verification", "confirm",
+            // Credential flows. TESTING_GUIDELINES.md says API6 covers login and password reset,
+            // but none of these words were listed, so those endpoints were never exercised (#175).
+            "login", "signin", "sign-in", "sign_in", "password", "reset", "forgot"
     );
 
     private static final int FLOW_ABUSE_THRESHOLD = 10; // Requests before rate limiting expected
+    // Same body-level throttle phrases as UnrestrictedResourceConsumptionTestCase — docs promise
+    // these markers for login/reset flows, and some APIs signal rejection via a 200 body message.
+    private static final List<String> THROTTLE_BODY_MARKERS = List.of(
+            "quota exceeded", "rate limit exceeded", "too many requests", "throttled", "slow down"
+    );
 
     @Override
     public String getId() {
@@ -70,7 +79,7 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
     }
 
     private boolean isSensitiveBusinessFlow(EndpointInfo endpoint) {
-        String path = endpoint.getPath().toLowerCase();
+        String path = endpoint.getPath().toLowerCase(Locale.ROOT);
         return SENSITIVE_FLOW_PATTERNS.stream().anyMatch(path::contains);
     }
 
@@ -83,6 +92,7 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
 
         int successCount = 0;
         int rateLimitedCount = 0;
+        int rejectedInvalidCount = 0;
         String body = endpoint.getRequestBody() != null ? endpoint.getRequestBody() : "{}";
 
         for (int i = 0; i < FLOW_ABUSE_THRESHOLD; i++) {
@@ -91,12 +101,15 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
                         endpoint.getFullUrl(), Map.of(), "application/json", body);
 
                 if (response != null) {
-                    if (response.isRateLimited()) {
+                    if (isThrottleSignal(response)) {
                         rateLimitedCount++;
                         break;
-                    } else if (response.isSuccess() || response.getStatusCode() == 422) {
-                        // 422 Unprocessable Entity still counts — request reached the business layer
+                    } else if (response.isSuccess()) {
                         successCount++;
+                    } else if (isClientRejection(response.getStatusCode())) {
+                        // 4xx (other than 429/423) means the request never reached an accepted
+                        // business-flow outcome — not evidence the flow can be abused.
+                        rejectedInvalidCount++;
                     }
                 }
             } catch (Exception e) {
@@ -123,9 +136,71 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
             );
             finding.setEvidence(successCount + " automated requests succeeded without triggering protections");
             findings.add(finding);
+        } else if (rateLimitedCount == 0 && successCount + rejectedInvalidCount >= FLOW_ABUSE_THRESHOLD) {
+            // Rejected attempts with a real sample body can be failed guesses (wrong OTP, coupon,
+            // password) that are never throttled; with the {} placeholder they are only missing fields.
+            boolean realBodySupplied = endpoint.getRequestBody() != null
+                    && !endpoint.getRequestBody().isBlank() && !endpoint.getRequestBody().trim().equals("{}");
+            Finding finding;
+            if (successCount > 0 || realBodySupplied) {
+                finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Sensitive Business Flow Not Throttled (attempts rejected, never limited)",
+                        String.format("The sensitive business flow endpoint answered %d consecutive automated " +
+                                "requests without any throttling signal: %d were accepted and %d were rejected " +
+                                "with HTTP 4xx. If the rejections are failed guesses (for example a wrong OTP or " +
+                                "coupon code), an attacker can keep guessing without limit.",
+                                successCount + rejectedInvalidCount, successCount, rejectedInvalidCount),
+                        Severity.MEDIUM,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Throttle or lock out repeated attempts on sensitive flows, counting failed attempts, " +
+                        "not only successful ones."
+                );
+            } else {
+                finding = new Finding(
+                        UUID.randomUUID().toString(),
+                        "Sensitive Business Flow Rate Limiting Inconclusive (all attempts rejected as invalid)",
+                        String.format("The sensitive business flow endpoint rejected all %d automated attempts " +
+                                "with HTTP 4xx (other than 429/423). ASTF had no sample request body for this " +
+                                "endpoint and sent {}, so the rejections are most likely missing-field validation " +
+                                "errors, which say nothing about whether the flow can be abused. Provide a valid " +
+                                "sample body via the config endpoints requestBody field and re-scan.",
+                                rejectedInvalidCount),
+                        Severity.INFO,
+                        getId(),
+                        endpoint.getMethod() + " " + endpoint.getPath(),
+                        "Supply a realistic requestBody for this endpoint in the scan configuration so the " +
+                        "abuse/rate-limit check can exercise the accepted business path."
+                );
+            }
+            finding.setEvidence(successCount + " accepted (2xx), " + rejectedInvalidCount +
+                    " rejected (4xx), 0 throttled; request body: " + (realBodySupplied ? "configured sample" : "{} placeholder"));
+            findings.add(finding);
         }
 
         return findings;
+    }
+
+    private boolean isThrottleSignal(HttpResponse response) {
+        return response.isRateLimited()
+                || response.getStatusCode() == 423
+                || bodyIndicatesRateLimited(response.getBody());
+    }
+
+    /** 4xx other than throttling (429/423) and other than "path not served" (404/405/410). */
+    private boolean isClientRejection(int statusCode) {
+        return statusCode >= 400 && statusCode < 500
+                && statusCode != 429 && statusCode != 423
+                && statusCode != 404 && statusCode != 405 && statusCode != 410;
+    }
+
+    private boolean bodyIndicatesRateLimited(String body) {
+        if (body == null || body.isEmpty()) {
+            return false;
+        }
+        String lower = body.toLowerCase(Locale.ROOT);
+        return THROTTLE_BODY_MARKERS.stream().anyMatch(lower::contains);
     }
 
     private List<Finding> testMissingBotProtection(EndpointInfo endpoint, HttpClient httpClient) {
@@ -139,9 +214,9 @@ public class UnrestrictedAccessToSensitiveFlowsTestCase implements TestCase {
 
             if (response == null) return findings;
 
-            boolean hasCaptchaChallenge = response.getBody().toLowerCase().contains("captcha")
-                    || response.getBody().toLowerCase().contains("recaptcha")
-                    || response.getBody().toLowerCase().contains("challenge");
+            boolean hasCaptchaChallenge = response.getBody().toLowerCase(Locale.ROOT).contains("captcha")
+                    || response.getBody().toLowerCase(Locale.ROOT).contains("recaptcha")
+                    || response.getBody().toLowerCase(Locale.ROOT).contains("challenge");
             boolean hasRateLimitHeaders = response.hasHeader("X-RateLimit-Limit")
                     || response.hasHeader("X-Rate-Limit")
                     || response.hasHeader("RateLimit-Limit")

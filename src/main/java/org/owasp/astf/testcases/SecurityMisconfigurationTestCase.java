@@ -2,9 +2,14 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
@@ -27,13 +32,14 @@ import org.owasp.astf.core.result.Severity;
  */
 public class SecurityMisconfigurationTestCase implements TestCase {
     private static final Logger logger = LogManager.getLogger(SecurityMisconfigurationTestCase.class);
-
+    // X-XSS-Protection is intentionally omitted: OWASP Secure Headers / cheat sheets mark it
+    // deprecated (browser XSS auditor caused vulnerabilities). Presence of a non-zero value is
+    // reported separately below; absence is correct.
     private static final List<String> REQUIRED_SECURITY_HEADERS = List.of(
             "X-Content-Type-Options",
             "X-Frame-Options",
             "Strict-Transport-Security",
-            "Content-Security-Policy",
-            "X-XSS-Protection"
+            "Content-Security-Policy"
     );
 
     // Endpoints that are conventionally, intentionally public (e.g. container orchestration
@@ -77,6 +83,12 @@ public class SecurityMisconfigurationTestCase implements TestCase {
      * rather than once per endpoint.
      */
     private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
+    // Target-level debug probes run once per base URL per scan, not once per endpoint and not
+    // only when "/" is in the endpoint list (grey-box --endpoints-file --no-discovery often
+    // omits "/"). Keyed by HttpClient so a new scan starts fresh; ConcurrentHashMap.newKeySet
+    // is safe under the scanner's concurrent virtual threads.
+    private final Map<HttpClient, Set<String>> probedDebugBaseUrls =
+            Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     public String getId() {
@@ -134,16 +146,110 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                         "Add the following security headers to all API responses: " +
                         "X-Content-Type-Options: nosniff, X-Frame-Options: DENY, " +
                         "Strict-Transport-Security: max-age=31536000; includeSubDomains, " +
-                        "Content-Security-Policy: default-src 'self'."
+                        "Content-Security-Policy: default-src 'self'. " +
+                        "Do not send X-XSS-Protection (deprecated); omit it or set it to 0."
                 );
                 finding.setEvidence("Missing headers: " + String.join(", ", missingHeaders));
                 findings.add(finding);
             }
+
+            findings.addAll(checkDeprecatedXssProtection(endpoint, response));
+            findings.addAll(checkAuthenticatedCacheControl(endpoint, httpClient, response));
         } catch (Exception e) {
             logger.debug("Error testing security headers on {}: {}", endpoint, e.getMessage());
         }
 
         return findings;
+    }
+
+    private List<Finding> checkDeprecatedXssProtection(EndpointInfo endpoint, HttpResponse response) {
+        List<Finding> findings = new ArrayList<>();
+        String xss = response.getHeader("X-XSS-Protection");
+        if (xss == null) {
+            return findings;
+        }
+        String trimmed = xss.trim();
+        if (trimmed.equals("0")) {
+            return findings;
+        }
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Deprecated X-XSS-Protection Header Enabled",
+                "The response sends X-XSS-Protection: " + xss + ". This header is deprecated: " +
+                "browser XSS auditors that honoured it introduced vulnerabilities, and modern " +
+                "browsers ignore or have removed the feature. OWASP recommends omitting the " +
+                "header or setting it to 0.",
+                Severity.LOW,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Remove the X-XSS-Protection header, or set it to 0. Prefer Content-Security-Policy " +
+                "for XSS mitigation."
+        );
+        finding.setEvidence("X-XSS-Protection: " + xss);
+        findings.add(finding);
+        return findings;
+    }
+
+    private List<Finding> checkAuthenticatedCacheControl(EndpointInfo endpoint, HttpClient httpClient,
+                                                          HttpResponse response) {
+        List<Finding> findings = new ArrayList<>();
+        if (!isAuthenticatedResponse(endpoint, httpClient, response)) {
+            return findings;
+        }
+        if (cacheControlHasNoStore(response)) {
+            return findings;
+        }
+        String cacheControl = response.getHeader("Cache-Control");
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Authenticated Response Missing Cache-Control: no-store",
+                "An authenticated or session-bearing response does not include Cache-Control: " +
+                "no-store" + (cacheControl != null ? " (got: " + cacheControl + ")" : "") +
+                ". Cached copies of authenticated API responses can leak sensitive data via " +
+                "shared caches or the browser back/forward cache. no-cache alone is not sufficient.",
+                Severity.LOW,
+                getId(),
+                endpoint.getMethod() + " " + endpoint.getPath(),
+                "Send Cache-Control: no-store (optionally with private) on authenticated responses."
+        );
+        finding.setEvidence(cacheControl != null
+                ? "Cache-Control: " + cacheControl
+                : "Cache-Control header absent");
+        findings.add(finding);
+        return findings;
+    }
+
+    private boolean isAuthenticatedResponse(EndpointInfo endpoint, HttpClient httpClient,
+                                            HttpResponse response) {
+        if (carriesSetCookie(response)) {
+            return true;
+        }
+        String token = httpClient.getConfiguredBearerToken();
+        boolean credentialsConfigured = token != null && !token.isEmpty();
+        if (!credentialsConfigured || !response.isSuccess() || cacheControlHasNoStore(response)) {
+            return false;
+        }
+        // A 2xx that carried the token is only "authenticated" if the same URL is refused without
+        // it; otherwise public endpoints (health, docs, catalogues) would all be flagged.
+        try {
+            HttpResponse anonymous = httpClient.getWithStatusNoAuth(endpoint.getFullUrl());
+            return anonymous != null && (anonymous.getStatusCode() == 401 || anonymous.getStatusCode() == 403);
+        } catch (IOException e) {
+            logger.debug("Anonymous control request failed for {}: {}", endpoint, e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean carriesSetCookie(HttpResponse response) {
+        return response.hasHeader("Set-Cookie");
+    }
+
+    private boolean cacheControlHasNoStore(HttpResponse response) {
+        String cacheControl = response.getHeader("Cache-Control");
+        if (cacheControl == null) {
+            return false;
+        }
+        return cacheControl.toLowerCase(Locale.ROOT).contains("no-store");
     }
 
     private List<Finding> testCorsMisconfiguration(EndpointInfo endpoint, HttpClient httpClient) {
@@ -204,10 +310,11 @@ public class SecurityMisconfigurationTestCase implements TestCase {
 
         if (baseUrl == null || baseUrl.isEmpty()) return findings;
 
-        // Only run debug endpoint discovery once per base URL (check by path being root)
-        if (!endpoint.getPath().equals("/") && !endpoint.getPath().isEmpty()) return findings;
-
         String cleanBase = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        Set<String> probed = probedDebugBaseUrls.computeIfAbsent(httpClient, k -> ConcurrentHashMap.newKeySet());
+        if (!probed.add(cleanBase)) {
+            return findings;
+        }
 
         for (String debugPath : DEBUG_ENDPOINTS) {
             String testUrl = cleanBase + debugPath;

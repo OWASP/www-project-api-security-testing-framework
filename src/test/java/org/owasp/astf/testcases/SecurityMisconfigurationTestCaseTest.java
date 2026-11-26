@@ -12,11 +12,17 @@ import org.owasp.astf.core.result.Finding;
 import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Security Misconfiguration Test Case Tests")
@@ -275,5 +281,211 @@ class SecurityMisconfigurationTestCaseTest {
                 .thenThrow(new IOException("Network error"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+    }
+    @Test
+    @DisplayName("Should probe debug endpoints when the endpoint list has no root '/' path")
+    void testDebugProbesRunWithoutRootEndpoint() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/users", "GET");
+        endpoint.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/actuator/env")) {
+                        return new HttpResponse(200,
+                                "{\"activeProfiles\":[\"prod\"],\"propertySources\":[]}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f ->
+                        f.getTitle().contains("Debug") && f.getEndpoint() != null
+                                && f.getEndpoint().contains("/actuator/env")),
+                "Grey-box lists without '/' must still trigger target-level debug probes");
+        verify(httpClient, atLeastOnce()).getWithStatus(contains("/actuator/env"), anyMap());
+    }
+
+    @Test
+    @DisplayName("Should probe debug endpoints only once across multiple endpoints of the same base URL")
+    void testDebugProbesRunOncePerBaseUrl() throws IOException {
+        EndpointInfo first = new EndpointInfo("/api/users", "GET");
+        first.setBaseUrl("https://example.com");
+        EndpointInfo second = new EndpointInfo("/api/orders", "GET");
+        second.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/actuator")) {
+                        return new HttpResponse(200, "{\"status\":\"UP\"}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
+        List<Finding> firstFindings = testCase.execute(first, httpClient);
+        clearInvocations(httpClient);
+        List<Finding> secondFindings = testCase.execute(second, httpClient);
+
+        assertTrue(firstFindings.stream().anyMatch(f -> f.getTitle().contains("Debug")),
+                "First endpoint for a base URL must run debug probes");
+        assertTrue(secondFindings.stream().noneMatch(f -> f.getTitle().contains("Debug")),
+                "Second endpoint of the same base URL must not repeat debug findings");
+        verify(httpClient, never()).getWithStatus(contains("/actuator"), anyMap());
+    }
+
+    @Test
+    @DisplayName("Should still probe debug endpoints when '/' is present in the endpoint list")
+    void testDebugProbesStillRunWhenRootPresent() throws IOException {
+        EndpointInfo root = new EndpointInfo("/", "GET");
+        root.setBaseUrl("https://example.com");
+
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenAnswer(inv -> {
+                    String url = inv.getArgument(0);
+                    if (url.contains("/debug")) {
+                        return new HttpResponse(200, "{\"vars\":{}}", Map.of());
+                    }
+                    return new HttpResponse(404, "{}", Map.of());
+                });
+
+        List<Finding> findings = testCase.execute(root, httpClient);
+
+        assertTrue(findings.stream().anyMatch(f -> f.getTitle().contains("Debug")),
+                "Root endpoint '/' must still trigger debug probes exactly once");
+    }
+
+    @Test
+    @DisplayName("Absent X-XSS-Protection must not produce a finding")
+    void testAbsentXssProtectionNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f ->
+                        f.getTitle().contains("X-XSS-Protection")
+                                || (f.getTitle().contains("Missing Security")
+                                && f.getEvidence() != null
+                                && f.getEvidence().contains("X-XSS-Protection"))),
+                "Absence of deprecated X-XSS-Protection must not be reported");
+    }
+
+    @Test
+    @DisplayName("X-XSS-Protection: 1; mode=block must produce a LOW finding")
+    void testEnabledXssProtectionReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("X-XSS-Protection", List.of("1; mode=block"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding xss = findings.stream()
+                .filter(f -> f.getTitle().contains("X-XSS-Protection"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected a finding for enabled X-XSS-Protection"));
+        assertEquals(Severity.LOW, xss.getSeverity());
+    }
+
+    @Test
+    @DisplayName("X-XSS-Protection: 0 must not produce a finding")
+    void testXssProtectionZeroNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("X-XSS-Protection", List.of("0"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("X-XSS-Protection")),
+                "X-XSS-Protection: 0 is the recommended disable value and must not be flagged");
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx without Cache-Control no-store must produce a LOW finding")
+    void testAuthenticatedMissingNoStoreReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", requiredSecurityHeaders()));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding cache = findings.stream()
+                .filter(f -> f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("Expected missing no-store finding"));
+        assertEquals(Severity.LOW, cache.getSeverity());
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx with Cache-Control: no-store must not produce a cache finding")
+    void testAuthenticatedWithNoStoreNotReported() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("Cache-Control", List.of("private, no-store"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", headers));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f ->
+                        f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store")),
+                "Cache-Control containing no-store must satisfy the authenticated-response check");
+    }
+
+    @Test
+    @DisplayName("Authenticated 2xx with only Cache-Control: no-cache must produce a LOW finding")
+    void testAuthenticatedNoCacheOnlyReportedAsLow() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        Map<String, List<String>> headers = requiredSecurityHeaders();
+        headers.put("Cache-Control", List.of("no-cache"));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"secret\":1}", headers));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(401, "{}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        Finding cache = findings.stream()
+                .filter(f -> f.getTitle().contains("Cache-Control") || f.getTitle().contains("no-store"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no-cache alone must not satisfy the check"));
+        assertEquals(Severity.LOW, cache.getSeverity());
+    }
+
+    @Test
+    @DisplayName("Public 2xx (also served without credentials) must not produce a cache finding")
+    void testPublicEndpointWithTokenNotReportedForNoStore() throws IOException {
+        EndpointInfo endpoint = new EndpointInfo("/api/health", "GET");
+        when(httpClient.getConfiguredBearerToken()).thenReturn("test-token");
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"ok\"}", requiredSecurityHeaders()));
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"ok\"}", Map.of()));
+
+        List<Finding> findings = testCase.execute(endpoint, httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().contains("no-store")),
+                "An endpoint that answers without credentials is not an authenticated response");
+    }
+
+    private static Map<String, List<String>> requiredSecurityHeaders() {
+        Map<String, List<String>> headers = new HashMap<>();
+        headers.put("X-Content-Type-Options", List.of("nosniff"));
+        headers.put("X-Frame-Options", List.of("DENY"));
+        headers.put("Strict-Transport-Security", List.of("max-age=31536000"));
+        headers.put("Content-Security-Policy", List.of("default-src 'self'"));
+        return headers;
     }
 }
