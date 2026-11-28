@@ -9,6 +9,7 @@ import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
@@ -16,6 +17,9 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Broken Function Level Authorization Test Case Tests")
@@ -257,5 +261,115 @@ class BrokenFunctionLevelAuthorizationTestCaseTest {
                 .thenThrow(new IOException("Connection refused"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+    }
+
+    private static final String BASE = "https://example.com";
+
+    /**
+     * Anonymous target: '/admin' answers 403, the given bypass URL answers 200 with admin JSON,
+     * '/' answers 200 with a small status body, everything else 404.
+     */
+    private void protectedAdminWithBypass(String bypassUrl) throws IOException {
+        when(httpClient.getWithStatusNoAuth(anyString())).thenAnswer(inv -> {
+            String url = inv.getArgument(0);
+            if (url.equals(BASE + "/admin")) {
+                return new HttpResponse(403, "{\"error\":\"forbidden\"}", Map.of());
+            }
+            if (url.equals(bypassUrl)) {
+                return new HttpResponse(200, "{\"users\":[{\"id\":1,\"role\":\"admin\"}]}", Map.of());
+            }
+            if (url.equals(BASE + "/")) {
+                return new HttpResponse(200, "{\"status\":\"ok\"}", Map.of());
+            }
+            return new HttpResponse(404, "{\"error\":\"not found\"}", Map.of());
+        });
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+    }
+
+    private static EndpointInfo usersEndpoint() {
+        EndpointInfo endpoint = new EndpointInfo("/api/items", "POST");
+        endpoint.setBaseUrl(BASE);
+        return endpoint;
+    }
+
+    private static List<Finding> bypassFindings(List<Finding> findings) {
+        return findings.stream()
+                .filter(f -> f.getTitle().equals("Administrative Endpoint Access Control Bypass"))
+                .toList();
+    }
+
+    @Test
+    @DisplayName("Protected admin path served under ';/' without credentials is a CRITICAL bypass")
+    void testSemicolonPathBypass() throws IOException {
+        protectedAdminWithBypass(BASE + "/admin;/");
+
+        List<Finding> findings = bypassFindings(testCase.execute(usersEndpoint(), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals(Severity.CRITICAL, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getRequestDetails().contains("/admin;/"));
+        assertTrue(findings.get(0).getDescription().contains("HTTP 403"));
+    }
+
+    @Test
+    @DisplayName("X-Original-URL that returns a different body from '/' is a bypass")
+    void testRewriteHeaderBypass() throws IOException {
+        protectedAdminWithBypass("none");
+        when(httpClient.getWithStatusNoAuth(anyString(), anyMap())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            if ("/admin".equals(headers.get("X-Original-URL"))) {
+                return new HttpResponse(200, "{\"users\":[{\"id\":1,\"role\":\"admin\"}]}", Map.of());
+            }
+            return new HttpResponse(200, "{\"status\":\"ok\"}", Map.of());
+        });
+
+        List<Finding> findings = bypassFindings(testCase.execute(usersEndpoint(), httpClient));
+
+        assertEquals(1, findings.size());
+        assertTrue(findings.get(0).getRequestDetails().contains("X-Original-URL: /admin"));
+    }
+
+    @Test
+    @DisplayName("Rewrite header that is ignored (same body as '/') is not reported")
+    void testIgnoredRewriteHeaderIsQuiet() throws IOException {
+        protectedAdminWithBypass("none");
+        when(httpClient.getWithStatusNoAuth(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(200, "{\"status\":\"ok\"}", Map.of()));
+
+        assertTrue(bypassFindings(testCase.execute(usersEndpoint(), httpClient)).isEmpty());
+    }
+
+    @Test
+    @DisplayName("No bypass variants are sent when the admin path does not exist")
+    void testNoBypassWhenAdminPathMissing() throws IOException {
+        when(httpClient.getWithStatusNoAuth(anyString()))
+                .thenReturn(new HttpResponse(404, "{\"error\":\"not found\"}", Map.of()));
+        when(httpClient.getWithStatus(anyString(), anyMap()))
+                .thenReturn(new HttpResponse(404, "{}", Map.of()));
+
+        assertTrue(bypassFindings(testCase.execute(usersEndpoint(), httpClient)).isEmpty());
+        verify(httpClient, never()).getWithStatusNoAuth(BASE + "/admin;/");
+        verify(httpClient, never()).getWithStatusNoAuth(anyString(), anyMap());
+    }
+
+    @Test
+    @DisplayName("Bypass variants for an admin path are sent once per scan, not once per endpoint")
+    void testBypassVariantsSentOncePerScan() throws IOException {
+        protectedAdminWithBypass("none");
+        EndpointInfo other = new EndpointInfo("/api/orders", "POST");
+        other.setBaseUrl(BASE);
+
+        testCase.execute(usersEndpoint(), httpClient);
+        testCase.execute(other, httpClient);
+
+        verify(httpClient, times(1)).getWithStatusNoAuth(BASE + "/admin;/");
+    }
+
+    @Test
+    @DisplayName("Path variants survive client-side normalisation")
+    void testPathBypassVariants() {
+        assertEquals(List.of("//admin", "/admin/", "/admin;/", "/admin..;/", "/%61dmin", "/ADMIN", "/admin%20"),
+                BrokenFunctionLevelAuthorizationTestCase.pathBypassVariants("/admin"));
     }
 }
