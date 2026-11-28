@@ -109,10 +109,11 @@ Three distinct techniques, in increasing order of how convincing the evidence is
 
 ### BFLA (`ASTF-API5-2023`)
 
-Two complementary techniques:
+Three complementary techniques:
 
 1. **Root-relative admin path probing** — tries generic admin-shaped paths (`/admin`, `/internal`, `/manage`, `/console`, ...) appended to the base URL, and separately tries escalating the HTTP method (GET succeeds → does PUT/DELETE/PATCH also succeed?) on the same endpoint.
 2. **Privilege-tier path substitution** — takes an already-known, specific endpoint whose path contains a low-privilege segment (`user`, `customer`, `member`, `public`) and swaps just that segment for a high-privilege one (`admin`, `staff`, `internal`, `management`, `superuser`), replaying the identical request with the identical (non-elevated) token. This exists specifically because the most common real-world BFLA pattern is a "sibling" endpoint that looks harmless by naming convention alone — `DELETE /api/v2/user/videos/{id}` denying you while `DELETE /api/v2/admin/videos/{id}` silently succeeds with the same token is a real, live-confirmed pattern this technique catches.
+3. **Access control bypass on protected admin paths** — when an admin path answers `401`/`403` without credentials, the same anonymous `GET` is sent through spellings a gateway rule matching the literal path may miss (`//admin`, `/admin/`, `/admin;/`, `/admin..;/`, `/%61dmin`, `/ADMIN`, `/admin%20`) and to `/` with `X-Original-URL` / `X-Rewrite-URL` naming the path. A `2xx` API response that is not the target's unknown-path answer (and, for the headers, differs from a plain `GET /`) is CRITICAL "Administrative Endpoint Access Control Bypass". Each admin path is tried once per scan.
 
 ### BOPLA / Mass Assignment / Excessive Data Exposure (`ASTF-API3-2023`)
 
@@ -225,11 +226,11 @@ Each `Finding.remediation` field already contains specific guidance for the exac
 | API1 — BOLA | Enforce object-level ownership checks in the data-access layer, not just authentication. Don't rely on ID unpredictability (UUIDs) as the only control. |
 | API2 — Broken Authentication | Reject `alg: none`; validate JWT signatures against an explicit algorithm allowlist; never resolve signing keys from client-controlled `kid`/`jku` values without strict validation; implement account lockout/rate limiting on login. |
 | API3 — BOPLA | Use explicit response DTOs/serializers rather than returning ORM entities directly; validate and allowlist which fields a client can set on write operations. |
-| API4 — Unrestricted Resource Consumption | Rate-limit at the gateway or application layer; return 429 with `Retry-After`; cap pagination/page-size parameters. |
+| API4 — Unrestricted Resource Consumption | Rate-limit at the gateway or application layer; return 429 with `Retry-After`; key limits on the identity or the peer address, never on a client-supplied `X-Forwarded-For`; cap pagination/page-size parameters. |
 | API5 — BFLA | Enforce role checks in the resolver/controller layer for *every* endpoint independently — never let a path's naming convention (`/admin/...`) be the only thing distinguishing its authorization requirements from a sibling path. |
 | API6 — Unrestricted Access to Sensitive Flows | Apply stricter rate limiting and (where appropriate) CAPTCHA/bot detection specifically on login, OTP, password-reset, and payment flows. |
 | API7 — SSRF | Validate and allowlist destination hosts before any server-side outbound request; block link-local/metadata IP ranges (`169.254.169.254`, etc.) at the network layer as defense in depth. |
-| API8 — Security Misconfiguration | Add `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`, and `Content-Security-Policy`; omit `X-XSS-Protection` or set it to `0` (deprecated); send `Cache-Control: no-store` on authenticated responses; return generic error messages to clients, log full detail server-side only; disable framework debug/development modes in production. |
+| API8 — Security Misconfiguration | Add `X-Content-Type-Options`, `X-Frame-Options`, `Strict-Transport-Security`, and `Content-Security-Policy`; omit `X-XSS-Protection` or set it to `0` (deprecated); send `Cache-Control: no-store` on authenticated responses; match CORS origins against an exact list and never allow `null`; return generic error messages to clients, log full detail server-side only; disable framework debug/development modes in production. |
 | API9 — Improper Inventory Management | Maintain an accurate, current API inventory; properly decommission deprecated versions and non-production environments rather than leaving them publicly reachable. |
 | API10 — Unsafe Consumption of APIs | Treat third-party/webhook input with the same validation rigor as direct user input; validate redirect targets against an allowlist. |
 | GraphQL | Disable introspection in production; enforce query depth/complexity limits; validate resolver arguments before use in any downstream query/command; use AST-based (not string-matching) access control. |
