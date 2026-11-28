@@ -296,12 +296,121 @@ public class SecurityMisconfigurationTestCase implements TestCase {
                         "Validate the Origin header against an allowlist of trusted origins. " +
                         "Never reflect arbitrary origins. Do not allow credentials with permissive CORS."
                 ));
+            } else {
+                findings.addAll(testCorsOriginBypasses(endpoint, httpClient));
             }
         } catch (Exception e) {
             logger.debug("Error testing CORS on {}: {}", endpoint, e.getMessage());
         }
 
         return findings;
+    }
+
+    /**
+     * Runs when the API does not reflect an arbitrary origin, so the policy is some kind of
+     * allowlist. Tries the origins that common allowlist mistakes let through: the {@code null}
+     * origin (sandboxed iframes, {@code file:} pages and some redirects send it), the target host
+     * used as a prefix of an attacker domain (a {@code startsWith} check), and an attacker domain
+     * ending in the target's registrable domain (an {@code endsWith} check without a dot). Only an
+     * exact echo of the probed origin in {@code Access-Control-Allow-Origin} counts.
+     */
+    private List<Finding> testCorsOriginBypasses(EndpointInfo endpoint, HttpClient httpClient) {
+        List<Finding> findings = new ArrayList<>();
+        String host = corsTargetHost(endpoint);
+
+        HttpResponse nullResponse = sendCorsProbe(endpoint, httpClient, "null");
+        if (nullResponse != null && "null".equals(nullResponse.getHeader("Access-Control-Allow-Origin"))) {
+            boolean credentials = "true".equalsIgnoreCase(nullResponse.getHeader("Access-Control-Allow-Credentials"));
+            Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "CORS Policy Trusts the null Origin",
+                    "The API answers 'Origin: null' with 'Access-Control-Allow-Origin: null'" +
+                    (credentials ? " and allows credentials" : "") + ". Any page can send a null " +
+                    "origin from a sandboxed iframe, so this is equivalent to trusting every origin" +
+                    (credentials ? " with the user's cookies." : "."),
+                    credentials ? Severity.HIGH : Severity.LOW,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Remove 'null' from the allowed origins. Never allow credentials for the null origin."
+            );
+            finding.setRequestDetails("GET " + endpoint.getFullUrl() + "\nOrigin: null");
+            finding.setEvidence("Access-Control-Allow-Origin: null\nAccess-Control-Allow-Credentials: "
+                    + nullResponse.getHeader("Access-Control-Allow-Credentials"));
+            findings.add(finding);
+        }
+
+        if (host == null) {
+            return findings;
+        }
+        List<String> accepted = new ArrayList<>();
+        boolean anyCredentials = false;
+        for (String origin : corsLookAlikeOrigins(host)) {
+            HttpResponse response = sendCorsProbe(endpoint, httpClient, origin);
+            if (response != null && origin.equals(response.getHeader("Access-Control-Allow-Origin"))) {
+                accepted.add(origin);
+                anyCredentials |= "true".equalsIgnoreCase(response.getHeader("Access-Control-Allow-Credentials"));
+            }
+        }
+        if (!accepted.isEmpty()) {
+            Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "CORS Origin Allowlist Bypass",
+                    String.format("The API does not reflect arbitrary origins, but it allows %s, which " +
+                            "an attacker can register. The allowlist is matched by prefix or suffix " +
+                            "instead of by exact origin%s.", String.join(" and ", accepted),
+                            anyCredentials ? ", and credentials are allowed" : ""),
+                    anyCredentials ? Severity.HIGH : Severity.MEDIUM,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Compare the Origin header against a list of exact origins (scheme, host and port). " +
+                    "Do not use startsWith, endsWith, contains or unanchored regular expressions."
+            );
+            finding.setRequestDetails("GET " + endpoint.getFullUrl() + "\nOrigin: " + String.join(" | ", accepted));
+            finding.setEvidence("Allowed origins: " + String.join(", ", accepted)
+                    + "\nAccess-Control-Allow-Credentials: " + anyCredentials);
+            findings.add(finding);
+        }
+        return findings;
+    }
+
+    private HttpResponse sendCorsProbe(EndpointInfo endpoint, HttpClient httpClient, String origin) {
+        try {
+            return httpClient.getWithStatus(endpoint.getFullUrl(), Map.of(
+                    "Origin", origin,
+                    "Access-Control-Request-Method", "GET"
+            ));
+        } catch (Exception e) {
+            logger.debug("Error sending CORS probe with origin {} to {}: {}", origin, endpoint, e.getMessage());
+            return null;
+        }
+    }
+
+    /** The target's host name, or null when the endpoint has no absolute URL. */
+    static String corsTargetHost(EndpointInfo endpoint) {
+        try {
+            String host = java.net.URI.create(endpoint.getFullUrl()).getHost();
+            return host == null || host.isEmpty() ? null : host.toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * Look-alike origins for {@code host}: the host as a prefix of an attacker domain, and, when
+     * the host is a domain name with at least two labels, an attacker domain that ends in its last
+     * two labels. IP addresses and single-label hosts such as {@code localhost} only get the
+     * prefix origin, since nobody can register a look-alike of them.
+     */
+    static List<String> corsLookAlikeOrigins(String host) {
+        List<String> origins = new ArrayList<>();
+        origins.add("https://" + host + ".evil-attacker.com");
+        boolean ipAddress = host.matches("[0-9.]+") || host.contains(":");
+        String[] labels = host.split("\\.");
+        if (!ipAddress && labels.length >= 2) {
+            String registrable = labels[labels.length - 2] + "." + labels[labels.length - 1];
+            origins.add("https://evil" + registrable);
+        }
+        return origins;
     }
 
     private List<Finding> testDebugEndpoints(EndpointInfo endpoint, HttpClient httpClient) {
