@@ -3,8 +3,13 @@ package org.owasp.astf.testcases;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -57,6 +62,14 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
      * once per endpoint.
      */
     private final SoftNotFoundDetector softNotFoundDetector = new SoftNotFoundDetector();
+
+    /**
+     * Admin paths already put through {@link #testAccessControlBypass} in this scan. The admin
+     * probes run for every endpoint, so without this the bypass variants would be resent for each
+     * one. Keyed by HttpClient so a new scan starts fresh, like the debug probes in
+     * {@link SecurityMisconfigurationTestCase}.
+     */
+    private final Map<HttpClient, Set<String>> bypassAttempts = new WeakHashMap<>();
 
     @Override
     public String getId() {
@@ -209,12 +222,26 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
                 // Each response is compared with an unknown-path baseline fetched the same way
                 // (anonymous or with credentials), so a login wall's sign-in page is not
                 // mistaken for an admin endpoint.
+                AtomicReference<HttpResponse> anonymousResponse = new AtomicReference<>();
                 AnonymousFirstProbe.Result probe = AnonymousFirstProbe.probe(httpClient, testUrl,
-                        () -> httpClient.getWithStatusNoAuth(testUrl),
+                        () -> {
+                            HttpResponse r = httpClient.getWithStatusNoAuth(testUrl);
+                            anonymousResponse.set(r);
+                            return r;
+                        },
                         () -> httpClient.getWithStatus(testUrl, Map.of()),
                         r -> r.isSuccess() && isApiResponse(r)
                                 && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, r, true));
                 HttpResponse response = probe.response();
+
+                HttpResponse rejected = anonymousResponse.get();
+                if (rejected != null && (rejected.getStatusCode() == 401 || rejected.getStatusCode() == 403)
+                        && firstBypassAttempt(httpClient, cleanBase + adminPath)) {
+                    Finding bypass = testAccessControlBypass(cleanBase, adminPath, rejected, httpClient);
+                    if (bypass != null) {
+                        findings.add(bypass);
+                    }
+                }
 
                 if (response != null && response.isSuccess() && isApiResponse(response)
                         && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response,
@@ -258,6 +285,112 @@ public class BrokenFunctionLevelAuthorizationTestCase implements TestCase {
         }
 
         return findings;
+    }
+
+    /** @return true the first time {@code key} is seen for this scan's client */
+    private boolean firstBypassAttempt(HttpClient httpClient, String key) {
+        Set<String> seen;
+        synchronized (bypassAttempts) {
+            seen = bypassAttempts.computeIfAbsent(httpClient, c -> ConcurrentHashMap.newKeySet());
+        }
+        return seen.add(key);
+    }
+
+    /**
+     * Path spellings of {@code adminPath} that a gateway or proxy rule matching the literal path
+     * may not recognise while the backend still routes them to the same handler: a doubled
+     * leading slash, a trailing slash, the {@code ;} path parameter and {@code ..;} forms that
+     * Tomcat and Spring strip, a percent-encoded first character, upper case and a trailing
+     * encoded space. Dot-segment forms such as {@code /./admin} and {@code /%2e/admin} are left
+     * out because the HTTP client normalises them back to {@code /admin} before sending.
+     */
+    static List<String> pathBypassVariants(String adminPath) {
+        String name = adminPath.substring(1);
+        List<String> variants = new ArrayList<>();
+        variants.add("/" + adminPath);
+        variants.add(adminPath + "/");
+        variants.add(adminPath + ";/");
+        variants.add(adminPath + "..;/");
+        variants.add(String.format("/%%%02X%s", (int) name.charAt(0), name.substring(1)));
+        variants.add(adminPath.toUpperCase(Locale.ROOT));
+        variants.add(adminPath + "%20");
+        return variants;
+    }
+
+    /**
+     * Runs when an admin path answered a request without credentials with 401 or 403, so the path
+     * exists and something protects it. Sends the same anonymous GET through path spellings the
+     * protecting rule may not match, and to {@code /} with {@code X-Original-URL} and
+     * {@code X-Rewrite-URL} naming the path (honoured by some IIS and Symfony front ends). A
+     * variant counts only if it is answered 2xx with an API response that is not the target's
+     * unknown-path answer, and for the header forms only if that response also differs from a
+     * plain anonymous request to {@code /}.
+     *
+     * @return a CRITICAL finding for the first variant that gets through, or null
+     */
+    private Finding testAccessControlBypass(String cleanBase, String adminPath, HttpResponse rejected,
+                                            HttpClient httpClient) {
+        for (String variant : pathBypassVariants(adminPath)) {
+            String url = cleanBase + variant;
+            try {
+                HttpResponse response = httpClient.getWithStatusNoAuth(url);
+                if (bypassAccepted(cleanBase, response, httpClient)) {
+                    return bypassFinding(adminPath, "GET " + url, rejected, response,
+                            "the path spelled as '" + variant + "'");
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing access control bypass {}: {}", url, e.getMessage());
+            }
+        }
+
+        String rootUrl = cleanBase + "/";
+        HttpResponse root = null;
+        try {
+            root = httpClient.getWithStatusNoAuth(rootUrl);
+        } catch (Exception e) {
+            logger.debug("Error fetching {} for the rewrite-header comparison: {}", rootUrl, e.getMessage());
+        }
+        for (String header : List.of("X-Original-URL", "X-Rewrite-URL")) {
+            try {
+                HttpResponse response = httpClient.getWithStatusNoAuth(rootUrl, Map.of(header, adminPath));
+                if (bypassAccepted(cleanBase, response, httpClient)
+                        && (root == null || !root.isSuccess() || !response.getBody().equals(root.getBody()))) {
+                    return bypassFinding(adminPath, "GET " + rootUrl + "\n" + header + ": " + adminPath,
+                            rejected, response, "a request to '/' with '" + header + ": " + adminPath + "'");
+                }
+            } catch (Exception e) {
+                logger.debug("Error testing {} bypass for {}: {}", header, adminPath, e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    private boolean bypassAccepted(String cleanBase, HttpResponse response, HttpClient httpClient) {
+        return response != null && response.isSuccess() && isApiResponse(response)
+                && !softNotFoundDetector.looksLikeUnknownPath(cleanBase, httpClient, response, true);
+    }
+
+    private Finding bypassFinding(String adminPath, String request, HttpResponse rejected, HttpResponse accepted,
+                                  String how) {
+        Finding finding = new Finding(
+                UUID.randomUUID().toString(),
+                "Administrative Endpoint Access Control Bypass",
+                String.format("The administrative endpoint '%s' answered HTTP %d to a request without " +
+                        "credentials, but HTTP %d to %s, also sent without credentials. The rule that " +
+                        "protects the endpoint matches the literal path, and the backend serves other " +
+                        "spellings of it.", adminPath, rejected.getStatusCode(), accepted.getStatusCode(), how),
+                Severity.CRITICAL,
+                getId(),
+                "GET " + adminPath,
+                "Enforce authorization in the application on the route that handles the request, not only " +
+                "in a gateway or proxy rule matching the raw path. Normalise paths the same way in every " +
+                "layer, reject ';' path parameters and encoded characters in protected paths, and ignore " +
+                "X-Original-URL / X-Rewrite-URL from clients."
+        );
+        finding.setRequestDetails(request + " (no credentials)");
+        finding.setResponseDetails("Literal path: HTTP " + rejected.getStatusCode() +
+                "\nBypass: HTTP " + accepted.getStatusCode() + "; body length: " + accepted.getBody().length());
+        return finding;
     }
 
     /**

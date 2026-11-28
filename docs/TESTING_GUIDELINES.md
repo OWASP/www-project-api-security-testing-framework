@@ -109,10 +109,11 @@ Three distinct techniques, in increasing order of how convincing the evidence is
 
 ### BFLA (`ASTF-API5-2023`)
 
-Two complementary techniques:
+Three complementary techniques:
 
 1. **Root-relative admin path probing** — tries generic admin-shaped paths (`/admin`, `/internal`, `/manage`, `/console`, ...) appended to the base URL, and separately tries escalating the HTTP method (GET succeeds → does PUT/DELETE/PATCH also succeed?) on the same endpoint.
 2. **Privilege-tier path substitution** — takes an already-known, specific endpoint whose path contains a low-privilege segment (`user`, `customer`, `member`, `public`) and swaps just that segment for a high-privilege one (`admin`, `staff`, `internal`, `management`, `superuser`), replaying the identical request with the identical (non-elevated) token. This exists specifically because the most common real-world BFLA pattern is a "sibling" endpoint that looks harmless by naming convention alone — `DELETE /api/v2/user/videos/{id}` denying you while `DELETE /api/v2/admin/videos/{id}` silently succeeds with the same token is a real, live-confirmed pattern this technique catches.
+3. **Access control bypass on protected admin paths** — when an admin path answers `401`/`403` without credentials, the same anonymous `GET` is sent through spellings a gateway rule matching the literal path may miss (`//admin`, `/admin/`, `/admin;/`, `/admin..;/`, `/%61dmin`, `/ADMIN`, `/admin%20`) and to `/` with `X-Original-URL` / `X-Rewrite-URL` naming the path. A `2xx` API response that is not the target's unknown-path answer (and, for the headers, differs from a plain `GET /`) is CRITICAL "Administrative Endpoint Access Control Bypass". Each admin path is tried once per scan.
 
 ### BOPLA / Mass Assignment / Excessive Data Exposure (`ASTF-API3-2023`)
 
