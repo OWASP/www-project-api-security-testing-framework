@@ -50,7 +50,7 @@ Several checks claimed to be unauthenticated or to use one identity while sendin
 - Mass-assignment probes send a complete body on `POST`, so on a register-style endpoint they create accounts named `astf-<random>`, possibly as administrators if the endpoint is vulnerable. Remove them after a scan.
 - Debug, actuator and API-documentation probes now run once per scan target even when `/` is not in the endpoint list, so grey-box scans send those extra requests. The `Cache-Control` check sends one extra request without credentials for each authenticated endpoint.
 - A sensitive flow whose attempts were all rejected is reported as INFO or MEDIUM instead of HIGH. Open redirects and template injection, which could never be reported before, can now appear.
-- The new bypass probes send extra requests: three more CORS probes per endpoint whose first origin is neither wildcarded nor reflected, up to nine more anonymous requests per admin path that answers 401 or 403 (once per scan), and seven more requests on an API4 endpoint that rate limited the burst. A scan against a rate-limited target can therefore take slightly longer.
+- The new bypass probes send extra requests: three more CORS probes per endpoint whose first origin is neither wildcarded nor reflected, roughly a dozen more anonymous requests per admin path that answers 401 or 403 (once per scan), and seven more requests on an API4 endpoint that rate limited the burst. A scan against a rate-limited target can therefore take slightly longer.
 
 ### Known limitations
 
