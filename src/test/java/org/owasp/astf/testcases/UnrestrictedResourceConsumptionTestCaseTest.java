@@ -9,6 +9,7 @@ import org.owasp.astf.core.EndpointInfo;
 import org.owasp.astf.core.http.HttpClient;
 import org.owasp.astf.core.http.HttpResponse;
 import org.owasp.astf.core.result.Finding;
+import org.owasp.astf.core.result.Severity;
 
 import java.io.IOException;
 import java.util.List;
@@ -16,6 +17,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Unrestricted Resource Consumption Test Case Tests")
@@ -190,5 +192,79 @@ class UnrestrictedResourceConsumptionTestCaseTest {
                 .thenThrow(new IOException("Connection failed"));
 
         assertDoesNotThrow(() -> testCase.execute(endpoint, httpClient));
+    }
+
+    private static final String BYPASS_TITLE = "Rate Limiting Bypassed With Spoofed Client-IP Headers";
+
+    /**
+     * Limits plain requests from the 5th on. Requests with X-Forwarded-For are answered with
+     * {@code spoofedStatus}. {@code plainAfterSpoofed} is what plain requests get once any spoofed
+     * request was seen (lets a test reset the window mid-probe).
+     */
+    private void limiter(int spoofedStatus, int plainAfterSpoofed) throws IOException {
+        final int[] plain = {0};
+        final boolean[] sawSpoofed = {false};
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            if (headers.containsKey("X-Forwarded-For")) {
+                sawSpoofed[0] = true;
+                return new HttpResponse(spoofedStatus, spoofedStatus == 429
+                        ? "{\"error\":\"Too Many Requests\"}" : "{\"users\":[]}", Map.of());
+            }
+            if (sawSpoofed[0]) {
+                return new HttpResponse(plainAfterSpoofed, plainAfterSpoofed == 429
+                        ? "{\"error\":\"Too Many Requests\"}" : "{\"users\":[]}", Map.of());
+            }
+            plain[0]++;
+            return plain[0] >= 5
+                    ? new HttpResponse(429, "{\"error\":\"Too Many Requests\"}", Map.of())
+                    : new HttpResponse(200, "{\"users\":[]}", Map.of());
+        });
+    }
+
+    @Test
+    @DisplayName("Limiter that trusts X-Forwarded-For is reported as bypassed")
+    void testRateLimitBypassedWithSpoofedIp() throws IOException {
+        limiter(200, 429);
+
+        List<Finding> findings = testCase.execute(new EndpointInfo("/api/users", "GET"), httpClient);
+
+        List<Finding> bypass = findings.stream().filter(f -> f.getTitle().equals(BYPASS_TITLE)).toList();
+        assertEquals(1, bypass.size());
+        assertEquals(Severity.MEDIUM, bypass.get(0).getSeverity());
+        assertTrue(bypass.get(0).getEvidence().contains("5/5"));
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().equals("Missing Rate Limiting")));
+    }
+
+    @Test
+    @DisplayName("Spoofed requests that are limited too are not reported")
+    void testSpoofedRequestsAlsoLimited() throws IOException {
+        limiter(429, 429);
+
+        List<Finding> findings = testCase.execute(new EndpointInfo("/api/users", "GET"), httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().equals(BYPASS_TITLE)));
+    }
+
+    @Test
+    @DisplayName("A window that resets during the spoofed requests is not taken for a bypass")
+    void testWindowResetIsNotABypass() throws IOException {
+        limiter(200, 200);
+
+        List<Finding> findings = testCase.execute(new EndpointInfo("/api/users", "GET"), httpClient);
+
+        assertTrue(findings.stream().noneMatch(f -> f.getTitle().equals(BYPASS_TITLE)));
+    }
+
+    @Test
+    @DisplayName("Spoofed-address requests carry every client-IP header with the same documentation address")
+    void testSpoofedRequestHeaders() throws IOException {
+        limiter(200, 429);
+
+        testCase.execute(new EndpointInfo("/api/users", "GET"), httpClient);
+
+        verify(httpClient).getWithStatus(anyString(), argThat(h ->
+                UnrestrictedResourceConsumptionTestCase.CLIENT_IP_HEADERS.stream()
+                        .allMatch(name -> "203.0.113.10".equals(h.get(name)))));
     }
 }

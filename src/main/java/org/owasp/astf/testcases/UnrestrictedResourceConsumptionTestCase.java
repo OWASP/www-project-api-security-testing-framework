@@ -2,6 +2,7 @@ package org.owasp.astf.testcases;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +37,14 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
     private static final List<String> FAILURE_BODY_MARKERS = List.of(
             "quota exceeded", "rate limit exceeded", "too many requests", "throttled", "slow down"
     );
+
+    // Headers that proxies and frameworks commonly read the client address from. A limiter that
+    // trusts any of them from the client can be reset by changing the value on each request.
+    static final List<String> CLIENT_IP_HEADERS = List.of(
+            "X-Forwarded-For", "X-Real-IP", "X-Client-IP", "True-Client-IP", "X-Originating-IP"
+    );
+    private static final int SPOOFED_IP_REQUESTS = 5;
+    private static final int SPOOFED_IP_SUCCESS_THRESHOLD = 4;
 
     @Override
     public String getId() {
@@ -121,7 +130,78 @@ public class UnrestrictedResourceConsumptionTestCase implements TestCase {
             findings.add(finding);
         }
 
+        if (rateLimitedCount > 0) {
+            Finding bypass = testRateLimitBypassViaClientIpHeaders(endpoint, fullUrl, httpClient);
+            if (bypass != null) {
+                findings.add(bypass);
+            }
+        }
+
         return findings;
+    }
+
+    /**
+     * Runs right after the burst above was rate limited. A limiter keyed on a client-IP header
+     * that the client controls is no limiter: each request can claim a new address. Sends a plain
+     * control request (it must still be limited, otherwise the window has already reset and
+     * nothing can be concluded), then {@link #SPOOFED_IP_REQUESTS} requests that each carry a
+     * different address from the TEST-NET-3 documentation range in every common client-IP header,
+     * then a second plain control. Reported only if both controls are still limited and at least
+     * {@link #SPOOFED_IP_SUCCESS_THRESHOLD} spoofed requests were accepted.
+     *
+     * @return a finding when the limit is bypassed, or null
+     */
+    Finding testRateLimitBypassViaClientIpHeaders(EndpointInfo endpoint, String fullUrl, HttpClient httpClient) {
+        try {
+            if (!isLimited(httpClient.getWithStatus(fullUrl, Map.of()))) {
+                return null;
+            }
+            int accepted = 0;
+            HttpResponse lastAccepted = null;
+            for (int i = 0; i < SPOOFED_IP_REQUESTS; i++) {
+                String ip = "203.0.113." + (10 + i);
+                Map<String, String> headers = new LinkedHashMap<>();
+                for (String header : CLIENT_IP_HEADERS) {
+                    headers.put(header, ip);
+                }
+                HttpResponse response = httpClient.getWithStatus(fullUrl, headers);
+                if (response != null && response.isSuccess() && !isLimited(response)) {
+                    accepted++;
+                    lastAccepted = response;
+                }
+            }
+            if (accepted < SPOOFED_IP_SUCCESS_THRESHOLD
+                    || !isLimited(httpClient.getWithStatus(fullUrl, Map.of()))) {
+                return null;
+            }
+            Finding finding = new Finding(
+                    UUID.randomUUID().toString(),
+                    "Rate Limiting Bypassed With Spoofed Client-IP Headers",
+                    String.format("The endpoint rate limited a burst of requests, and stayed limited for " +
+                            "requests without extra headers, but accepted %d of %d requests that each claimed " +
+                            "a different client address in %s. The limiter trusts headers the client sets, " +
+                            "so anyone can reset it on every request.",
+                            accepted, SPOOFED_IP_REQUESTS, String.join(", ", CLIENT_IP_HEADERS)),
+                    Severity.MEDIUM,
+                    getId(),
+                    endpoint.getMethod() + " " + endpoint.getPath(),
+                    "Key rate limits on the authenticated identity or on the connection's peer address. Only " +
+                    "read X-Forwarded-For and similar headers when the request came through a proxy you " +
+                    "control, and then only the entry that proxy added."
+            );
+            finding.setRequestDetails("GET " + fullUrl + "\n" + String.join(": 203.0.113.N\n", CLIENT_IP_HEADERS)
+                    + ": 203.0.113.N (N = 10.." + (10 + SPOOFED_IP_REQUESTS - 1) + ")");
+            finding.setEvidence("Plain requests before and after: rate limited\nSpoofed-address requests accepted: "
+                    + accepted + "/" + SPOOFED_IP_REQUESTS + "\nLast accepted: HTTP " + lastAccepted.getStatusCode());
+            return finding;
+        } catch (Exception e) {
+            logger.debug("Error testing rate-limit bypass on {}: {}", endpoint, e.getMessage());
+            return null;
+        }
+    }
+
+    private boolean isLimited(HttpResponse response) {
+        return response != null && (response.isRateLimited() || bodyIndicatesRateLimited(response.getBody()));
     }
 
     private boolean looksLikeJsonData(String body) {
