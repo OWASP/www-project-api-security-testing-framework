@@ -226,7 +226,7 @@ Each `Finding.remediation` field already contains specific guidance for the exac
 | API1 — BOLA | Enforce object-level ownership checks in the data-access layer, not just authentication. Don't rely on ID unpredictability (UUIDs) as the only control. |
 | API2 — Broken Authentication | Reject `alg: none`; validate JWT signatures against an explicit algorithm allowlist; never resolve signing keys from client-controlled `kid`/`jku` values without strict validation; implement account lockout/rate limiting on login. |
 | API3 — BOPLA | Use explicit response DTOs/serializers rather than returning ORM entities directly; validate and allowlist which fields a client can set on write operations. |
-| API4 — Unrestricted Resource Consumption | Rate-limit at the gateway or application layer; return 429 with `Retry-After`; cap pagination/page-size parameters. |
+| API4 — Unrestricted Resource Consumption | Rate-limit at the gateway or application layer; return 429 with `Retry-After`; key limits on the identity or the peer address, never on a client-supplied `X-Forwarded-For`; cap pagination/page-size parameters. |
 | API5 — BFLA | Enforce role checks in the resolver/controller layer for *every* endpoint independently — never let a path's naming convention (`/admin/...`) be the only thing distinguishing its authorization requirements from a sibling path. |
 | API6 — Unrestricted Access to Sensitive Flows | Apply stricter rate limiting and (where appropriate) CAPTCHA/bot detection specifically on login, OTP, password-reset, and payment flows. |
 | API7 — SSRF | Validate and allowlist destination hosts before any server-side outbound request; block link-local/metadata IP ranges (`169.254.169.254`, etc.) at the network layer as defense in depth. |
