@@ -517,4 +517,117 @@ class SecurityMisconfigurationTestCaseTest {
         headers.put("Content-Security-Policy", List.of("default-src 'self'"));
         return headers;
     }
+
+    /** Answers each CORS probe with Access-Control-Allow-Origin only for the given origins. */
+    private void allowOrigins(boolean credentials, String... allowed) throws IOException {
+        List<String> allowedList = List.of(allowed);
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            String origin = headers.get("Origin");
+            Map<String, List<String>> responseHeaders = new HashMap<>();
+            if (origin != null && allowedList.contains(origin)) {
+                responseHeaders.put("Access-Control-Allow-Origin", List.of(origin));
+                if (credentials) {
+                    responseHeaders.put("Access-Control-Allow-Credentials", List.of("true"));
+                }
+            }
+            return new HttpResponse(200, "{}", responseHeaders);
+        });
+    }
+
+    private static EndpointInfo apiEndpoint(String baseUrl) {
+        EndpointInfo endpoint = new EndpointInfo("/api/data", "GET");
+        endpoint.setBaseUrl(baseUrl);
+        return endpoint;
+    }
+
+    private static List<Finding> corsFindings(List<Finding> findings) {
+        return findings.stream().filter(f -> f.getTitle().contains("CORS")).toList();
+    }
+
+    @Test
+    @DisplayName("null origin allowed with credentials is HIGH")
+    void testNullOriginWithCredentials() throws IOException {
+        allowOrigins(true, "null");
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("CORS Policy Trusts the null Origin", findings.get(0).getTitle());
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("null origin allowed without credentials is LOW")
+    void testNullOriginWithoutCredentials() throws IOException {
+        allowOrigins(false, "null");
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals(Severity.LOW, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Target host used as a prefix of an attacker domain is an allowlist bypass")
+    void testPrefixOriginBypass() throws IOException {
+        allowOrigins(true, "https://api.example.com.evil-attacker.com");
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("CORS Origin Allowlist Bypass", findings.get(0).getTitle());
+        assertEquals(Severity.HIGH, findings.get(0).getSeverity());
+        assertTrue(findings.get(0).getEvidence().contains("https://api.example.com.evil-attacker.com"));
+    }
+
+    @Test
+    @DisplayName("Attacker domain ending in the target's domain is an allowlist bypass")
+    void testSuffixOriginBypass() throws IOException {
+        allowOrigins(false, "https://evilexample.com");
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("CORS Origin Allowlist Bypass", findings.get(0).getTitle());
+        assertEquals(Severity.MEDIUM, findings.get(0).getSeverity());
+    }
+
+    @Test
+    @DisplayName("Exact-match allowlist produces no CORS finding")
+    void testExactAllowlistIsQuiet() throws IOException {
+        allowOrigins(true, "https://app.example.com");
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertTrue(findings.isEmpty(), "An exact allowlist must not be reported: " + findings);
+    }
+
+    @Test
+    @DisplayName("Bypass probes are not sent when arbitrary origins are already reflected")
+    void testNoBypassProbesWhenOriginReflected() throws IOException {
+        when(httpClient.getWithStatus(anyString(), anyMap())).thenAnswer(inv -> {
+            Map<String, String> headers = inv.getArgument(1);
+            String origin = headers.get("Origin");
+            return new HttpResponse(200, "{}", origin == null ? Map.of()
+                    : Map.of("Access-Control-Allow-Origin", List.of(origin)));
+        });
+
+        List<Finding> findings = corsFindings(testCase.execute(apiEndpoint("https://api.example.com"), httpClient));
+
+        assertEquals(1, findings.size());
+        assertEquals("Overly Permissive CORS - Arbitrary Origin Reflected", findings.get(0).getTitle());
+        verify(httpClient, never()).getWithStatus(anyString(), argThat(h -> "null".equals(h.get("Origin"))));
+    }
+
+    @Test
+    @DisplayName("Look-alike origins skip the suffix form for IP addresses and single-label hosts")
+    void testLookAlikeOrigins() {
+        assertEquals(List.of("https://api.example.com.evil-attacker.com", "https://evilexample.com"),
+                SecurityMisconfigurationTestCase.corsLookAlikeOrigins("api.example.com"));
+        assertEquals(List.of("https://10.0.0.5.evil-attacker.com"),
+                SecurityMisconfigurationTestCase.corsLookAlikeOrigins("10.0.0.5"));
+        assertEquals(List.of("https://localhost.evil-attacker.com"),
+                SecurityMisconfigurationTestCase.corsLookAlikeOrigins("localhost"));
+    }
 }
